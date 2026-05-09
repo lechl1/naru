@@ -366,6 +366,29 @@ pub struct Layout<W: LayoutElement> {
     overview_progress: Option<OverviewProgress>,
     /// Configurable properties of the layout.
     options: Rc<Options>,
+    /// Ephemeral state for the alternating stacking move actions
+    /// (`MoveWindow{Left,Right,Up,Down}Stacked`). Lives only across consecutive same-direction
+    /// stacking moves on the same window — any other action clears it. Phase 4 will consume this
+    /// to flip behavior between "new column/row" and "overlap neighbor" on each repeat.
+    stacking_move_state: Option<StackingMoveState>,
+}
+
+/// Direction of a stacking move sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackingMoveDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// State threaded across consecutive same-direction stacking moves on the same window.
+/// `last_was_overlap` flips on each repeat to drive the new-column / overlap alternation.
+#[derive(Debug, Clone)]
+pub struct StackingMoveState {
+    pub window_id: u64,
+    pub direction: StackingMoveDirection,
+    pub last_was_overlap: bool,
 }
 
 #[derive(Debug)]
@@ -704,6 +727,7 @@ impl<W: LayoutElement> Layout<W> {
             overview_open: false,
             overview_progress: None,
             options: Rc::new(options),
+            stacking_move_state: None,
         }
     }
 
@@ -729,6 +753,7 @@ impl<W: LayoutElement> Layout<W> {
             overview_open: false,
             overview_progress: None,
             options: opts,
+            stacking_move_state: None,
         }
     }
 
@@ -2017,6 +2042,61 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         workspace.focus_window_in_column(index);
+    }
+
+    /// Cycles the active window within the active tile's window stack. No-op for tiles whose
+    /// stack has only one window (which is every tile until Phase 4 lands the move semantics).
+    pub fn focus_window_in_active_tile_next(&mut self) {
+        // Cycling focus is itself a non-stacking-move action: clear any in-flight sequence.
+        self.stacking_move_state = None;
+        let Some(workspace) = self.active_workspace_mut() else {
+            return;
+        };
+        if let Some(tile) = workspace.active_scrolling_tile_mut() {
+            tile.cycle_active_window(true);
+        }
+    }
+
+    pub fn focus_window_in_active_tile_prev(&mut self) {
+        self.stacking_move_state = None;
+        let Some(workspace) = self.active_workspace_mut() else {
+            return;
+        };
+        if let Some(tile) = workspace.active_scrolling_tile_mut() {
+            tile.cycle_active_window(false);
+        }
+    }
+
+    /// Clears the in-flight stacking move sequence. Called by `do_action` whenever the user
+    /// performs anything that isn't another `MoveWindow*Stacked` action (per E2 reset rule).
+    pub fn clear_stacking_move_state(&mut self) {
+        self.stacking_move_state = None;
+    }
+
+    // ----- Phase 4 stubs: alternating stacking move actions -------------------------------------
+    //
+    // These four actions are wired through the action enum and the default keybindings
+    // (Mod+Alt+Arrow) but their layout-mutation logic is intentionally not implemented in this
+    // commit. Implementing them correctly requires the careful index/borrow-checker work of
+    // popping the active window out of its source tile, cleaning up empty tiles/columns,
+    // creating-or-pushing-into the destination, and threading the alternation state — landing
+    // that safely is a focused follow-up. The stubs log a TODO so users binding the keys early
+    // get an obvious signal rather than silent no-ops.
+
+    pub fn move_window_left_stacked(&mut self) {
+        tracing::info!("MoveWindowLeftStacked: stub — Phase 4 implementation pending");
+    }
+
+    pub fn move_window_right_stacked(&mut self) {
+        tracing::info!("MoveWindowRightStacked: stub — Phase 4 implementation pending");
+    }
+
+    pub fn move_window_up_stacked(&mut self) {
+        tracing::info!("MoveWindowUpStacked: stub — Phase 4 implementation pending");
+    }
+
+    pub fn move_window_down_stacked(&mut self) {
+        tracing::info!("MoveWindowDownStacked: stub — Phase 4 implementation pending");
     }
 
     pub fn focus_down(&mut self) {

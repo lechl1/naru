@@ -418,6 +418,15 @@ binds {
     Mod+Ctrl+K     { move-window-up; }
     Mod+Ctrl+L     { move-column-right; }
 
+    // Stacking move actions: alternate between adding a new column/row and overlapping into the
+    // neighboring tile's window stack. Multi-window-tile first move pulls the active window into
+    // a new column/row; single-window-tile first move pushes the window onto the neighbor's
+    // stack. At the workspace edge, moves to the next workspace.
+    Mod+Alt+Left  { move-window-left-stacked; }
+    Mod+Alt+Right { move-window-right-stacked; }
+    Mod+Alt+Up    { move-window-up-stacked; }
+    Mod+Alt+Down  { move-window-down-stacked; }
+
     // Alternative commands that move across workspaces when reaching
     // the first or last window in a column.
     // Mod+J     { focus-window-or-workspace-down; }

@@ -1982,6 +1982,12 @@ impl<W: LayoutElement> Workspace<W> {
         &self.scrolling
     }
 
+    /// Mutable access to the currently focused scrolling-layer tile, if any. Floating tiles are
+    /// not yet considered for stacking ops.
+    pub fn active_scrolling_tile_mut(&mut self) -> Option<&mut Tile<W>> {
+        self.scrolling.active_tile_mut()
+    }
+
     #[cfg(test)]
     pub fn floating(&self) -> &FloatingSpace<W> {
         &self.floating

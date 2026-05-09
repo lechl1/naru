@@ -1029,6 +1029,36 @@ impl State {
                 // FIXME: granular
                 self.naru.queue_redraw_all();
             }
+            Action::MoveWindowLeftStacked => {
+                self.naru.layout.move_window_left_stacked();
+                self.maybe_warp_cursor_to_focus();
+                self.naru.queue_redraw_all();
+            }
+            Action::MoveWindowRightStacked => {
+                self.naru.layout.move_window_right_stacked();
+                self.maybe_warp_cursor_to_focus();
+                self.naru.queue_redraw_all();
+            }
+            Action::MoveWindowUpStacked => {
+                self.naru.layout.move_window_up_stacked();
+                self.maybe_warp_cursor_to_focus();
+                self.naru.queue_redraw_all();
+            }
+            Action::MoveWindowDownStacked => {
+                self.naru.layout.move_window_down_stacked();
+                self.maybe_warp_cursor_to_focus();
+                self.naru.queue_redraw_all();
+            }
+            Action::FocusWindowInTileNext => {
+                self.naru.layout.focus_window_in_active_tile_next();
+                self.maybe_warp_cursor_to_focus();
+                self.naru.queue_redraw_all();
+            }
+            Action::FocusWindowInTilePrev => {
+                self.naru.layout.focus_window_in_active_tile_prev();
+                self.maybe_warp_cursor_to_focus();
+                self.naru.queue_redraw_all();
+            }
             Action::ConsumeOrExpelWindowLeft => {
                 self.naru.layout.consume_or_expel_window_left(None);
                 self.maybe_warp_cursor_to_focus();

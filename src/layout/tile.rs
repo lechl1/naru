@@ -72,6 +72,48 @@ impl<W: LayoutElement> WindowStack<W> {
     pub fn windows_mut(&mut self) -> &mut [W] {
         &mut self.windows
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.windows.is_empty()
+    }
+
+    /// Pushes a window onto the stack and makes it the active (visible) window.
+    pub fn push_active(&mut self, window: W) {
+        self.windows.push(window);
+        self.active_idx = self.windows.len() - 1;
+    }
+
+    /// Removes and returns the currently active window. After this call the stack may be empty;
+    /// the caller is responsible for removing the containing tile in that case (see
+    /// `WindowStack::is_empty`). The Deref will panic if the active window is read while empty.
+    pub fn pop_active(&mut self) -> W {
+        let removed = self.windows.remove(self.active_idx);
+        if !self.windows.is_empty() && self.active_idx >= self.windows.len() {
+            self.active_idx = self.windows.len() - 1;
+        }
+        removed
+    }
+
+    /// Cycles the active window to the next (forward = true) or previous one in the stack.
+    /// No-op for stacks of length 0 or 1.
+    pub fn cycle_active(&mut self, forward: bool) {
+        let len = self.windows.len();
+        if len <= 1 {
+            return;
+        }
+        self.active_idx = if forward {
+            (self.active_idx + 1) % len
+        } else {
+            (self.active_idx + len - 1) % len
+        };
+    }
+
+    /// Sets the active window index. No-op if `idx` is out of bounds.
+    pub fn set_active(&mut self, idx: usize) {
+        if idx < self.windows.len() {
+            self.active_idx = idx;
+        }
+    }
 }
 
 impl<W: LayoutElement> std::ops::Deref for WindowStack<W> {
@@ -723,6 +765,43 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn window_mut(&mut self) -> &mut W {
         &mut self.window
+    }
+
+    /// Number of windows in this tile's stack. Always `>= 1` outside of move operations.
+    pub fn stack_len(&self) -> usize {
+        self.window.len()
+    }
+
+    /// Index of the currently active (visible) window within the stack.
+    pub fn active_window_idx(&self) -> usize {
+        self.window.active_idx()
+    }
+
+    /// All windows in this tile, in stack order.
+    pub fn stacked_windows(&self) -> &[W] {
+        self.window.windows()
+    }
+
+    /// Cycles the active window in this tile's stack. No-op for single-window tiles.
+    pub fn cycle_active_window(&mut self, forward: bool) {
+        self.window.cycle_active(forward);
+    }
+
+    /// Pushes a window onto this tile's stack and makes it the active window.
+    pub fn push_window(&mut self, window: W) {
+        self.window.push_active(window);
+    }
+
+    /// Removes and returns the currently active window. After this call the tile's stack may be
+    /// empty (see [`Tile::has_no_windows`]); in that case the caller must remove the tile from
+    /// its column.
+    pub fn pop_active_window(&mut self) -> W {
+        self.window.pop_active()
+    }
+
+    /// Whether this tile's window stack is empty (only possible transiently during a move).
+    pub fn has_no_windows(&self) -> bool {
+        self.window.is_empty()
     }
 
     pub fn sizing_mode(&self) -> SizingMode {

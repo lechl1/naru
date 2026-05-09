@@ -414,6 +414,26 @@ pub enum Action {
     MoveWindowDownOrToWorkspaceDown {},
     /// Move the focused window up in a column or to the workspace above.
     MoveWindowUpOrToWorkspaceUp {},
+    /// Move the focused window left with alternating new-column / overlap-into-neighbor
+    /// semantics. From a multi-window tile, the first move pulls the window into a new column to
+    /// the left. From a single-window tile, the first move pushes the window onto the left
+    /// neighbor's window stack (overlap). Subsequent same-direction moves alternate. At the
+    /// workspace edge, moves to the next workspace.
+    MoveWindowLeftStacked {},
+    /// Move the focused window right with alternating new-column / overlap-into-neighbor
+    /// semantics. See `MoveWindowLeftStacked`.
+    MoveWindowRightStacked {},
+    /// Move the focused window up with alternating new-row / overlap-into-neighbor semantics
+    /// within the column. See `MoveWindowLeftStacked` for the alternation rule. At the column
+    /// edge, moves to the next workspace.
+    MoveWindowUpStacked {},
+    /// Move the focused window down with alternating new-row / overlap-into-neighbor semantics
+    /// within the column. See `MoveWindowLeftStacked`.
+    MoveWindowDownStacked {},
+    /// Focus the next window within the active tile's window stack.
+    FocusWindowInTileNext {},
+    /// Focus the previous window within the active tile's window stack.
+    FocusWindowInTilePrev {},
     /// Consume or expel a window left.
     #[cfg_attr(
         feature = "clap",
