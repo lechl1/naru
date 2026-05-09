@@ -6,7 +6,7 @@ use smithay::backend::renderer::gles::{
     UniformValue,
 };
 
-use super::renderer::NiriRenderer;
+use super::renderer::NaruRenderer;
 use super::shader_element::ShaderProgram;
 use crate::render_helpers::blur::BlurProgram;
 
@@ -93,7 +93,7 @@ impl Shaders {
                     "\nvec4 postprocess(vec4 color) { return color; }",
                 ),
                 &[
-                    UniformName::new("niri_scale", UniformType::_1f),
+                    UniformName::new("naru_scale", UniformType::_1f),
                     UniformName::new("geo_size", UniformType::_2f),
                     UniformName::new("corner_radius", UniformType::_4f),
                     UniformName::new("input_to_geo", UniformType::Matrix3x3),
@@ -112,7 +112,7 @@ impl Shaders {
                     include_str!("postprocess.frag"),
                 ),
                 &[
-                    UniformName::new("niri_scale", UniformType::_1f),
+                    UniformName::new("naru_scale", UniformType::_1f),
                     UniformName::new("geo_size", UniformType::_2f),
                     UniformName::new("corner_radius", UniformType::_4f),
                     UniformName::new("input_to_geo", UniformType::Matrix3x3),
@@ -168,7 +168,7 @@ impl Shaders {
             .expect("shaders::init() must be called when creating the renderer")
     }
 
-    pub fn get(renderer: &mut impl NiriRenderer) -> &Self {
+    pub fn get(renderer: &mut impl NaruRenderer) -> &Self {
         let renderer = renderer.as_gles_renderer();
         let data = renderer.egl_context().user_data();
         data.get()
@@ -232,18 +232,18 @@ fn compile_resize_program(
         renderer,
         &program,
         &[
-            UniformName::new("niri_input_to_curr_geo", UniformType::Matrix3x3),
-            UniformName::new("niri_curr_geo_to_prev_geo", UniformType::Matrix3x3),
-            UniformName::new("niri_curr_geo_to_next_geo", UniformType::Matrix3x3),
-            UniformName::new("niri_curr_geo_size", UniformType::_2f),
-            UniformName::new("niri_geo_to_tex_prev", UniformType::Matrix3x3),
-            UniformName::new("niri_geo_to_tex_next", UniformType::Matrix3x3),
-            UniformName::new("niri_progress", UniformType::_1f),
-            UniformName::new("niri_clamped_progress", UniformType::_1f),
-            UniformName::new("niri_corner_radius", UniformType::_4f),
-            UniformName::new("niri_clip_to_geometry", UniformType::_1f),
+            UniformName::new("naru_input_to_curr_geo", UniformType::Matrix3x3),
+            UniformName::new("naru_curr_geo_to_prev_geo", UniformType::Matrix3x3),
+            UniformName::new("naru_curr_geo_to_next_geo", UniformType::Matrix3x3),
+            UniformName::new("naru_curr_geo_size", UniformType::_2f),
+            UniformName::new("naru_geo_to_tex_prev", UniformType::Matrix3x3),
+            UniformName::new("naru_geo_to_tex_next", UniformType::Matrix3x3),
+            UniformName::new("naru_progress", UniformType::_1f),
+            UniformName::new("naru_clamped_progress", UniformType::_1f),
+            UniformName::new("naru_corner_radius", UniformType::_4f),
+            UniformName::new("naru_clip_to_geometry", UniformType::_1f),
         ],
-        &["niri_tex_prev", "niri_tex_next"],
+        &["naru_tex_prev", "naru_tex_next"],
     )
 }
 
@@ -279,14 +279,14 @@ fn compile_close_program(
         renderer,
         &program,
         &[
-            UniformName::new("niri_input_to_geo", UniformType::Matrix3x3),
-            UniformName::new("niri_geo_size", UniformType::_2f),
-            UniformName::new("niri_geo_to_tex", UniformType::Matrix3x3),
-            UniformName::new("niri_progress", UniformType::_1f),
-            UniformName::new("niri_clamped_progress", UniformType::_1f),
-            UniformName::new("niri_random_seed", UniformType::_1f),
+            UniformName::new("naru_input_to_geo", UniformType::Matrix3x3),
+            UniformName::new("naru_geo_size", UniformType::_2f),
+            UniformName::new("naru_geo_to_tex", UniformType::Matrix3x3),
+            UniformName::new("naru_progress", UniformType::_1f),
+            UniformName::new("naru_clamped_progress", UniformType::_1f),
+            UniformName::new("naru_random_seed", UniformType::_1f),
         ],
-        &["niri_tex"],
+        &["naru_tex"],
     )
 }
 
@@ -322,14 +322,14 @@ fn compile_open_program(
         renderer,
         &program,
         &[
-            UniformName::new("niri_input_to_geo", UniformType::Matrix3x3),
-            UniformName::new("niri_geo_size", UniformType::_2f),
-            UniformName::new("niri_geo_to_tex", UniformType::Matrix3x3),
-            UniformName::new("niri_progress", UniformType::_1f),
-            UniformName::new("niri_clamped_progress", UniformType::_1f),
-            UniformName::new("niri_random_seed", UniformType::_1f),
+            UniformName::new("naru_input_to_geo", UniformType::Matrix3x3),
+            UniformName::new("naru_geo_size", UniformType::_2f),
+            UniformName::new("naru_geo_to_tex", UniformType::Matrix3x3),
+            UniformName::new("naru_progress", UniformType::_1f),
+            UniformName::new("naru_clamped_progress", UniformType::_1f),
+            UniformName::new("naru_random_seed", UniformType::_1f),
         ],
-        &["niri_tex"],
+        &["naru_tex"],
     )
 }
 

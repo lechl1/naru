@@ -75,7 +75,7 @@ use smithay::{
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::ActivateWindow;
-use crate::niri::{DndIcon, NewClient, State};
+use crate::naru::{DndIcon, NewClient, State};
 use crate::protocols::ext_workspace::{self, ExtWorkspaceHandler, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
@@ -104,22 +104,22 @@ impl SeatHandler for State {
     type TouchFocus = WlSurface;
 
     fn seat_state(&mut self) -> &mut SeatState<State> {
-        &mut self.niri.seat_state
+        &mut self.naru.seat_state
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, mut image: CursorImageStatus) {
         // FIXME: this hack should be removable once the screenshot UI is tracked with a
         // PointerFocus properly.
-        if self.niri.screenshot_ui.is_open() {
+        if self.naru.screenshot_ui.is_open() {
             image = CursorImageStatus::Named(CursorIcon::Crosshair);
         }
-        self.niri.cursor_manager.set_cursor_image(image);
+        self.naru.cursor_manager.set_cursor_image(image);
         // FIXME: more granular
-        self.niri.queue_redraw_all();
+        self.naru.queue_redraw_all();
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
-        let dh = &self.niri.display_handle;
+        let dh = &self.naru.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
@@ -127,7 +127,7 @@ impl SeatHandler for State {
 
     fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: keyboard::LedState) {
         let keyboards = self
-            .niri
+            .naru
             .devices
             .iter()
             .filter(|device| device.has_capability(input::DeviceCapability::Keyboard))
@@ -147,9 +147,9 @@ delegate_text_input_manager!(State);
 impl TabletSeatHandler for State {
     fn tablet_tool_image(&mut self, _tool: &TabletToolDescriptor, image: CursorImageStatus) {
         // FIXME: tablet tools should have their own cursors.
-        self.niri.cursor_manager.set_cursor_image(image);
+        self.naru.cursor_manager.set_cursor_image(image);
         // FIXME: granular.
-        self.niri.queue_redraw_all();
+        self.naru.queue_redraw_all();
     }
 }
 delegate_tablet_manager!(State);
@@ -160,7 +160,7 @@ impl PointerConstraintsHandler for State {
         // activating a new one.
         self.refresh_pointer_contents();
 
-        self.niri.maybe_activate_pointer_constraint();
+        self.naru.maybe_activate_pointer_constraint();
     }
 
     fn cursor_position_hint(
@@ -186,7 +186,7 @@ impl PointerConstraintsHandler for State {
         // more of a hack because pointer contents has the surface origin available.
         //
         // FIXME: use the constraint surface somehow, don't use pointer contents.
-        let Some((ref surface_under_pointer, origin)) = self.niri.pointer_contents.surface else {
+        let Some((ref surface_under_pointer, origin)) = self.naru.pointer_contents.surface else {
             return;
         };
 
@@ -200,9 +200,9 @@ impl PointerConstraintsHandler for State {
         }
 
         let target = self
-            .niri
+            .naru
             .output_for_root(&root)
-            .and_then(|output| self.niri.global_space.output_geometry(output))
+            .and_then(|output| self.naru.global_space.output_geometry(output))
             .map_or(origin + location, |mut output_geometry| {
                 // i32 sizes are exclusive, but f64 sizes are inclusive.
                 output_geometry.size -= (1, 1).into();
@@ -211,9 +211,9 @@ impl PointerConstraintsHandler for State {
         pointer.set_location(target);
 
         // Redraw to update the cursor position if it's visible.
-        if self.niri.pointer_visibility.is_visible() {
+        if self.naru.pointer_visibility.is_visible() {
             // FIXME: redraw only outputs overlapping the cursor.
-            self.niri.queue_redraw_all();
+            self.naru.queue_redraw_all();
         }
     }
 }
@@ -233,7 +233,7 @@ impl InputMethodHandler for State {
 
         self.unconstrain_popup(&popup);
 
-        if let Err(err) = self.niri.popups.track_popup(popup) {
+        if let Err(err) = self.naru.popups.track_popup(popup) {
             warn!("error tracking ime popup {err:?}");
         }
     }
@@ -250,7 +250,7 @@ impl InputMethodHandler for State {
     }
 
     fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
-        self.niri
+        self.naru
             .layout
             .find_window_and_output(parent)
             .map(|(mapped, _)| mapped.window.geometry())
@@ -260,19 +260,19 @@ impl InputMethodHandler for State {
 
 impl KeyboardShortcutsInhibitHandler for State {
     fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
-        &mut self.niri.keyboard_shortcuts_inhibit_state
+        &mut self.naru.keyboard_shortcuts_inhibit_state
     }
 
     fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
         // FIXME: show a confirmation dialog with a "remember for this application" kind of toggle.
         inhibitor.activate();
-        self.niri
+        self.naru
             .keyboard_shortcuts_inhibiting_surfaces
             .insert(inhibitor.wl_surface().clone(), inhibitor);
     }
 
     fn inhibitor_destroyed(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
-        self.niri
+        self.naru
             .keyboard_shortcuts_inhibiting_surfaces
             .remove(&inhibitor.wl_surface().clone());
     }
@@ -310,7 +310,7 @@ impl SelectionHandler for State {
 
 impl DataDeviceHandler for State {
     fn data_device_state(&mut self) -> &mut DataDeviceState {
-        &mut self.niri.data_device_state
+        &mut self.naru.data_device_state
     }
 }
 
@@ -323,7 +323,7 @@ impl WaylandDndGrabHandler for State {
         serial: Serial,
         type_: dnd::GrabType,
     ) {
-        self.niri.dnd_icon = icon.map(|surface| DndIcon {
+        self.naru.dnd_icon = icon.map(|surface| DndIcon {
             surface,
             offset: Point::new(0, 0),
         });
@@ -333,19 +333,19 @@ impl WaylandDndGrabHandler for State {
                 let pointer = seat.get_pointer().unwrap();
                 let start_data = pointer.grab_start_data().unwrap();
                 let grab =
-                    DnDGrab::new_pointer(&self.niri.display_handle, start_data, source, seat);
+                    DnDGrab::new_pointer(&self.naru.display_handle, start_data, source, seat);
                 pointer.set_grab(self, grab, serial, Focus::Keep);
             }
             dnd::GrabType::Touch => {
                 let touch = seat.get_touch().unwrap();
                 let start_data = touch.grab_start_data().unwrap();
-                let grab = DnDGrab::new_touch(&self.niri.display_handle, start_data, source, seat);
+                let grab = DnDGrab::new_touch(&self.naru.display_handle, start_data, source, seat);
                 touch.set_grab(self, grab, serial);
             }
         }
 
         // FIXME: more granular
-        self.niri.queue_redraw_all();
+        self.naru.queue_redraw_all();
     }
 }
 
@@ -361,26 +361,26 @@ impl DndGrabHandler for State {
         trace!("dnd dropped, target: {target:?}, validated: {validated}");
 
         // End DnD before activating a specific window below so that it takes precedence.
-        self.niri.on_maybe_dnd_ended();
+        self.naru.on_maybe_dnd_ended();
 
         // Activate the target output, since that's how Firefox drag-tab-into-new-window works for
         // example. On successful drop, additionally activate the target window.
         let mut activate_output = true;
         if let Some(target) = validated.then_some(target).flatten() {
-            let root = self.niri.find_root_shell_surface(target);
-            if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&root) {
+            let root = self.naru.find_root_shell_surface(target);
+            if let Some((mapped, _)) = self.naru.layout.find_window_and_output(&root) {
                 let window = mapped.window.clone();
-                self.niri.layout.activate_window(&window);
-                self.niri.layer_shell_on_demand_focus = None;
+                self.naru.layout.activate_window(&window);
+                self.naru.layer_shell_on_demand_focus = None;
                 activate_output = false;
             }
         }
 
         if activate_output {
             // Find the output from drop coordinates.
-            if let Some((output, _)) = self.niri.output_under(location) {
+            if let Some((output, _)) = self.naru.output_under(location) {
                 let output = output.clone();
-                self.niri.layout.focus_output(&output);
+                self.naru.layout.focus_output(&output);
             }
         }
     }
@@ -388,11 +388,11 @@ impl DndGrabHandler for State {
     fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
         trace!("dnd cancelled");
 
-        self.niri.on_maybe_dnd_ended();
+        self.naru.on_maybe_dnd_ended();
     }
 }
 
-impl crate::niri::Niri {
+impl crate::naru::Naru {
     fn on_maybe_dnd_ended(&mut self) {
         self.layout.dnd_end();
         self.dnd_icon = None;
@@ -405,14 +405,14 @@ delegate_data_device!(State);
 
 impl PrimarySelectionHandler for State {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
-        &mut self.niri.primary_selection_state
+        &mut self.naru.primary_selection_state
     }
 }
 delegate_primary_selection!(State);
 
 impl WlrDataControlHandler for State {
     fn data_control_state(&mut self) -> &mut WlrDataControlState {
-        &mut self.niri.wlr_data_control_state
+        &mut self.naru.wlr_data_control_state
     }
 }
 
@@ -420,7 +420,7 @@ delegate_data_control!(State);
 
 impl ExtDataControlHandler for State {
     fn data_control_state(&mut self) -> &mut ExtDataControlState {
-        &mut self.niri.ext_data_control_state
+        &mut self.naru.ext_data_control_state
     }
 }
 
@@ -438,7 +438,7 @@ delegate_presentation!(State);
 
 impl DmabufHandler for State {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
-        &mut self.niri.dmabuf_state
+        &mut self.naru.dmabuf_state
     }
 
     fn dmabuf_imported(
@@ -458,27 +458,27 @@ delegate_dmabuf!(State);
 
 impl SessionLockHandler for State {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
-        &mut self.niri.session_lock_state
+        &mut self.naru.session_lock_state
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
-        self.niri.lock(confirmation);
+        self.naru.lock(confirmation);
     }
 
     fn unlock(&mut self) {
-        self.niri.unlock();
-        self.niri.activate_monitors(&mut self.backend);
-        self.niri.notify_activity();
+        self.naru.unlock();
+        self.naru.activate_monitors(&mut self.backend);
+        self.naru.notify_activity();
     }
 
     fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
-        let Some(output) = self.niri.output_from_resource(&output) else {
+        let Some(output) = self.naru.output_from_resource(&output) else {
             warn!("no Output matching WlOutput");
             return;
         };
 
         configure_lock_surface(&surface, &output);
-        self.niri.new_lock_surface(surface, &output);
+        self.naru.new_lock_surface(surface, &output);
     }
 }
 delegate_session_lock!(State);
@@ -499,11 +499,11 @@ pub fn configure_lock_surface(surface: &LockSurface, output: &Output) {
 
 impl SecurityContextHandler for State {
     fn context_created(&mut self, source: SecurityContextListenerSource, context: SecurityContext) {
-        self.niri
+        self.naru
             .event_loop
             .insert_source(source, move |client, _, state| {
                 trace!("inserting a new restricted client, context={context:?}");
-                state.niri.insert_client(NewClient {
+                state.naru.insert_client(NewClient {
                     client,
                     restricted: true,
                     credentials_unknown: false,
@@ -516,52 +516,52 @@ delegate_security_context!(State);
 
 impl IdleNotifierHandler for State {
     fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
-        &mut self.niri.idle_notifier_state
+        &mut self.naru.idle_notifier_state
     }
 }
 delegate_idle_notify!(State);
 
 impl IdleInhibitHandler for State {
     fn inhibit(&mut self, surface: WlSurface) {
-        self.niri.idle_inhibiting_surfaces.insert(surface);
+        self.naru.idle_inhibiting_surfaces.insert(surface);
     }
 
     fn uninhibit(&mut self, surface: WlSurface) {
-        self.niri.idle_inhibiting_surfaces.remove(&surface);
+        self.naru.idle_inhibiting_surfaces.remove(&surface);
     }
 }
 delegate_idle_inhibit!(State);
 
 impl ForeignToplevelHandler for State {
     fn foreign_toplevel_manager_state(&mut self) -> &mut ForeignToplevelManagerState {
-        &mut self.niri.foreign_toplevel_state
+        &mut self.naru.foreign_toplevel_state
     }
 
     fn activate(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.naru.layout.find_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
-            self.niri.layout.activate_window(&window);
-            self.niri.layer_shell_on_demand_focus = None;
-            self.niri.queue_redraw_all();
+            self.naru.layout.activate_window(&window);
+            self.naru.layer_shell_on_demand_focus = None;
+            self.naru.queue_redraw_all();
         }
     }
 
     fn close(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.naru.layout.find_window_and_output(&wl_surface) {
             mapped.toplevel().send_close();
         }
     }
 
     fn set_fullscreen(&mut self, wl_surface: WlSurface, wl_output: Option<WlOutput>) {
-        if let Some((mapped, current_output)) = self.niri.layout.find_window_and_output(&wl_surface)
+        if let Some((mapped, current_output)) = self.naru.layout.find_window_and_output(&wl_surface)
         {
             let window = mapped.window.clone();
 
             if let Some(requested_output) =
-                wl_output.and_then(|o| self.niri.output_from_resource(&o))
+                wl_output.and_then(|o| self.naru.output_from_resource(&o))
             {
                 if Some(&requested_output) != current_output {
-                    self.niri.layout.move_to_output(
+                    self.naru.layout.move_to_output(
                         Some(&window),
                         &requested_output,
                         None,
@@ -570,28 +570,28 @@ impl ForeignToplevelHandler for State {
                 }
             }
 
-            self.niri.layout.set_fullscreen(&window, true);
+            self.naru.layout.set_fullscreen(&window, true);
         }
     }
 
     fn unset_fullscreen(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.naru.layout.find_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
-            self.niri.layout.set_fullscreen(&window, false);
+            self.naru.layout.set_fullscreen(&window, false);
         }
     }
 
     fn set_maximized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.naru.layout.find_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
-            self.niri.layout.set_maximized(&window, true);
+            self.naru.layout.set_maximized(&window, true);
         }
     }
 
     fn unset_maximized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.naru.layout.find_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
-            self.niri.layout.set_maximized(&window, false);
+            self.naru.layout.set_maximized(&window, false);
         }
     }
 }
@@ -599,33 +599,33 @@ delegate_foreign_toplevel!(State);
 
 impl ExtWorkspaceHandler for State {
     fn ext_workspace_manager_state(&mut self) -> &mut ExtWorkspaceManagerState {
-        &mut self.niri.ext_workspace_state
+        &mut self.naru.ext_workspace_state
     }
 
     fn activate_workspace(&mut self, id: WorkspaceId) {
-        let reference = niri_config::WorkspaceReference::Id(id.get());
-        if let Some((mut output, index)) = self.niri.find_output_and_workspace_index(reference) {
-            if let Some(active) = self.niri.layout.active_output() {
+        let reference = naru_config::WorkspaceReference::Id(id.get());
+        if let Some((mut output, index)) = self.naru.find_output_and_workspace_index(reference) {
+            if let Some(active) = self.naru.layout.active_output() {
                 if output.as_ref() == Some(active) {
                     output = None;
                 }
             }
 
             if let Some(output) = output {
-                self.niri.layout.focus_output(&output);
+                self.naru.layout.focus_output(&output);
             }
-            self.niri.layout.switch_workspace(index);
+            self.naru.layout.switch_workspace(index);
             // No mouse warp: assuming the layer-shell bar workspaces use-case.
 
             // FIXME: granular
-            self.niri.queue_redraw_all();
+            self.naru.queue_redraw_all();
         }
     }
 
     fn assign_workspace(&mut self, ws_id: WorkspaceId, output: Output) {
-        let reference = niri_config::WorkspaceReference::Id(ws_id.get());
-        if let Some((old_output, old_idx)) = self.niri.find_output_and_workspace_index(reference) {
-            self.niri
+        let reference = naru_config::WorkspaceReference::Id(ws_id.get());
+        if let Some((old_output, old_idx)) = self.naru.find_output_and_workspace_index(reference) {
+            self.naru
                 .layout
                 .move_workspace_to_output_by_id(old_idx, old_output, &output);
         }
@@ -636,7 +636,7 @@ delegate_ext_workspace!(State);
 impl ScreencopyHandler for State {
     fn frame(&mut self, manager: &ZwlrScreencopyManagerV1, screencopy: Screencopy) {
         // This can happen if the output was removed before this was called.
-        if !self.niri.output_exists(screencopy.output()) {
+        if !self.naru.output_exists(screencopy.output()) {
             trace!("screencopy output no longer exists");
             return;
         }
@@ -644,11 +644,11 @@ impl ScreencopyHandler for State {
         // If with_damage then push it onto the queue for redraw of the output,
         // otherwise render it immediately.
         if screencopy.with_damage() {
-            self.niri.screencopy_state.push(manager, screencopy);
+            self.naru.screencopy_state.push(manager, screencopy);
         } else {
             self.backend.with_primary_renderer(|renderer| {
                 if let Err(err) = self
-                    .niri
+                    .naru
                     .render_for_screencopy_without_damage(renderer, manager, screencopy)
                 {
                     warn!("error rendering for screencopy: {err:?}");
@@ -658,14 +658,14 @@ impl ScreencopyHandler for State {
     }
 
     fn screencopy_state(&mut self) -> &mut ScreencopyManagerState {
-        &mut self.niri.screencopy_state
+        &mut self.naru.screencopy_state
     }
 }
 delegate_screencopy!(State);
 
 impl VirtualPointerHandler for State {
     fn virtual_pointer_manager_state(&mut self) -> &mut VirtualPointerManagerState {
-        &mut self.niri.virtual_pointer_state
+        &mut self.naru.virtual_pointer_state
     }
 
     fn on_virtual_pointer_motion(&mut self, event: VirtualPointerMotionEvent) {
@@ -739,7 +739,7 @@ delegate_viewporter!(State);
 
 impl GammaControlHandler for State {
     fn gamma_control_manager_state(&mut self) -> &mut GammaControlManagerState {
-        &mut self.niri.gamma_control_manager_state
+        &mut self.naru.gamma_control_manager_state
     }
 
     fn get_gamma_size(&mut self, output: &Output) -> Option<u32> {
@@ -772,7 +772,7 @@ struct UrgentOnlyMarker;
 
 impl XdgActivationHandler for State {
     fn activation_state(&mut self) -> &mut XdgActivationState {
-        &mut self.niri.activation_state
+        &mut self.naru.activation_state
     }
 
     fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
@@ -795,7 +795,7 @@ impl XdgActivationHandler for State {
         // Clicking on a notification sends clients a perfectly valid activation token from the
         // notification daemon, but alas they ignore it. Maybe in the future the clients are fixed,
         // and we can remove this debug flag.
-        let config = self.niri.config.borrow();
+        let config = self.naru.config.borrow();
         if config.debug.honor_xdg_activation_with_invalid_serial {
             return true;
         }
@@ -822,22 +822,22 @@ impl XdgActivationHandler for State {
         surface: WlSurface,
     ) {
         if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT {
-            if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&surface) {
+            if let Some((mapped, _)) = self.naru.layout.find_window_and_output_mut(&surface) {
                 let window = mapped.window.clone();
                 if token_data.user_data.get::<UrgentOnlyMarker>().is_some() {
                     mapped.set_urgent(true);
-                    self.niri.queue_redraw_all();
+                    self.naru.queue_redraw_all();
                 } else {
-                    self.niri.layout.activate_window(&window);
-                    self.niri.layer_shell_on_demand_focus = None;
-                    self.niri.queue_redraw_all();
+                    self.naru.layout.activate_window(&window);
+                    self.naru.layer_shell_on_demand_focus = None;
+                    self.naru.queue_redraw_all();
                 }
-            } else if let Some(unmapped) = self.niri.unmapped_windows.get_mut(&surface) {
+            } else if let Some(unmapped) = self.naru.unmapped_windows.get_mut(&surface) {
                 unmapped.activation_token_data = Some(token_data);
             }
         }
 
-        self.niri.activation_state.remove_token(&token);
+        self.naru.activation_state.remove_token(&token);
     }
 }
 delegate_xdg_activation!(State);
@@ -847,11 +847,11 @@ delegate_fractional_scale!(State);
 
 impl OutputManagementHandler for State {
     fn output_management_state(&mut self) -> &mut OutputManagementManagerState {
-        &mut self.niri.output_management_state
+        &mut self.naru.output_management_state
     }
 
-    fn apply_output_config(&mut self, config: niri_config::Outputs) {
-        self.niri.config.borrow_mut().outputs = config;
+    fn apply_output_config(&mut self, config: naru_config::Outputs) {
+        self.naru.config.borrow_mut().outputs = config;
         self.reload_output_config();
     }
 }

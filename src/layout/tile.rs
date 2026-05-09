@@ -1,9 +1,9 @@
 use core::f64;
 use std::rc::Rc;
 
-use niri_config::utils::MergeWith as _;
-use niri_config::{Color, CornerRadius, GradientInterpolation};
-use niri_ipc::WindowLayout;
+use naru_config::utils::MergeWith as _;
+use naru_config::{Color, CornerRadius, GradientInterpolation};
+use naru_ipc::WindowLayout;
 use smithay::backend::renderer::element::{Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
@@ -17,13 +17,13 @@ use super::{
 };
 use crate::animation::{Animation, Clock};
 use crate::layout::SizingMode;
-use crate::niri_render_elements;
+use crate::naru_render_elements;
 use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::clipped_surface::{ClippedSurfaceRenderElement, RoundedCornerDamage};
 use crate::render_helpers::damage::ExtraDamage;
 use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenRenderElement};
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::resize::ResizeRenderElement;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::snapshot::RenderSnapshot;
@@ -120,7 +120,7 @@ pub struct Tile<W: LayoutElement> {
     pub(super) options: Rc<Options>,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     TileRenderElement<R> => {
         LayoutElement = LayoutElementRenderElement<R>,
         FocusRing = FocusRingRenderElement,
@@ -581,7 +581,7 @@ impl<W: LayoutElement> Tile<W> {
         self.animate_move_x_from_with_config(from, self.options.animations.window_movement.0);
     }
 
-    pub fn animate_move_x_from_with_config(&mut self, from: f64, config: niri_config::Animation) {
+    pub fn animate_move_x_from_with_config(&mut self, from: f64, config: naru_config::Animation) {
         let current_offset = self.render_offset().x;
 
         // Preserve the previous config if ongoing.
@@ -600,7 +600,7 @@ impl<W: LayoutElement> Tile<W> {
         self.animate_move_y_from_with_config(from, self.options.animations.window_movement.0);
     }
 
-    pub fn animate_move_y_from_with_config(&mut self, from: f64, config: niri_config::Animation) {
+    pub fn animate_move_y_from_with_config(&mut self, from: f64, config: naru_config::Animation) {
         let current_offset = self.render_offset().y;
 
         // Preserve the previous config if ongoing.
@@ -631,7 +631,7 @@ impl<W: LayoutElement> Tile<W> {
         self.move_y_animation = None;
     }
 
-    pub fn animate_alpha(&mut self, from: f64, to: f64, config: niri_config::Animation) {
+    pub fn animate_alpha(&mut self, from: f64, to: f64, config: naru_config::Animation) {
         let from = from.clamp(0., 1.);
         let to = to.clamp(0., 1.);
 
@@ -1021,7 +1021,7 @@ impl<W: LayoutElement> Tile<W> {
         Point::from((0., y))
     }
 
-    fn render_inner<R: NiriRenderer>(
+    fn render_inner<R: NaruRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
@@ -1314,7 +1314,7 @@ impl<W: LayoutElement> Tile<W> {
         );
     }
 
-    pub fn render<R: NiriRenderer>(
+    pub fn render<R: NaruRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,

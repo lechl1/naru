@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::ensure;
-use niri_config::{
+use naru_config::{
     Action, Bind, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers, MruDirection,
     MruFilter, MruScope, Trigger,
 };
@@ -26,14 +26,14 @@ use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
 use crate::animation::{Animation, Clock};
 use crate::layout::focus_ring::{FocusRing, FocusRingRenderElement};
 use crate::layout::{Layout, LayoutElement as _, LayoutElementRenderElement};
-use crate::niri::Niri;
-use crate::niri_render_elements;
+use crate::naru::Naru;
+use crate::naru_render_elements;
 use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::clipped_surface::ClippedSurfaceRenderElement;
 use crate::render_helpers::gradient_fade_texture::GradientFadeTextureRenderElement;
 use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenRenderElement};
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::RenderCtx;
@@ -107,7 +107,7 @@ pub enum MruCloseRequest {
     Confirm,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     ThumbnailRenderElement<R> => {
         LayoutElement = LayoutElementRenderElement<R>,
         ClippedSurface = ClippedSurfaceRenderElement<R>,
@@ -115,7 +115,7 @@ niri_render_elements! {
     }
 }
 
-niri_render_elements! {
+naru_render_elements! {
     WindowMruUiRenderElement<R> => {
         SolidColor = SolidColorRenderElement,
         TextureElement = PrimaryGpuTextureRenderElement,
@@ -221,7 +221,7 @@ struct Thumbnail {
     size: Size<i32, Logical>,
 
     clock: Clock,
-    config: niri_config::MruPreviews,
+    config: naru_config::MruPreviews,
     open_animation: Option<Animation>,
     move_animation: Option<MoveAnimation>,
     title_texture: RefCell<TitleTexture>,
@@ -230,16 +230,16 @@ struct Thumbnail {
 }
 
 impl Thumbnail {
-    fn from_mapped(mapped: &Mapped, clock: Clock, config: niri_config::MruPreviews) -> Self {
+    fn from_mapped(mapped: &Mapped, clock: Clock, config: naru_config::MruPreviews) -> Self {
         let app_id = with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone());
 
-        let background = FocusRing::new(niri_config::FocusRing {
+        let background = FocusRing::new(naru_config::FocusRing {
             off: false,
             width: 0.,
             active_gradient: None,
             ..Default::default()
         });
-        let border = FocusRing::new(niri_config::FocusRing {
+        let border = FocusRing::new(naru_config::FocusRing {
             off: false,
             active_gradient: None,
             ..Default::default()
@@ -272,7 +272,7 @@ impl Thumbnail {
     }
 
     /// Animate thumbnail motion from given location.
-    fn animate_move_from_with_config(&mut self, from: f64, config: niri_config::Animation) {
+    fn animate_move_from_with_config(&mut self, from: f64, config: naru_config::Animation) {
         let current_offset = self.render_offset();
 
         // Preserve the previous config if ongoing.
@@ -287,7 +287,7 @@ impl Thumbnail {
         });
     }
 
-    fn animate_open_with_config(&mut self, config: niri_config::Animation) {
+    fn animate_open_with_config(&mut self, config: naru_config::Animation) {
         self.open_animation = Some(Animation::new(self.clock.clone(), 0., 1., 0., config));
     }
 
@@ -336,10 +336,10 @@ impl Thumbnail {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render<R: NiriRenderer>(
+    fn render<R: NaruRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
-        config: &niri_config::RecentWindows,
+        config: &naru_config::RecentWindows,
         mapped: &Mapped,
         preview_geo: Rectangle<f64, Logical>,
         scale: f64,
@@ -569,8 +569,8 @@ impl Thumbnail {
 }
 
 impl WindowMru {
-    pub fn new(niri: &Niri) -> Self {
-        let Some(output) = niri.layout.active_output() else {
+    pub fn new(naru: &Naru) -> Self {
+        let Some(output) = naru.layout.active_output() else {
             return Self {
                 thumbnails: Vec::new(),
                 current_id: None,
@@ -579,15 +579,15 @@ impl WindowMru {
             };
         };
 
-        let config = niri.config.borrow().recent_windows.previews;
+        let config = naru.config.borrow().recent_windows.previews;
         let mut thumbnails = Vec::new();
-        for (mon, ws_idx, ws) in niri.layout.workspaces() {
+        for (mon, ws_idx, ws) in naru.layout.workspaces() {
             let mon = mon.expect("an active output exists so all workspaces have a monitor");
             let on_current_output = mon.output() == output;
             let on_current_workspace = on_current_output && mon.active_workspace_idx() == ws_idx;
 
             for mapped in ws.windows() {
-                let mut thumbnail = Thumbnail::from_mapped(mapped, niri.clock.clone(), config);
+                let mut thumbnail = Thumbnail::from_mapped(mapped, naru.clock.clone(), config);
                 thumbnail.on_current_output = on_current_output;
                 thumbnail.on_current_workspace = on_current_workspace;
                 thumbnails.push(thumbnail);
@@ -877,7 +877,7 @@ impl ViewPos {
     fn animate_from_with_config(
         &mut self,
         from: f64,
-        config: niri_config::Animation,
+        config: naru_config::Animation,
         clock: Clock,
     ) {
         // FIXME: also compute and use current velocity.
@@ -1093,9 +1093,9 @@ impl WindowMruUi {
         }
     }
 
-    pub fn render_output<R: NiriRenderer>(
+    pub fn render_output<R: NaruRenderer>(
         &self,
-        niri: &Niri,
+        naru: &Naru,
         output: &Output,
         mut ctx: RenderCtx<R>,
         push: &mut dyn FnMut(WindowMruUiRenderElement<R>),
@@ -1138,7 +1138,7 @@ impl WindowMruUi {
             let mut ctx = ctx.as_gles();
 
             let mut elems = Vec::new();
-            inner.render(niri, ctx.r(), &mut |elem| elems.push(elem));
+            inner.render(naru, ctx.r(), &mut |elem| elems.push(elem));
             elems.push(WindowMruUiRenderElement::SolidColor(render_backdrop(1.)));
 
             let scale = output.current_scale().fractional_scale();
@@ -1171,7 +1171,7 @@ impl WindowMruUi {
         // This is not used as fallback when offscreen fails to render because it looks better to
         // hide the previews immediately than to render them with alpha = 1. during a fade-out.
         if *output == inner.output && alpha == 1. {
-            inner.render(niri, ctx, &mut |elem| push(elem));
+            inner.render(naru, ctx, &mut |elem| push(elem));
         }
 
         // This is used for both normal elems and for other outputs.
@@ -1550,9 +1550,9 @@ impl Inner {
         })
     }
 
-    fn render<R: NiriRenderer>(
+    fn render<R: NaruRenderer>(
         &self,
-        niri: &Niri,
+        naru: &Naru,
         mut ctx: RenderCtx<R>,
         push: &mut dyn FnMut(WindowMruUiRenderElement<R>),
     ) {
@@ -1588,7 +1588,7 @@ impl Inner {
 
         for (thumbnail, geo) in self.thumbnails_in_view_render() {
             let id = thumbnail.id;
-            let Some((_, mapped)) = niri.layout.windows().find(|(_, m)| m.id() == id) else {
+            let Some((_, mapped)) = naru.layout.windows().find(|(_, m)| m.id() == id) else {
                 error!("window in the MRU must be present in the layout");
                 continue;
             };

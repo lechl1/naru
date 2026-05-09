@@ -1,6 +1,6 @@
-use niri_config::layer_rule::{LayerRule, Match};
-use niri_config::utils::MergeWith as _;
-use niri_config::{BackgroundEffect, BlockOutFrom, CornerRadius, ResolvedPopupsRules, ShadowRule};
+use naru_config::layer_rule::{LayerRule, Match};
+use naru_config::utils::MergeWith as _;
+use naru_config::{BackgroundEffect, BlockOutFrom, CornerRadius, ResolvedPopupsRules, ShadowRule};
 use smithay::desktop::LayerSurface;
 use smithay::wayland::shell::wlr_layer::Layer;
 
@@ -98,10 +98,10 @@ fn surface_matches(surface: &LayerSurface, m: &Match) -> bool {
 
     if let Some(layer) = m.layer {
         let surface_layer = match surface.layer() {
-            Layer::Background => niri_ipc::Layer::Background,
-            Layer::Bottom => niri_ipc::Layer::Bottom,
-            Layer::Top => niri_ipc::Layer::Top,
-            Layer::Overlay => niri_ipc::Layer::Overlay,
+            Layer::Background => naru_ipc::Layer::Background,
+            Layer::Bottom => naru_ipc::Layer::Bottom,
+            Layer::Top => naru_ipc::Layer::Top,
+            Layer::Overlay => naru_ipc::Layer::Overlay,
         };
         if layer != surface_layer {
             return false;

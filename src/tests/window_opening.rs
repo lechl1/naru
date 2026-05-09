@@ -1,7 +1,7 @@
 use std::fmt::{self, Write as _};
 
 use insta::assert_snapshot;
-use niri_config::Config;
+use naru_config::Config;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use super::*;
@@ -378,8 +378,8 @@ window-rule {{
         f.double_roundtrip(id);
     }
 
-    let niri = f.niri();
-    let (mon, ws_idx, ws, mapped) = niri
+    let naru = f.naru();
+    let (mon, ws_idx, ws, mapped) = naru
         .layout
         .workspaces()
         .find_map(|(mon, ws_idx, ws)| {
@@ -405,7 +405,7 @@ window-rule {{
     // If the window ended up fullscreen, unfullscreen it and output the configure.
     let mut post_unfullscreen = String::new();
     if is_fullscreen {
-        f.niri().layout.set_fullscreen(&win, false);
+        f.naru().layout.set_fullscreen(&win, false);
         f.double_roundtrip(id);
 
         let window = f.client(id).window(&surface);
@@ -655,11 +655,11 @@ layout {
 
     // If the window ended up fullscreen, unfullscreen it and output the configure.
     let mut post_unfullscreen = String::new();
-    let mapped = f.niri().layout.windows().next().unwrap().1;
+    let mapped = f.naru().layout.windows().next().unwrap().1;
     let is_fullscreen = mapped.sizing_mode().is_fullscreen();
     let win = mapped.window.clone();
     if is_fullscreen {
-        f.niri().layout.set_fullscreen(&win, false);
+        f.naru().layout.set_fullscreen(&win, false);
         f.double_roundtrip(id);
 
         let window = f.client(id).window(&surface);
@@ -838,11 +838,11 @@ window-rule {
 
     // If the window ended up fullscreen, unfullscreen it and output the configure.
     let mut post_unfullscreen = String::new();
-    let mapped = f.niri().layout.windows().next().unwrap().1;
+    let mapped = f.naru().layout.windows().next().unwrap().1;
     let is_fullscreen = mapped.sizing_mode().is_fullscreen();
     let win = mapped.window.clone();
     if is_fullscreen {
-        f.niri().layout.set_fullscreen(&win, false);
+        f.naru().layout.set_fullscreen(&win, false);
         f.double_roundtrip(id);
 
         let window = f.client(id).window(&surface);
@@ -858,11 +858,11 @@ window-rule {
 
     // If the window ended up maximized, unmaximize it and output the configure.
     let mut post_unmaximize = String::new();
-    let mapped = f.niri().layout.windows().next().unwrap().1;
+    let mapped = f.naru().layout.windows().next().unwrap().1;
     let is_maximized = mapped.sizing_mode().is_maximized();
     let win = mapped.window.clone();
     if is_maximized {
-        f.niri().layout.set_maximized(&win, false);
+        f.naru().layout.set_maximized(&win, false);
         f.double_roundtrip(id);
 
         let window = f.client(id).window(&surface);

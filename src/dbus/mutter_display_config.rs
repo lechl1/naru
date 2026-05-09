@@ -15,7 +15,7 @@ use crate::utils::is_laptop_panel;
 use crate::utils::scale::supported_scales;
 
 pub struct DisplayConfig {
-    to_niri: calloop::channel::Sender<HashMap<String, Option<niri_config::Output>>>,
+    to_naru: calloop::channel::Sender<HashMap<String, Option<naru_config::Output>>>,
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 }
 
@@ -93,7 +93,7 @@ impl DisplayConfig {
                 .modes
                 .iter()
                 .map(|m| {
-                    let niri_ipc::Mode {
+                    let naru_ipc::Mode {
                         width,
                         height,
                         refresh_rate,
@@ -135,14 +135,14 @@ impl DisplayConfig {
 
             if let Some(logical) = output.logical.as_ref() {
                 let transform = match logical.transform {
-                    niri_ipc::Transform::Normal => 0,
-                    niri_ipc::Transform::_90 => 1,
-                    niri_ipc::Transform::_180 => 2,
-                    niri_ipc::Transform::_270 => 3,
-                    niri_ipc::Transform::Flipped => 4,
-                    niri_ipc::Transform::Flipped90 => 5,
-                    niri_ipc::Transform::Flipped180 => 6,
-                    niri_ipc::Transform::Flipped270 => 7,
+                    naru_ipc::Transform::Normal => 0,
+                    naru_ipc::Transform::_90 => 1,
+                    naru_ipc::Transform::_180 => 2,
+                    naru_ipc::Transform::_270 => 3,
+                    naru_ipc::Transform::Flipped => 4,
+                    naru_ipc::Transform::Flipped90 => 5,
+                    naru_ipc::Transform::Flipped180 => 6,
+                    naru_ipc::Transform::Flipped270 => 7,
                 };
 
                 logical_monitors.push(LogicalMonitor {
@@ -194,32 +194,32 @@ impl DisplayConfig {
                 }
                 new_conf.insert(
                     connector.clone(),
-                    Some(niri_config::Output {
+                    Some(naru_config::Output {
                         off: false,
                         name: connector,
-                        scale: Some(niri_config::FloatOrInt(requested_config.scale)),
+                        scale: Some(naru_config::FloatOrInt(requested_config.scale)),
                         transform: match requested_config.transform {
-                            0 => niri_ipc::Transform::Normal,
-                            1 => niri_ipc::Transform::_90,
-                            2 => niri_ipc::Transform::_180,
-                            3 => niri_ipc::Transform::_270,
-                            4 => niri_ipc::Transform::Flipped,
-                            5 => niri_ipc::Transform::Flipped90,
-                            6 => niri_ipc::Transform::Flipped180,
-                            7 => niri_ipc::Transform::Flipped270,
+                            0 => naru_ipc::Transform::Normal,
+                            1 => naru_ipc::Transform::_90,
+                            2 => naru_ipc::Transform::_180,
+                            3 => naru_ipc::Transform::_270,
+                            4 => naru_ipc::Transform::Flipped,
+                            5 => naru_ipc::Transform::Flipped90,
+                            6 => naru_ipc::Transform::Flipped180,
+                            7 => naru_ipc::Transform::Flipped270,
                             x => {
                                 return Err(zbus::fdo::Error::Failed(format!(
                                     "Unknown transform {x}",
                                 )))
                             }
                         },
-                        position: Some(niri_config::Position {
+                        position: Some(naru_config::Position {
                             x: requested_config.x,
                             y: requested_config.y,
                         }),
-                        mode: Some(niri_config::output::Mode {
+                        mode: Some(naru_config::output::Mode {
                             custom: false,
-                            mode: niri_ipc::ConfiguredMode::from_str(&mode).map_err(|e| {
+                            mode: naru_ipc::ConfiguredMode::from_str(&mode).map_err(|e| {
                                 zbus::fdo::Error::Failed(format!(
                                     "Could not parse mode '{mode}': {e}"
                                 ))
@@ -245,8 +245,8 @@ impl DisplayConfig {
             // 0 means "verify", so don't actually apply here
             return Ok(());
         }
-        if let Err(err) = self.to_niri.send(new_conf) {
-            warn!("error sending message to niri: {err:?}");
+        if let Err(err) = self.to_naru.send(new_conf) {
+            warn!("error sending message to naru: {err:?}");
             return Err(fdo::Error::Failed("internal error".to_owned()));
         }
         Ok(())
@@ -283,11 +283,11 @@ impl DisplayConfig {
 
 impl DisplayConfig {
     pub fn new(
-        to_niri: calloop::channel::Sender<HashMap<String, Option<niri_config::Output>>>,
+        to_naru: calloop::channel::Sender<HashMap<String, Option<naru_config::Output>>>,
         ipc_outputs: Arc<Mutex<IpcOutputMap>>,
     ) -> Self {
         Self {
-            to_niri,
+            to_naru,
             ipc_outputs,
         }
     }
@@ -309,7 +309,7 @@ impl Start for DisplayConfig {
 }
 
 // Adapted from Mutter.
-fn make_display_name(output: &niri_ipc::Output, is_laptop_panel: bool) -> String {
+fn make_display_name(output: &naru_ipc::Output, is_laptop_panel: bool) -> String {
     if is_laptop_panel {
         return String::from("Built-in display");
     }

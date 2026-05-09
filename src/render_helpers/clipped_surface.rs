@@ -1,5 +1,5 @@
 use glam::{Mat3, Vec2};
-use niri_config::CornerRadius;
+use naru_config::CornerRadius;
 use smithay::backend::renderer::buffer_y_inverted;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
@@ -11,12 +11,12 @@ use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 
 use super::damage::ExtraDamage;
-use super::renderer::{AsGlesFrame as _, NiriRenderer};
+use super::renderer::{AsGlesFrame as _, NaruRenderer};
 use super::shaders::{mat3_uniform, Shaders};
 use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
 
 #[derive(Debug)]
-pub struct ClippedSurfaceRenderElement<R: NiriRenderer> {
+pub struct ClippedSurfaceRenderElement<R: NaruRenderer> {
     inner: WaylandSurfaceRenderElement<R>,
     program: GlesTexProgram,
     corner_radius: CornerRadius,
@@ -30,7 +30,7 @@ pub struct RoundedCornerDamage {
     corner_radius: CornerRadius,
 }
 
-impl<R: NiriRenderer> ClippedSurfaceRenderElement<R> {
+impl<R: NaruRenderer> ClippedSurfaceRenderElement<R> {
     pub fn new(
         elem: WaylandSurfaceRenderElement<R>,
         scale: Scale<f64>,
@@ -92,7 +92,7 @@ impl<R: NiriRenderer> ClippedSurfaceRenderElement<R> {
         let geo_size = (self.geometry.size.w as f32, self.geometry.size.h as f32);
 
         vec![
-            Uniform::new("niri_scale", self.scale),
+            Uniform::new("naru_scale", self.scale),
             Uniform::new("geo_size", geo_size),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
             mat3_uniform("input_to_geo", input_to_geo),
@@ -154,7 +154,7 @@ impl<R: NiriRenderer> ClippedSurfaceRenderElement<R> {
     }
 }
 
-impl<R: NiriRenderer> Element for ClippedSurfaceRenderElement<R> {
+impl<R: NaruRenderer> Element for ClippedSurfaceRenderElement<R> {
     fn id(&self) -> &Id {
         self.inner.id()
     }

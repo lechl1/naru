@@ -7,10 +7,10 @@ use accesskit::{
 };
 use accesskit_unix::Adapter;
 use calloop::LoopHandle;
-use niri_config::MruScope;
+use naru_config::MruScope;
 
 use crate::layout::workspace::WorkspaceId;
-use crate::niri::{KeyboardFocus, Niri, State};
+use crate::naru::{KeyboardFocus, Naru, State};
 use crate::utils::with_toplevel_role;
 use crate::window::mapped::MappedId;
 
@@ -79,7 +79,7 @@ impl A11y {
 
         self.event_loop
             .insert_source(rx, |e, _, state| match e {
-                calloop::channel::Event::Msg(msg) => state.niri.on_a11y_msg(msg),
+                calloop::channel::Event::Msg(msg) => state.naru.on_a11y_msg(msg),
                 calloop::channel::Event::Closed => (),
             })
             .unwrap();
@@ -108,7 +108,7 @@ impl A11y {
     }
 }
 
-impl Niri {
+impl Naru {
     pub fn refresh_a11y(&mut self) {
         if self.a11y.to_accesskit.is_none() {
             return;
@@ -320,7 +320,7 @@ impl Niri {
 
         let tree = Tree {
             root: ID_ROOT,
-            toolkit_name: Some(String::from("niri")),
+            toolkit_name: Some(String::from("naru")),
             toolkit_version: None,
         };
 

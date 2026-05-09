@@ -2,12 +2,12 @@ use futures_util::StreamExt;
 use zbus::fdo;
 use zbus::names::InterfaceName;
 
-pub enum Login1ToNiri {
+pub enum Login1ToNaru {
     LidClosedChanged(bool),
 }
 
 pub fn start(
-    to_niri: calloop::channel::Sender<Login1ToNiri>,
+    to_naru: calloop::channel::Sender<Login1ToNaru>,
 ) -> anyhow::Result<zbus::blocking::Connection> {
     let conn = zbus::blocking::Connection::system()?;
 
@@ -53,8 +53,8 @@ pub fn start(
             .and_then(|value| bool::try_from(value).ok())
             .unwrap_or_default();
 
-        if let Err(err) = to_niri.send(Login1ToNiri::LidClosedChanged(lid_closed)) {
-            warn!("error sending initial lid state to niri: {err:?}");
+        if let Err(err) = to_naru.send(Login1ToNaru::LidClosedChanged(lid_closed)) {
+            warn!("error sending initial lid state to naru: {err:?}");
             return;
         };
 
@@ -88,8 +88,8 @@ pub fn start(
             }
 
             lid_closed = new_lid_closed;
-            if let Err(err) = to_niri.send(Login1ToNiri::LidClosedChanged(lid_closed)) {
-                warn!("error sending message to niri: {err:?}");
+            if let Err(err) = to_naru.send(Login1ToNaru::LidClosedChanged(lid_closed)) {
+                warn!("error sending message to naru: {err:?}");
                 return;
             };
         }

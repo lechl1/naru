@@ -66,7 +66,7 @@ blur {
 
 ### `spawn-at-startup`
 
-Add lines like this to spawn processes at niri startup.
+Add lines like this to spawn processes at naru startup.
 
 `spawn-at-startup` accepts a path to the program binary as the first argument, followed by arguments to the program.
 
@@ -77,14 +77,14 @@ spawn-at-startup "waybar"
 spawn-at-startup "alacritty"
 ```
 
-Note that running niri as a systemd session supports xdg-desktop-autostart out of the box, which may be more convenient to use.
-Thanks to this, apps that you configured to autostart in GNOME will also "just work" in niri, without any manual `spawn-at-startup` configuration.
+Note that running naru as a systemd session supports xdg-desktop-autostart out of the box, which may be more convenient to use.
+Thanks to this, apps that you configured to autostart in GNOME will also "just work" in naru, without any manual `spawn-at-startup` configuration.
 
 ### `spawn-sh-at-startup`
 
 <sup>Since: 25.08</sup>
 
-Add lines like this to run shell commands at niri startup.
+Add lines like this to run shell commands at naru startup.
 
 The argument is a single string that is passed verbatim to `sh`.
 You can use shell variables, pipelines, `~` expansion and everything else as expected.
@@ -98,7 +98,7 @@ spawn-sh-at-startup "qs -c ~/source/qs/MyAwesomeShell"
 
 ### `prefer-no-csd`
 
-This flag will make niri ask the applications to omit their client-side decorations.
+This flag will make naru ask the applications to omit their client-side decorations.
 
 If an application will specifically ask for CSD, the request will be honored.
 Additionally, clients will be informed that they are tiled, removing some rounded corners.
@@ -108,7 +108,7 @@ With `prefer-no-csd` set, applications that negotiate server-side decorations th
 > [!NOTE]
 > Unlike most other options, changing `prefer-no-csd` will not entirely affect already running applications.
 > It will make some windows rectangular, but won't remove the title bars.
-> This mainly has to do with niri working around a [bug in SDL2](https://github.com/libsdl-org/SDL/issues/8173) that prevents SDL2 applications from starting.
+> This mainly has to do with naru working around a [bug in SDL2](https://github.com/libsdl-org/SDL/issues/8173) that prevents SDL2 applications from starting.
 >
 > Restart applications after changing `prefer-no-csd` in the config to fully apply it.
 
@@ -123,7 +123,7 @@ A `~` at the front will be expanded to the home directory.
 
 The path is formatted with `strftime(3)` to give you the screenshot date and time.
 
-Niri will create the last folder of the path if it doesn't exist.
+Naru will create the last folder of the path if it doesn't exist.
 
 ```kdl
 screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
@@ -137,7 +137,7 @@ screenshot-path null
 
 ### `environment`
 
-Override environment variables for processes spawned by niri.
+Override environment variables for processes spawned by naru.
 
 ```kdl
 environment {
@@ -153,8 +153,8 @@ Note that these variables do not propagate to the systemd global environment, so
 In particular, if you start a desktop shell like DankMaterialShell through systemd, then use its built-in application launcher, the apps won't see these environment variables.
 
 If you want all processes to see the environment variables, you can set them in your login shell config instead (i.e. `~/.bash_profile`).
-The `niri-session` shell script runs through the login shell and imports all environment variables to systemd before starting niri.
-Keep in mind that all compositors will see variables set in the login shell, not just niri.
+The `naru-session` shell script runs through the login shell and imports all environment variables to systemd before starting naru.
+Keep in mind that all compositors will see variables set in the login shell, not just naru.
 
 ### `cursor`
 
@@ -254,11 +254,11 @@ overview {
 
 Settings for integration with [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite).
 
-When a recent enough xwayland-satellite is detected, niri will create the X11 sockets and set `DISPLAY`, then automatically spawn `xwayland-satellite` when an X11 client tries to connect.
-If Xwayland dies, niri will keep watching the X11 socket and restart `xwayland-satellite` as needed.
+When a recent enough xwayland-satellite is detected, naru will create the X11 sockets and set `DISPLAY`, then automatically spawn `xwayland-satellite` when an X11 client tries to connect.
+If Xwayland dies, naru will keep watching the X11 socket and restart `xwayland-satellite` as needed.
 This is very similar to how built-in Xwayland works in other compositors.
 
-`off` disables the integration: niri won't create an X11 socket and won't set the `DISPLAY` environment variable.
+`off` disables the integration: naru won't create an X11 socket and won't set the `DISPLAY` environment variable.
 
 `path` sets the path to the `xwayland-satellite` binary.
 By default, it's just `xwayland-satellite`, so it's looked up like any other non-absolute program name.
@@ -291,7 +291,7 @@ Settings for the "Important Hotkeys" overlay.
 
 #### `skip-at-startup`
 
-Set the `skip-at-startup` flag if you don't want to see the hotkey help at niri startup.
+Set the `skip-at-startup` flag if you don't want to see the hotkey help at naru startup.
 
 ```kdl
 hotkey-overlay {
@@ -303,7 +303,7 @@ hotkey-overlay {
 
 <sup>Since: 25.08</sup>
 
-By default, niri will show the most important actions even if they aren't bound to any key, to prevent confusion.
+By default, naru will show the most important actions even if they aren't bound to any key, to prevent confusion.
 Set the `hide-not-bound` flag if you want to hide all actions not bound to any key.
 
 ```kdl

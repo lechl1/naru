@@ -1,14 +1,14 @@
 precision highp float;
 
 #if defined(DEBUG_FLAGS)
-uniform float niri_tint;
+uniform float naru_tint;
 #endif
 
-uniform float niri_alpha;
-uniform float niri_scale;
+uniform float naru_alpha;
+uniform float naru_scale;
 
-uniform vec2 niri_size;
-varying vec2 niri_v_coords;
+uniform vec2 naru_size;
+varying vec2 naru_v_coords;
 
 uniform float colorspace;
 uniform float hue_interpolation;
@@ -208,12 +208,12 @@ vec4 gradient_color(vec2 coords) {
     return color_mix(color_from, color_to, frac);
 }
 
-float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
+float naru_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 
 void main() {
-    vec3 coords_geo = input_to_geo * vec3(niri_v_coords, 1.0);
+    vec3 coords_geo = input_to_geo * vec3(naru_v_coords, 1.0);
     vec4 color = gradient_color(coords_geo.xy);
-    color = color * niri_rounding_alpha(coords_geo.xy, geo_size, outer_radius);
+    color = color * naru_rounding_alpha(coords_geo.xy, geo_size, outer_radius);
 
     if (border_width > 0.0) {
         coords_geo -= vec3(border_width);
@@ -222,14 +222,14 @@ void main() {
                 && 0.0 <= coords_geo.y && coords_geo.y <= inner_geo_size.y)
         {
             vec4 inner_radius = max(outer_radius - vec4(border_width), 0.0);
-            color = color * (1.0 - niri_rounding_alpha(coords_geo.xy, inner_geo_size, inner_radius));
+            color = color * (1.0 - naru_rounding_alpha(coords_geo.xy, inner_geo_size, inner_radius));
         }
     }
 
-    color = color * niri_alpha;
+    color = color * naru_alpha;
 
 #if defined(DEBUG_FLAGS)
-    if (niri_tint == 1.0)
+    if (naru_tint == 1.0)
         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
 #endif
 

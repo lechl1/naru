@@ -1,6 +1,6 @@
 # This flake file is community maintained
 {
-  description = "Niri: A scrollable-tiling Wayland compositor.";
+  description = "Naru: A scrollable-tiling Wayland compositor.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -21,7 +21,7 @@
     }:
     let
       revision = self.shortRev or self.dirtyShortRev or "unknown";
-      niri-package =
+      naru-package =
         {
           lib,
           cairo,
@@ -46,15 +46,15 @@
         }:
 
         rustPlatform.buildRustPackage {
-          pname = "niri";
+          pname = "naru";
           version = revision;
 
           src = lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
-              ./niri-config
-              ./niri-ipc
-              ./niri-visual-tests
+              ./naru-config
+              ./naru-ipc
+              ./naru-visual-tests
               ./resources
               ./src
               ./Cargo.toml
@@ -63,9 +63,9 @@
           };
 
           postPatch = ''
-            patchShebangs resources/niri-session
-            substituteInPlace resources/niri.service \
-              --replace-fail 'ExecStart=niri' "ExecStart=$out/bin/niri"
+            patchShebangs resources/naru-session
+            substituteInPlace resources/naru.service \
+              --replace-fail 'ExecStart=naru' "ExecStart=$out/bin/naru"
           '';
 
           cargoLock = {
@@ -108,8 +108,8 @@
           buildNoDefaultFeatures = true;
 
           # ever since this commit:
-          # https://github.com/niri-wm/niri/commit/771ea1e81557ffe7af9cbdbec161601575b64d81
-          # niri now runs an actual instance of the real compositor (with a mock backend) during tests
+          # https://github.com/lechl1/naru/commit/771ea1e81557ffe7af9cbdbec161601575b64d81
+          # naru now runs an actual instance of the real compositor (with a mock backend) during tests
           # and thus creates a real socket file in the runtime dir.
           # this is fine for our build, we just need to make sure it has a directory to write to.
           preCheck = ''
@@ -124,18 +124,18 @@
 
           postInstall =
             ''
-              installShellCompletion --cmd niri \
-                --bash <($out/bin/niri completions bash) \
-                --fish <($out/bin/niri completions fish) \
-                --nushell <($out/bin/niri completions nushell) \
-                --zsh <($out/bin/niri completions zsh)
+              installShellCompletion --cmd naru \
+                --bash <($out/bin/naru completions bash) \
+                --fish <($out/bin/naru completions fish) \
+                --nushell <($out/bin/naru completions nushell) \
+                --zsh <($out/bin/naru completions zsh)
 
-              install -Dm644 resources/niri.desktop -t $out/share/wayland-sessions
-              install -Dm644 resources/niri-portals.conf -t $out/share/xdg-desktop-portal
+              install -Dm644 resources/naru.desktop -t $out/share/wayland-sessions
+              install -Dm644 resources/naru-portals.conf -t $out/share/xdg-desktop-portal
             ''
             + lib.optionalString withSystemd ''
-              install -Dm755 resources/niri-session $out/bin/niri-session
-              install -Dm644 resources/niri{.service,-shutdown.target} -t $out/share/systemd/user
+              install -Dm755 resources/naru-session $out/bin/naru-session
+              install -Dm644 resources/naru{.service,-shutdown.target} -t $out/share/systemd/user
             '';
 
           env = {
@@ -149,18 +149,18 @@
                 "-Wl,--pop-state"
               ]
             );
-            NIRI_BUILD_COMMIT = revision;
+            NARU_BUILD_COMMIT = revision;
           };
 
           passthru = {
-            providedSessions = [ "niri" ];
+            providedSessions = [ "naru" ];
           };
 
           meta = {
             description = "Scrollable-tiling Wayland compositor";
-            homepage = "https://github.com/niri-wm/niri";
+            homepage = "https://github.com/lechl1/naru";
             license = lib.licenses.gpl3Only;
-            mainProgram = "niri";
+            mainProgram = "naru";
             platforms = lib.platforms.linux;
           };
         };
@@ -175,7 +175,7 @@
     {
       checks = forAllSystems (system: {
         # We use the debug build here to save a bit of time
-        inherit (self.packages.${system}) niri-debug;
+        inherit (self.packages.${system}) naru-debug;
       });
 
       devShells = forAllSystems (
@@ -183,7 +183,7 @@
         let
           pkgs = nixpkgsFor.${system};
           rust-bin = rust-overlay.lib.mkRustBin { } pkgs;
-          inherit (self.packages.${system}) niri;
+          inherit (self.packages.${system}) naru;
         in
         {
           default = pkgs.mkShell {
@@ -213,11 +213,11 @@
             nativeBuildInputs = [
               pkgs.rustPlatform.bindgenHook
               pkgs.pkg-config
-              pkgs.wrapGAppsHook4 # For `niri-visual-tests`
+              pkgs.wrapGAppsHook4 # For `naru-visual-tests`
             ];
 
-            buildInputs = niri.buildInputs ++ [
-              pkgs.libadwaita # For `niri-visual-tests`
+            buildInputs = naru.buildInputs ++ [
+              pkgs.libadwaita # For `naru-visual-tests`
             ];
 
             env = {
@@ -226,7 +226,7 @@
               # in the package expression
               #
               # This should only be set with `CARGO_BUILD_RUSTFLAGS="$CARGO_BUILD_RUSTFLAGS -C your-flags"`
-              CARGO_BUILD_RUSTFLAGS = niri.RUSTFLAGS;
+              CARGO_BUILD_RUSTFLAGS = naru.RUSTFLAGS;
             };
           };
         }
@@ -237,17 +237,17 @@
       packages = forAllSystems (
         system:
         let
-          niri = nixpkgsFor.${system}.callPackage niri-package { };
+          naru = nixpkgsFor.${system}.callPackage naru-package { };
         in
         {
-          inherit niri;
+          inherit naru;
 
           # NOTE: This is for development purposes only
           #
           # It is primarily to help with quickly iterating on
           # changes made to the above expression - though it is
-          # also not stripped in order to better debug niri itself
-          niri-debug = niri.overrideAttrs (
+          # also not stripped in order to better debug naru itself
+          naru-debug = naru.overrideAttrs (
             newAttrs: oldAttrs: {
               pname = oldAttrs.pname + "-debug";
 
@@ -258,12 +258,12 @@
             }
           );
 
-          default = niri;
+          default = naru;
         }
       );
 
       overlays.default = final: _: {
-        niri = final.callPackage niri-package { };
+        naru = final.callPackage naru-package { };
       };
     };
 }

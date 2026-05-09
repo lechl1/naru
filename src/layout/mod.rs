@@ -1,6 +1,6 @@
 //! Window layout logic.
 //!
-//! Niri implements scrollable tiling with dynamic workspaces. The scrollable tiling is mostly
+//! Naru implements scrollable tiling with dynamic workspaces. The scrollable tiling is mostly
 //! orthogonal to any particular workspace system, though outputs living in separate coordinate
 //! spaces suggest per-output workspaces.
 //!
@@ -12,7 +12,7 @@
 //! workspaces from disconnected outputs will move. Currently, the primary output has no other
 //! distinction from other outputs.
 //!
-//! Where possible, niri tries to follow these principles with regards to outputs:
+//! Where possible, naru tries to follow these principles with regards to outputs:
 //!
 //! 1. Disconnecting and reconnecting the same output must not change the layout.
 //!    * This includes both secondary outputs and the primary output.
@@ -37,11 +37,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
-use niri_config::utils::MergeWith as _;
-use niri_config::{
+use naru_config::utils::MergeWith as _;
+use naru_config::{
     Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
 };
-use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
+use naru_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use scrolling::{Column, ColumnWidth};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
@@ -58,10 +58,10 @@ use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::scrolling::ScrollDirection;
-use crate::niri_render_elements;
+use crate::naru_render_elements;
 use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::offscreen::OffscreenData;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::TextureBuffer;
@@ -110,7 +110,7 @@ const OVERVIEW_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
 /// Size-relative units.
 pub struct SizeFrac;
 
-niri_render_elements! {
+naru_render_elements! {
     LayoutElementRenderElement<R> => {
         Wayland = WaylandSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
@@ -136,7 +136,7 @@ pub trait LayoutElement {
     fn id(&self) -> &Self::Id;
 
     /// Updates the config for the element.
-    fn update_config(&mut self, blur_config: niri_config::Blur) {
+    fn update_config(&mut self, blur_config: naru_config::Blur) {
         let _ = blur_config;
     }
 
@@ -160,7 +160,7 @@ pub trait LayoutElement {
     ///
     /// The element should be rendered in such a way that its visual geometry ends up at the given
     /// location.
-    fn render<R: NiriRenderer>(
+    fn render<R: NaruRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
@@ -174,7 +174,7 @@ pub trait LayoutElement {
     }
 
     /// Renders the non-popup parts of the element.
-    fn render_normal<R: NiriRenderer>(
+    fn render_normal<R: NaruRenderer>(
         &self,
         ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
@@ -186,7 +186,7 @@ pub trait LayoutElement {
     }
 
     /// Renders the popups of the element.
-    fn render_popups<R: NiriRenderer>(
+    fn render_popups<R: NaruRenderer>(
         &self,
         ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
@@ -388,11 +388,11 @@ enum MonitorSet<W: LayoutElement> {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Options {
-    pub layout: niri_config::Layout,
-    pub animations: niri_config::Animations,
-    pub gestures: niri_config::Gestures,
-    pub overview: niri_config::Overview,
-    pub blur: niri_config::Blur,
+    pub layout: naru_config::Layout,
+    pub animations: naru_config::Animations,
+    pub gestures: naru_config::Gestures,
+    pub overview: naru_config::Overview,
+    pub blur: naru_config::Blur,
     // Debug flags.
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
@@ -438,13 +438,13 @@ struct InteractiveMoveData<W: LayoutElement> {
     /// Config overrides for the output where the window is currently located.
     ///
     /// Cached here to be accessible while an output is removed.
-    pub(self) output_config: Option<niri_config::LayoutPart>,
+    pub(self) output_config: Option<naru_config::LayoutPart>,
     /// Config overrides for the workspace where the window is currently located.
     ///
     /// To avoid sudden window changes when starting an interactive move, it will remember the
     /// config overrides for the workspace where the move originated from. As soon as the window
     /// moves over some different workspace though, this override will reset.
-    pub(self) workspace_config: Option<(WorkspaceId, niri_config::LayoutPart)>,
+    pub(self) workspace_config: Option<(WorkspaceId, naru_config::LayoutPart)>,
 }
 
 #[derive(Debug)]
@@ -660,7 +660,7 @@ impl Options {
         }
     }
 
-    fn with_merged_layout(mut self, part: Option<&niri_config::LayoutPart>) -> Self {
+    fn with_merged_layout(mut self, part: Option<&naru_config::LayoutPart>) -> Self {
         if let Some(part) = part {
             self.layout.merge_with(part);
         }
@@ -4806,7 +4806,7 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    pub fn render_interactive_move_for_output<R: NiriRenderer>(
+    pub fn render_interactive_move_for_output<R: NaruRenderer>(
         &self,
         ctx: RenderCtx<R>,
         output: &Output,

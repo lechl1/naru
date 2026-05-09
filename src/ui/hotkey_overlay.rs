@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::iter::zip;
 use std::rc::Rc;
 
-use niri_config::{Action, Bind, Config, Key, ModKey, Modifiers, Trigger};
+use naru_config::{Action, Bind, Config, Key, ModKey, Modifiers, Trigger};
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::{AttrColor, AttrInt, AttrList, AttrString, FontDescription, Weight};
 use smithay::backend::renderer::element::Kind;
@@ -16,7 +16,7 @@ use smithay::reexports::gbm::Format as Fourcc;
 use smithay::utils::{Scale, Transform};
 
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::utils::{output_size, to_physical_precise_round};
 
@@ -75,7 +75,7 @@ impl HotkeyOverlay {
         self.buffers.borrow_mut().clear();
     }
 
-    pub fn render<R: NiriRenderer>(
+    pub fn render<R: NaruRenderer>(
         &self,
         renderer: &mut R,
         output: &Output,
@@ -457,7 +457,7 @@ fn render(
 
 fn action_name(action: &Action) -> String {
     match action {
-        Action::Quit(_) => String::from("Exit niri"),
+        Action::Quit(_) => String::from("Exit naru"),
         Action::ShowHotkeyOverlay => String::from("Show Important Hotkeys"),
         Action::CloseWindow => String::from("Close Focused Window"),
         Action::FocusColumnLeft => String::from("Focus Column to the Left"),

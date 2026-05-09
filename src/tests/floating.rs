@@ -1,7 +1,7 @@
 use client::ClientId;
 use insta::assert_snapshot;
-use niri_config::Config;
-use niri_ipc::SizeChange;
+use naru_config::Config;
+use naru_ipc::SizeChange;
 use smithay::utils::Point;
 use wayland_client::protocol::wl_surface::WlSurface;
 
@@ -36,7 +36,7 @@ fn set_up_with_config(config: Config) -> (Fixture, ClientId, WlSurface) {
 fn unfocus_preserves_current_size() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.roundtrip(id);
 
     // Change window size while it's floating.
@@ -48,7 +48,7 @@ fn unfocus_preserves_current_size() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Focus a different output which should drop the Activated state.
-    f.niri_focus_output(2);
+    f.naru_focus_output(2);
 
     f.double_roundtrip(id);
 
@@ -66,7 +66,7 @@ fn unfocus_preserves_current_size() {
     f.roundtrip(id);
 
     // Focus the first output which should add back the Activated state.
-    f.niri_focus_output(1);
+    f.naru_focus_output(1);
 
     f.double_roundtrip(id);
 
@@ -87,8 +87,8 @@ fn resize_to_different_size() {
     f.client(id).window(&surface).ack_last_and_commit();
     f.double_roundtrip(id);
 
-    f.niri().layout.toggle_window_floating(None);
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru().layout.toggle_window_floating(None);
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
     f.double_roundtrip(id);
 
     // This should request the new size, 500 × 100.
@@ -98,7 +98,7 @@ fn resize_to_different_size() {
     );
 
     // Focus a different output which should drop the Activated state.
-    f.niri_focus_output(2);
+    f.naru_focus_output(2);
     f.double_roundtrip(id);
     // This should request the new size since the window hasn't committed yet.
     assert_snapshot!(
@@ -111,7 +111,7 @@ fn resize_to_different_size() {
     window.ack_last();
     f.roundtrip(id);
     // Add the activated state.
-    f.niri_focus_output(1);
+    f.naru_focus_output(1);
     f.double_roundtrip(id);
     // This should request the new size since the window hasn't committed yet.
     assert_snapshot!(
@@ -131,7 +131,7 @@ fn resize_to_different_size() {
     );
 
     // Drop the Activated state.
-    f.niri_focus_output(2);
+    f.naru_focus_output(2);
     f.double_roundtrip(id);
     // This should request the current window size rather than keep requesting 500 × 100.
     assert_snapshot!(
@@ -144,7 +144,7 @@ fn resize_to_different_size() {
 fn set_window_width_uses_current_height() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
     let _ = f.client(id).window(&surface).recent_configures();
 
@@ -155,7 +155,7 @@ fn set_window_width_uses_current_height() {
     f.roundtrip(id);
 
     // Request a width change.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
 
     f.double_roundtrip(id);
 
@@ -170,7 +170,7 @@ fn set_window_width_uses_current_height() {
 fn set_window_height_uses_current_width() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
     let _ = f.client(id).window(&surface).recent_configures();
 
@@ -181,7 +181,7 @@ fn set_window_height_uses_current_width() {
     f.roundtrip(id);
 
     // Request a width change.
-    f.niri()
+    f.naru()
         .layout
         .set_window_height(None, SizeChange::SetFixed(500));
 
@@ -198,7 +198,7 @@ fn set_window_height_uses_current_width() {
 fn resize_to_same_size() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
     let _ = f.client(id).window(&surface).recent_configures();
 
@@ -209,7 +209,7 @@ fn resize_to_same_size() {
     f.roundtrip(id);
 
     // Request a size change to the same size.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(200));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(200));
 
     f.double_roundtrip(id);
 
@@ -217,7 +217,7 @@ fn resize_to_same_size() {
     // server state matches the requested size.
     //
     // FIXME: However, currently it will request the size anyway because the code checks the
-    // current server state, and the last size niri requested of the window was 100×100 (even if
+    // current server state, and the last size naru requested of the window was 100×100 (even if
     // the window already acked and committed in response).
     assert_snapshot!(
         f.client(id).window(&surface).format_recent_configures(),
@@ -229,7 +229,7 @@ fn resize_to_same_size() {
 fn resize_to_different_then_same() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
     let _ = f.client(id).window(&surface).recent_configures();
 
@@ -239,7 +239,7 @@ fn resize_to_different_then_same() {
     f.roundtrip(id);
 
     // Request a size change to a different size.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
 
     f.double_roundtrip(id);
 
@@ -250,10 +250,10 @@ fn resize_to_different_then_same() {
     );
 
     // Before the window has a chance to respond, request a size change to the same, new size.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
 
     // And also drop the Activated state to have some pending change.
-    f.niri_focus_output(2);
+    f.naru_focus_output(2);
 
     f.double_roundtrip(id);
 
@@ -271,7 +271,7 @@ fn resize_to_different_then_same() {
     f.roundtrip(id);
 
     // And also add the Activated state to have some pending change.
-    f.niri_focus_output(1);
+    f.naru_focus_output(1);
 
     f.double_roundtrip(id);
 
@@ -287,7 +287,7 @@ fn resize_to_different_then_same() {
 fn restore_floating_size() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // Change size while we're floating and commit in response to the floating configure.
@@ -299,7 +299,7 @@ fn restore_floating_size() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Change back to tiling.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // We should get a tiling size configure.
@@ -316,7 +316,7 @@ fn restore_floating_size() {
     f.roundtrip(id);
 
     // Change back to floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // We should get a configure restoring out previous 200 × 200 size.
@@ -330,7 +330,7 @@ fn restore_floating_size() {
 fn moving_across_workspaces_doesnt_cancel_resize() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // Change size while we're floating and commit in response to the floating configure.
@@ -342,7 +342,7 @@ fn moving_across_workspaces_doesnt_cancel_resize() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Request a size change to a different size.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
     f.double_roundtrip(id);
 
     // This should request the new size.
@@ -353,9 +353,9 @@ fn moving_across_workspaces_doesnt_cancel_resize() {
 
     // Move to a different workspace before the window has a chance to respond. This will remove it
     // from one floating layout and add into a different one, potentially causing a size request.
-    f.niri().layout.move_to_workspace_down(true);
+    f.naru().layout.move_to_workspace_down(true);
     // Drop the Activated state to force a configure.
-    f.niri_focus_output(2);
+    f.naru_focus_output(2);
     f.double_roundtrip(id);
 
     // This should request the new size again (500 × 200) since the window hasn't responded to it.
@@ -372,8 +372,8 @@ fn moving_across_workspaces_doesnt_cancel_resize() {
 
     // Focus, adding Activated, and move to workspace down, causing removing and adding to a
     // floating layout.
-    f.niri_focus_output(1);
-    f.niri().layout.move_to_workspace_down(true);
+    f.naru_focus_output(1);
+    f.naru().layout.move_to_workspace_down(true);
     f.double_roundtrip(id);
 
     // This should request the current size (300 × 300) since the window responded to the change.
@@ -389,7 +389,7 @@ fn moving_to_floating_doesnt_cancel_resize() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Request a size change to a different size.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
     f.double_roundtrip(id);
 
     // This should request the new size (500 ×).
@@ -399,7 +399,7 @@ fn moving_to_floating_doesnt_cancel_resize() {
     );
 
     // Before the window has a chance to respond, make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should keep requesting the new size (500 ×).
@@ -413,7 +413,7 @@ fn moving_to_floating_doesnt_cancel_resize() {
 fn interactive_move_unfullscreen_to_floating_restores_size() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // Change size while we're floating and commit.
@@ -424,10 +424,10 @@ fn interactive_move_unfullscreen_to_floating_restores_size() {
 
     let _ = f.client(id).window(&surface).recent_configures();
 
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window = mapped.window.clone();
-    niri.layout.set_fullscreen(&window, true);
+    naru.layout.set_fullscreen(&window, true);
     f.double_roundtrip(id);
 
     // This should request a fullscreen size.
@@ -437,13 +437,13 @@ fn interactive_move_unfullscreen_to_floating_restores_size() {
     );
 
     // Start an interactive move which causes an unfullscreen into floating.
-    let output = f.niri_output(1);
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let output = f.naru_output(1);
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window = mapped.window.clone();
-    niri.layout
+    naru.layout
         .interactive_move_begin(window.clone(), &output, Point::default());
-    niri.layout.interactive_move_update(
+    naru.layout.interactive_move_update(
         &window,
         Point::from((1000., 0.)),
         output,
@@ -462,7 +462,7 @@ fn interactive_move_unfullscreen_to_floating_restores_size() {
 fn interactive_move_unmaximize_to_floating_restores_size() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // Change size while we're floating and commit.
@@ -473,10 +473,10 @@ fn interactive_move_unmaximize_to_floating_restores_size() {
 
     let _ = f.client(id).window(&surface).recent_configures();
 
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window = mapped.window.clone();
-    niri.layout.set_maximized(&window, true);
+    naru.layout.set_maximized(&window, true);
     f.double_roundtrip(id);
 
     // This should request a maximized size.
@@ -486,13 +486,13 @@ fn interactive_move_unmaximize_to_floating_restores_size() {
     );
 
     // Start an interactive move which causes an unmaximize into floating.
-    let output = f.niri_output(1);
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let output = f.naru_output(1);
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window = mapped.window.clone();
-    niri.layout
+    naru.layout
         .interactive_move_begin(window.clone(), &output, Point::default());
-    niri.layout.interactive_move_update(
+    naru.layout.interactive_move_update(
         &window,
         Point::from((1000., 0.)),
         output,
@@ -511,7 +511,7 @@ fn interactive_move_unmaximize_to_floating_restores_size() {
 fn resize_during_interactive_move_propagates_to_floating() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // Change size while we're floating and commit.
@@ -523,13 +523,13 @@ fn resize_during_interactive_move_propagates_to_floating() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Start an interactive move.
-    let output = f.niri_output(1);
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let output = f.naru_output(1);
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window_id = mapped.window.clone();
-    niri.layout
+    naru.layout
         .interactive_move_begin(window_id.clone(), &output, Point::default());
-    niri.layout.interactive_move_update(
+    naru.layout.interactive_move_update(
         &window_id,
         Point::from((1000., 0.)),
         output,
@@ -556,7 +556,7 @@ fn resize_during_interactive_move_propagates_to_floating() {
     );
 
     // End the interactive move, placing the window into floating.
-    f.niri().layout.interactive_move_end(&window_id);
+    f.naru().layout.interactive_move_end(&window_id);
     f.double_roundtrip(id);
 
     // This should keep the new 300 × 300 size.
@@ -570,7 +570,7 @@ fn resize_during_interactive_move_propagates_to_floating() {
 fn resize_in_steps() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
     let _ = f.client(id).window(&surface).recent_configures();
 
@@ -579,8 +579,8 @@ fn resize_in_steps() {
     f.double_roundtrip(id);
 
     // Request a size change to a different size in two steps.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
-    f.niri()
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru()
         .layout
         .set_window_height(None, SizeChange::SetFixed(500));
     f.double_roundtrip(id);
@@ -595,9 +595,9 @@ fn resize_in_steps() {
     let serial = window.configures_received.last().unwrap().0;
 
     // Request a size change now that the previous one is pending-but-not-acked.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(600));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(600));
     // Drop Activated to work around resize throttling.
-    f.niri_focus_output(2);
+    f.naru_focus_output(2);
     f.double_roundtrip(id);
 
     // This should request the new size (600 × 500) once.
@@ -621,14 +621,14 @@ fn resize_in_steps() {
     );
 
     // Request a height change now that the first one is committed-to, but the second isn't.
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window = mapped.window.clone();
-    f.niri()
+    f.naru()
         .layout
         .set_window_height(Some(&window), SizeChange::SetFixed(600));
     // Add Activated to work around resize throttling.
-    f.niri_focus_output(1);
+    f.naru_focus_output(1);
     f.double_roundtrip(id);
 
     // This should request the latest sizes (600 × 600).
@@ -642,7 +642,7 @@ fn resize_in_steps() {
 fn state_change_doesnt_break_use_window_size() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
     let _ = f.client(id).window(&surface).recent_configures();
 
@@ -651,7 +651,7 @@ fn state_change_doesnt_break_use_window_size() {
     f.roundtrip(id);
 
     // Request a size change to a different size.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(500));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(500));
     f.double_roundtrip(id);
 
     // This should request the new size (500 × 100).
@@ -664,7 +664,7 @@ fn state_change_doesnt_break_use_window_size() {
     let serial = window.configures_received.last().unwrap().0;
 
     // Request a state change by dropping Activated.
-    f.niri_focus_output(2);
+    f.naru_focus_output(2);
     f.double_roundtrip(id);
 
     // This should request the new size (500 × 100).
@@ -688,14 +688,14 @@ fn state_change_doesnt_break_use_window_size() {
     );
 
     // Request a height change now that the first one is committed-to, but the second isn't.
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window = mapped.window.clone();
-    f.niri()
+    f.naru()
         .layout
         .set_window_height(Some(&window), SizeChange::SetFixed(600));
     // Add Activated state to force a configure.
-    f.niri_focus_output(1);
+    f.naru_focus_output(1);
     f.double_roundtrip(id);
 
     // This should already request the current width (300 × 600) rather than the pending previous
@@ -710,10 +710,10 @@ fn state_change_doesnt_break_use_window_size() {
 fn interactive_move_restores_floating_size_when_set_to_floating() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size while we're floating and commit to make niri remember it.
+    // Change size while we're floating and commit to make naru remember it.
     let window = f.client(id).window(&surface);
     window.set_size(200, 200);
     window.ack_last_and_commit();
@@ -722,7 +722,7 @@ fn interactive_move_restores_floating_size_when_set_to_floating() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Change back to tiling.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // We should get a tiled size configure.
@@ -739,13 +739,13 @@ fn interactive_move_restores_floating_size_when_set_to_floating() {
     f.roundtrip(id);
 
     // Start an interactive move.
-    let output = f.niri_output(1);
-    let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
+    let output = f.naru_output(1);
+    let naru = f.naru();
+    let mapped = naru.layout.windows().next().unwrap().1;
     let window_id = mapped.window.clone();
-    niri.layout
+    naru.layout
         .interactive_move_begin(window_id.clone(), &output, Point::default());
-    niri.layout.interactive_move_update(
+    naru.layout.interactive_move_update(
         &window_id,
         Point::from((1000., 0.)),
         output,
@@ -760,7 +760,7 @@ fn interactive_move_restores_floating_size_when_set_to_floating() {
     );
 
     // Change interactive move to target floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should restore the floating window size (200 × 200).
@@ -770,7 +770,7 @@ fn interactive_move_restores_floating_size_when_set_to_floating() {
     );
 
     // End the interactive move, placing the window into floating.
-    f.niri().layout.interactive_move_end(&window_id);
+    f.naru().layout.interactive_move_end(&window_id);
     f.double_roundtrip(id);
 
     // This should keep the floating window size (200 × 200).
@@ -803,7 +803,7 @@ fn floating_doesnt_store_fullscreen_size() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should request 0 × 0 to unfullscreen.
@@ -814,7 +814,7 @@ fn floating_doesnt_store_fullscreen_size() {
 
     // Without committing, make it tiling again. We never committed while floating, so there's no
     // floating size to remember.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should request the tiled size.
@@ -830,7 +830,7 @@ fn floating_doesnt_store_fullscreen_size() {
     f.roundtrip(id);
 
     // Make the window floating again.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This shouldn't request any size change, particularly not the fullscreen size.
@@ -863,7 +863,7 @@ fn floating_doesnt_store_maximized_size() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should request 0 × 0 to unmaximize.
@@ -874,7 +874,7 @@ fn floating_doesnt_store_maximized_size() {
 
     // Without committing, make it tiling again. We never committed while floating, so there's no
     // floating size to remember.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should request the tiled size.
@@ -890,7 +890,7 @@ fn floating_doesnt_store_maximized_size() {
     f.roundtrip(id);
 
     // Make the window floating again.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This shouldn't request any size change, particularly not the maximized size.
@@ -918,7 +918,7 @@ window-rule {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should clamp to min-width and request 200 × 100.
@@ -934,7 +934,7 @@ window-rule {
     f.roundtrip(id);
 
     // Make it tiling.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     let _ = f.client(id).window(&surface).recent_configures();
@@ -943,7 +943,7 @@ window-rule {
     f.roundtrip(id);
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // This should clamp to max-width and request 300 × 100.
@@ -957,7 +957,7 @@ window-rule {
 fn unmap_from_floating() {
     let (mut f, id, surface) = set_up();
 
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
     let _ = f.client(id).window(&surface).recent_configures();
 
@@ -975,7 +975,7 @@ fn unfullscreen_to_floating_doesnt_send_extra_configure() {
     let (mut f, id, surface) = set_up();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.roundtrip(id);
 
     // Fullscreen.
@@ -1002,7 +1002,7 @@ fn unmaximize_to_floating_doesnt_send_extra_configure() {
     let (mut f, id, surface) = set_up();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.roundtrip(id);
 
     // Maximize.
@@ -1029,10 +1029,10 @@ fn unfullscreen_to_same_size_floating() {
     let (mut f, id, surface) = set_up();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make naru remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1052,7 +1052,7 @@ fn unfullscreen_to_same_size_floating() {
     );
 
     // Unfullscreen into floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // We should see a configure with the same size and no Fullscreen state.
@@ -1067,10 +1067,10 @@ fn unmaximize_to_same_size_floating() {
     let (mut f, id, surface) = set_up();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as maximized, make niri remember it.
+    // Change size to the same as maximized, make naru remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1090,7 +1090,7 @@ fn unmaximize_to_same_size_floating() {
     );
 
     // Unmaximize into floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // We should see a configure with the same size and no maximized state.
@@ -1104,14 +1104,14 @@ fn unmaximize_to_same_size_floating() {
 fn unfullscreen_to_same_size_windowed_fullscreen_floating() {
     let (mut f, id, surface) = set_up();
 
-    let mapped = f.niri().layout.windows().next().unwrap().1;
+    let mapped = f.naru().layout.windows().next().unwrap().1;
     let window_id = mapped.window.clone();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make naru remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1131,7 +1131,7 @@ fn unfullscreen_to_same_size_windowed_fullscreen_floating() {
     );
 
     // Unfullscreen into windowed-fullscreen floating.
-    f.niri().layout.toggle_windowed_fullscreen(&window_id);
+    f.naru().layout.toggle_windowed_fullscreen(&window_id);
     f.double_roundtrip(id);
 
     // Should send configure because the bounds have changed.
@@ -1145,14 +1145,14 @@ fn unfullscreen_to_same_size_windowed_fullscreen_floating() {
 fn unmaximize_to_same_size_windowed_fullscreen_floating() {
     let (mut f, id, surface) = set_up();
 
-    let mapped = f.niri().layout.windows().next().unwrap().1;
+    let mapped = f.naru().layout.windows().next().unwrap().1;
     let window_id = mapped.window.clone();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as maximized, make niri remember it.
+    // Change size to the same as maximized, make naru remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1172,7 +1172,7 @@ fn unmaximize_to_same_size_windowed_fullscreen_floating() {
     );
 
     // Enable windowed-fullscreen.
-    f.niri().layout.toggle_windowed_fullscreen(&window_id);
+    f.naru().layout.toggle_windowed_fullscreen(&window_id);
     f.double_roundtrip(id);
 
     // The windowed-fullscreen configure.
@@ -1182,7 +1182,7 @@ fn unmaximize_to_same_size_windowed_fullscreen_floating() {
     );
 
     // Go back to windowed-fullscreen floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // Should send configure because the bounds have changed.
@@ -1192,7 +1192,7 @@ fn unmaximize_to_same_size_windowed_fullscreen_floating() {
     );
 
     // Disable windowed-fullscreen.
-    f.niri().layout.toggle_windowed_fullscreen(&window_id);
+    f.naru().layout.toggle_windowed_fullscreen(&window_id);
     f.double_roundtrip(id);
 
     // Should send configure dropping the Fullscreen state.
@@ -1213,10 +1213,10 @@ layout {
     let (mut f, id, surface) = set_up_with_config(config);
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make naru remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1236,7 +1236,7 @@ layout {
     );
 
     // Unfullscreen into floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // We should see a configure with the same size and no Fullscreen state.
@@ -1257,10 +1257,10 @@ layout {
     let (mut f, id, surface) = set_up_with_config(config);
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
-    // Change size to the same as fullscreen, make niri remember it.
+    // Change size to the same as fullscreen, make naru remember it.
     let window = f.client(id).window(&surface);
     window.set_size(1920, 1080);
     window.ack_last_and_commit();
@@ -1280,7 +1280,7 @@ layout {
     );
 
     // Unmaximize into floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // We should see a configure with the same size and no Maximized state.
@@ -1296,7 +1296,7 @@ fn repeated_size_request() {
     let _ = f.client(id).window(&surface).recent_configures();
 
     // Make it floating.
-    f.niri().layout.toggle_window_floating(None);
+    f.naru().layout.toggle_window_floating(None);
     f.double_roundtrip(id);
 
     // The floating configure.
@@ -1306,10 +1306,10 @@ fn repeated_size_request() {
     );
 
     // Request a different width (200x100).
-    f.niri()
+    f.naru()
         .layout
         .set_window_width(None, SizeChange::SetFixed(200));
-    f.niri()
+    f.naru()
         .layout
         .set_window_height(None, SizeChange::SetFixed(100));
     f.double_roundtrip(id);
@@ -1321,7 +1321,7 @@ fn repeated_size_request() {
     );
 
     // Request a size change to the same size as we have just requested.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(200));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(200));
     f.double_roundtrip(id);
 
     // Should request nothing as this is a repeated same-size request in floating and the surface
@@ -1337,7 +1337,7 @@ fn repeated_size_request() {
     f.double_roundtrip(id);
 
     // Request a size change to the same size as we have just requested.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(200));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(200));
     f.double_roundtrip(id);
 
     // Should request nothing as this is a repeated same-size request in floating and the surface
@@ -1353,7 +1353,7 @@ fn repeated_size_request() {
     f.double_roundtrip(id);
 
     // Request the size change again.
-    f.niri().layout.set_column_width(SizeChange::SetFixed(200));
+    f.naru().layout.set_column_width(SizeChange::SetFixed(200));
     f.double_roundtrip(id);
 
     // This should send a new configure since the window had committed.

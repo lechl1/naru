@@ -1,0 +1,7 @@
+type               = process
+command            = naru --session
+restart            = false
+working-dir        = $HOME
+ready-notification = pipevar:NOTIFY_FD
+logfile            = $HOME/.local/share/naru/naru.log
+depends-on:        dbus

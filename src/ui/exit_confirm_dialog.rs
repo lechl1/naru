@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 
-use niri_config::Config;
+use naru_config::Config;
 use ordered_float::NotNan;
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::{Alignment, FontDescription};
@@ -14,10 +14,10 @@ use smithay::reexports::gbm::Format as Fourcc;
 use smithay::utils::{Point, Transform};
 
 use crate::animation::{Animation, Clock};
-use crate::niri_render_elements;
+use crate::naru_render_elements;
 use crate::render_helpers::memory::MemoryBuffer;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::utils::{output_size, to_physical_precise_round};
@@ -36,7 +36,7 @@ pub struct ExitConfirmDialog {
     config: Rc<RefCell<Config>>,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     ExitConfirmDialogRenderElement => {
         Texture = RescaleRenderElement<PrimaryGpuTextureRenderElement>,
         SolidColor = SolidColorRenderElement,
@@ -146,7 +146,7 @@ impl ExitConfirmDialog {
         matches!(self.state, State::Showing(_) | State::Hiding(_))
     }
 
-    pub fn render<R: NiriRenderer>(
+    pub fn render<R: NaruRenderer>(
         &self,
         renderer: &mut R,
         output: &Output,
@@ -290,7 +290,7 @@ fn text(markup: bool) -> String {
     };
 
     format!(
-        "Are you sure you want to exit niri?\n\n\
+        "Are you sure you want to exit naru?\n\n\
          Press {key} to confirm."
     )
 }
@@ -298,7 +298,7 @@ fn text(markup: bool) -> String {
 #[cfg(feature = "dbus")]
 pub fn a11y_node() -> accesskit::Node {
     let mut node = accesskit::Node::new(accesskit::Role::AlertDialog);
-    node.set_label("Exit niri");
+    node.set_label("Exit naru");
     node.set_description(text(false));
     node.set_modal();
     node

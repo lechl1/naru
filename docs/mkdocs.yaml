@@ -1,7 +1,7 @@
-site_name: niri
+site_name: naru
 docs_dir: wiki
-site_url: https://niri-wm.github.io/niri
-repo_url: https://github.com/niri-wm/niri
+site_url: https://lechl1.github.io/naru
+repo_url: https://github.com/lechl1/naru
 edit_uri: edit/main/docs/wiki/
 use_directory_urls: false
 
@@ -51,7 +51,7 @@ hooks:
   - hooks/shortcodes.py
   - hooks/remove-must-fail.py
 extra_css:
-  - _assets/stylesheets/niri.css
+  - _assets/stylesheets/naru.css
 strict: true
 validation:
   nav:
@@ -79,15 +79,15 @@ nav:
     - Overview: Overview.md
     - Screencasting: Screencasting.md
     - Layer‐Shell Components: Layer‐Shell-Components.md
-    - IPC, niri msg: IPC.md
+    - IPC, naru msg: IPC.md
     - Application-Specific Issues: Application-Issues.md
     - Nvidia: Nvidia.md
     - Xwayland: Xwayland.md
     - Gestures: Gestures.md
     - Fullscreen and Maximize: Fullscreen-and-Maximize.md
     - Window Effects: Window-Effects.md
-    - Packaging niri: Packaging-niri.md
-    - Integrating niri: Integrating-niri.md
+    - Packaging naru: Packaging-naru.md
+    - Integrating naru: Integrating-naru.md
     - Security Model: Security-Model.md
     - Accessibility: Accessibility.md
     - Name and Logo: Name-and-Logo.md
@@ -110,9 +110,9 @@ nav:
     - Include: Configuration:-Include.md
   - Development:
     - Design Principles: Development:-Design-Principles.md
-    - Developing niri: Development:-Developing-niri.md
-    - Documenting niri: Development:-Documenting-niri.md
-    - Releasing niri: Development:-Releasing-niri.md
+    - Developing naru: Development:-Developing-naru.md
+    - Documenting naru: Development:-Documenting-naru.md
+    - Releasing naru: Development:-Releasing-naru.md
     - Fractional Layout: Development:-Fractional-Layout.md
     - Redraw Loop: Development:-Redraw-Loop.md
     - Animation Timing: Development:-Animation-Timing.md

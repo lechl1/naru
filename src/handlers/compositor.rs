@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 
-use niri_ipc::PositionChange;
+use naru_ipc::PositionChange;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
 use smithay::reexports::calloop::Interest;
@@ -21,14 +21,14 @@ use smithay::{delegate_compositor, delegate_shm};
 use super::xdg_shell::add_mapped_toplevel_pre_commit_hook;
 use crate::handlers::XDG_ACTIVATION_TOKEN_TIMEOUT;
 use crate::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _};
-use crate::niri::{CastTarget, ClientState, LockState, State};
+use crate::naru::{CastTarget, ClientState, LockState, State};
 use crate::utils::transaction::Transaction;
 use crate::utils::{is_mapped, send_scale_transform};
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped};
 
 impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {
-        &mut self.niri.compositor_state
+        &mut self.naru.compositor_state
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
@@ -41,7 +41,7 @@ impl CompositorHandler for State {
             root = parent;
         }
 
-        if let Some(output) = self.niri.output_for_root(&root) {
+        if let Some(output) = self.naru.output_for_root(&root) {
             let scale = output.current_scale();
             let transform = output.current_transform();
             with_states(surface, |data| {
@@ -68,7 +68,7 @@ impl CompositorHandler for State {
         }
 
         // Update the cached root surface.
-        self.niri
+        self.naru
             .root_surface
             .insert(surface.clone(), root_surface.clone());
 
@@ -78,7 +78,7 @@ impl CompositorHandler for State {
 
         if surface == &root_surface {
             // This is a root surface commit. It might have mapped a previously-unmapped toplevel.
-            if let Entry::Occupied(entry) = self.niri.unmapped_windows.entry(surface.clone()) {
+            if let Entry::Occupied(entry) = self.naru.unmapped_windows.entry(surface.clone()) {
                 if is_mapped(surface) {
                     // The toplevel got mapped.
                     let Unmapped {
@@ -113,12 +113,12 @@ impl CompositorHandler for State {
                     {
                         // Check that the output is still connected.
                         let output =
-                            output.filter(|o| self.niri.layout.monitor_for_output(o).is_some());
+                            output.filter(|o| self.naru.layout.monitor_for_output(o).is_some());
 
                         // Check that the workspace still exists.
                         let workspace_id = workspace_name
                             .as_deref()
-                            .and_then(|n| self.niri.layout.find_workspace_by_name(n))
+                            .and_then(|n| self.naru.layout.find_workspace_by_name(n))
                             .map(|(_, ws)| ws.id());
 
                         (
@@ -167,7 +167,7 @@ impl CompositorHandler for State {
                         if token.is_some() {
                             ActivateWindow::Yes
                         } else {
-                            let config = self.niri.config.borrow();
+                            let config = self.naru.config.borrow();
                             if config.debug.strict_new_window_focus_policy {
                                 ActivateWindow::No
                             } else {
@@ -178,7 +178,7 @@ impl CompositorHandler for State {
 
                     let parent = toplevel
                         .parent()
-                        .and_then(|parent| self.niri.layout.find_window_and_output(&parent))
+                        .and_then(|parent| self.naru.layout.find_window_and_output(&parent))
                         // Only consider the parent if we configured the window for the same
                         // output.
                         //
@@ -196,7 +196,7 @@ impl CompositorHandler for State {
                     self.remove_default_dmabuf_pre_commit_hook(surface);
                     let hook = add_mapped_toplevel_pre_commit_hook(toplevel);
                     let mapped = {
-                        let config = self.niri.config.borrow();
+                        let config = self.naru.config.borrow();
                         Mapped::new(window, rules, hook, &config)
                     };
                     let window = mapped.window.clone();
@@ -211,7 +211,7 @@ impl CompositorHandler for State {
                     } else {
                         AddWindowTarget::Auto
                     };
-                    let output = self.niri.layout.add_window(
+                    let output = self.naru.layout.add_window(
                         mapped,
                         target,
                         width,
@@ -226,25 +226,25 @@ impl CompositorHandler for State {
                     // if the window ended up fullscreen, then we only know that it is also
                     // maximized from the is_pending_maximized variable. Tell the layout about it
                     // here so that unfullscreening the window makes it maximized.
-                    if let Some((mapped, _)) = self.niri.layout.find_window_and_output(surface) {
+                    if let Some((mapped, _)) = self.naru.layout.find_window_and_output(surface) {
                         if mapped.pending_sizing_mode().is_fullscreen() && is_pending_maximized {
-                            self.niri.layout.set_maximized(&window, true);
+                            self.naru.layout.set_maximized(&window, true);
                         }
                     } else {
                         error!("layout is missing the window that we just added");
                     }
 
                     if let Some(output) = output {
-                        self.niri.layout.start_open_animation_for_window(&window);
+                        self.naru.layout.start_open_animation_for_window(&window);
 
-                        let new_focus = self.niri.layout.focus().map(|m| &m.window);
+                        let new_focus = self.naru.layout.focus().map(|m| &m.window);
                         if new_focus == Some(&window) {
                             // We activated the newly opened window.
                             self.maybe_warp_cursor_to_focus();
-                            self.niri.layer_shell_on_demand_focus = None;
+                            self.naru.layer_shell_on_demand_focus = None;
                         }
 
-                        self.niri.queue_redraw(&output);
+                        self.naru.queue_redraw(&output);
                     }
                     return;
                 }
@@ -260,7 +260,7 @@ impl CompositorHandler for State {
             }
 
             // This is a commit of a previously-mapped root or a non-toplevel root.
-            if let Some((mapped, output)) = self.niri.layout.find_window_and_output(surface) {
+            if let Some((mapped, output)) = self.naru.layout.find_window_and_output(surface) {
                 let window = mapped.window.clone();
                 let output = output.cloned();
 
@@ -274,7 +274,7 @@ impl CompositorHandler for State {
                 if !is_mapped {
                     let blocker = transaction.blocker();
                     self.backend.with_primary_renderer(|renderer| {
-                        self.niri
+                        self.naru
                             .layout
                             .start_close_animation_for_window(renderer, &window, blocker);
                     });
@@ -288,20 +288,20 @@ impl CompositorHandler for State {
                     // Test client: wleird-unmap.
                     trace!("toplevel got unmapped");
 
-                    let active_window = self.niri.layout.focus().map(|m| &m.window);
+                    let active_window = self.naru.layout.focus().map(|m| &m.window);
                     let was_active = active_window == Some(&window);
 
-                    self.niri
+                    self.naru
                         .stop_casts_for_target(CastTarget::Window { id: id.get() });
 
-                    self.niri.window_mru_ui.remove_window(id);
-                    self.niri.layout.remove_window(&window, transaction.clone());
+                    self.naru.window_mru_ui.remove_window(id);
+                    self.naru.layout.remove_window(&window, transaction.clone());
                     self.add_default_dmabuf_pre_commit_hook(surface);
 
                     // If this is the only instance, then this transaction will complete
                     // immediately, so no need to set the timer.
                     if !transaction.is_last() {
-                        transaction.register_deadline_timer(&self.niri.event_loop);
+                        transaction.register_deadline_timer(&self.naru.event_loop);
                     }
 
                     if was_active {
@@ -311,11 +311,11 @@ impl CompositorHandler for State {
                     // Newly-unmapped toplevels must perform the initial commit-configure sequence
                     // afresh.
                     let unmapped = Unmapped::new(window);
-                    self.niri.unmapped_windows.insert(surface.clone(), unmapped);
+                    self.naru.unmapped_windows.insert(surface.clone(), unmapped);
 
                     if let Some(output) = output {
-                        self.niri.queue_redraw(&output);
-                        self.niri.queue_redraw_mru_output();
+                        self.naru.queue_redraw(&output);
+                        self.naru.queue_redraw_mru_output();
                     }
                     return;
                 }
@@ -342,14 +342,14 @@ impl CompositorHandler for State {
                 }
 
                 // The toplevel remains mapped.
-                self.niri.window_mru_ui.update_window(&self.niri.layout, id);
-                self.niri.layout.update_window(&window, serial);
+                self.naru.window_mru_ui.update_window(&self.naru.layout, id);
+                self.naru.layout.update_window(&window, serial);
 
                 // Move the toplevel according to the attach offset.
                 if let Some(delta) = buffer_delta {
                     if delta.x != 0 || delta.y != 0 {
                         let (x, y) = delta.to_f64().into();
-                        self.niri.layout.move_floating_window(
+                        self.naru.layout.move_floating_window(
                             Some(&window),
                             PositionChange::AdjustFixed(x),
                             PositionChange::AdjustFixed(y),
@@ -362,8 +362,8 @@ impl CompositorHandler for State {
                 self.update_reactive_popups(&window);
 
                 if let Some(output) = output {
-                    self.niri.queue_redraw(&output);
-                    self.niri.queue_redraw_mru_output();
+                    self.naru.queue_redraw(&output);
+                    self.naru.queue_redraw_mru_output();
                 }
                 return;
             }
@@ -372,27 +372,27 @@ impl CompositorHandler for State {
         }
 
         // This is a commit of a non-root or a non-toplevel root.
-        let root_window_output = self.niri.layout.find_window_and_output(&root_surface);
+        let root_window_output = self.naru.layout.find_window_and_output(&root_surface);
         if let Some((mapped, output)) = root_window_output {
             let window = mapped.window.clone();
             let output = output.cloned();
             window.on_commit();
-            self.niri
+            self.naru
                 .window_mru_ui
-                .update_window(&self.niri.layout, mapped.id());
-            self.niri.layout.update_window(&window, None);
+                .update_window(&self.naru.layout, mapped.id());
+            self.naru.layout.update_window(&window, None);
             if let Some(output) = output {
-                self.niri.queue_redraw(&output);
-                self.niri.queue_redraw_mru_output();
+                self.naru.queue_redraw(&output);
+                self.naru.queue_redraw_mru_output();
             }
             return;
         }
 
         // This might be a popup.
         self.popups_handle_commit(surface);
-        if let Some(popup) = self.niri.popups.find_popup(surface) {
+        if let Some(popup) = self.naru.popups.find_popup(surface) {
             if let Some(output) = self.output_for_popup(&popup) {
-                self.niri.queue_redraw(&output.clone());
+                self.naru.queue_redraw(&output.clone());
             }
             return;
         }
@@ -404,7 +404,7 @@ impl CompositorHandler for State {
 
         // This might be a cursor surface.
         if matches!(
-            &self.niri.cursor_manager.cursor_image(),
+            &self.naru.cursor_manager.cursor_image(),
             CursorImageStatus::Surface(s) if s == &root_surface
         ) {
             // In case the cursor surface has been committed handle the role specific
@@ -430,13 +430,13 @@ impl CompositorHandler for State {
             }
 
             // FIXME: granular redraws for cursors.
-            self.niri.queue_redraw_all();
+            self.naru.queue_redraw_all();
             return;
         }
 
         // This might be a DnD icon surface.
-        if matches!(&self.niri.dnd_icon, Some(icon) if icon.surface == root_surface) {
-            let dnd_icon = self.niri.dnd_icon.as_mut().unwrap();
+        if matches!(&self.naru.dnd_icon, Some(icon) if icon.surface == root_surface) {
+            let dnd_icon = self.naru.dnd_icon.as_mut().unwrap();
 
             // In case the dnd surface has been committed handle the role specific
             // buffer offset by applying the offset on the dnd icon offset
@@ -454,18 +454,18 @@ impl CompositorHandler for State {
             }
 
             // FIXME: granular redraws for cursors.
-            self.niri.queue_redraw_all();
+            self.naru.queue_redraw_all();
             return;
         }
 
         // This might be a lock surface.
-        for (output, state) in &self.niri.output_state {
+        for (output, state) in &self.naru.output_state {
             if let Some(lock_surface) = &state.lock_surface {
                 if lock_surface.wl_surface() == &root_surface {
-                    if matches!(self.niri.lock_state, LockState::WaitingForSurfaces { .. }) {
-                        self.niri.maybe_continue_to_locking();
+                    if matches!(self.naru.lock_state, LockState::WaitingForSurfaces { .. }) {
+                        self.naru.maybe_continue_to_locking();
                     } else {
-                        self.niri.queue_redraw(&output.clone());
+                        self.naru.queue_redraw(&output.clone());
                     }
 
                     return;
@@ -488,15 +488,15 @@ impl CompositorHandler for State {
         // This is still not perfect, as this function is called already after the (first)
         // subsurface is destroyed; in the case of alacritty, this is the top CSD shadow. But, it
         // gets most of the job done.
-        if let Some(root) = self.niri.root_surface.get(surface) {
-            if let Some((mapped, output)) = self.niri.layout.find_window_and_output(root) {
+        if let Some(root) = self.naru.root_surface.get(surface) {
+            if let Some((mapped, output)) = self.naru.layout.find_window_and_output(root) {
                 let window = mapped.window.clone();
                 let output = output.cloned();
                 self.store_unmap_snapshot(&window, output.as_ref());
             }
         }
 
-        self.niri
+        self.naru
             .root_surface
             .retain(|k, v| k != surface && v != surface);
 
@@ -507,7 +507,7 @@ impl CompositorHandler for State {
         //
         // So, this may come out empty, and then the toplevel pre-commit hook will be removed in the
         // subsequent toplevel_destroyed() call.
-        if let Some(hook) = self.niri.dmabuf_pre_commit_hook.remove(surface) {
+        if let Some(hook) = self.naru.dmabuf_pre_commit_hook.remove(surface) {
             remove_pre_commit_hook(surface, &hook);
         }
     }
@@ -519,7 +519,7 @@ impl BufferHandler for State {
 
 impl ShmHandler for State {
     fn shm_state(&self) -> &ShmState {
-        &self.niri.shm_state
+        &self.naru.shm_state
     }
 }
 
@@ -551,10 +551,10 @@ impl State {
                     if let Some(client) = surface.client() {
                         let res =
                             state
-                                .niri
+                                .naru
                                 .event_loop
                                 .insert_source(source, move |_, _, state| {
-                                    let display_handle = state.niri.display_handle.clone();
+                                    let display_handle = state.naru.display_handle.clone();
                                     state
                                         .client_compositor_state(&client)
                                         .blocker_cleared(state, &display_handle);
@@ -570,14 +570,14 @@ impl State {
         });
 
         let s = surface.clone();
-        if let Some(prev) = self.niri.dmabuf_pre_commit_hook.insert(s, hook) {
+        if let Some(prev) = self.naru.dmabuf_pre_commit_hook.insert(s, hook) {
             error!("tried to add dmabuf pre-commit hook when there was already one");
             remove_pre_commit_hook(surface, &prev);
         }
     }
 
     pub fn remove_default_dmabuf_pre_commit_hook(&mut self, surface: &WlSurface) {
-        if let Some(hook) = self.niri.dmabuf_pre_commit_hook.remove(surface) {
+        if let Some(hook) = self.naru.dmabuf_pre_commit_hook.remove(surface) {
             remove_pre_commit_hook(surface, &hook);
         } else {
             error!("tried to remove dmabuf pre-commit hook but there was none");

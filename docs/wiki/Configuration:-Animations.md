@@ -1,6 +1,6 @@
 ### Overview
 
-Niri has several animations which you can configure in the same way.
+Naru has several animations which you can configure in the same way.
 Additionally, you can disable or slow down all animations at once.
 
 Here's a quick glance at the available animations with their default values.
@@ -88,7 +88,7 @@ animations {
 }
 ```
 
-Currently, niri only supports five curves.
+Currently, naru only supports five curves.
 You can get a feel for them on pages like [easings.net](https://easings.net/).
 
 - `ease-out-quad` <sup>Since: 0.1.5</sup>
@@ -187,8 +187,8 @@ You can write a custom shader for drawing the window during an open animation.
 
 See [this example shader](./examples/open_custom_shader.frag) for a full documentation with several animations to experiment with.
 
-If a custom shader fails to compile, niri will print a warning and fall back to the default, or previous successfully compiled shader.
-When running niri as a systemd service, you can see the warnings in the journal: `journalctl -ef /usr/bin/niri`
+If a custom shader fails to compile, naru will print a warning and fall back to the default, or previous successfully compiled shader.
+When running naru as a systemd service, you can see the warnings in the journal: `journalctl -ef /usr/bin/naru`
 
 > [!WARNING]
 >
@@ -215,7 +215,7 @@ animations {
                     color = mix(from, to, coords_geo.y);
                 }
 
-                return color * niri_clamped_progress;
+                return color * naru_clamped_progress;
             }
         "
     }
@@ -247,8 +247,8 @@ You can write a custom shader for drawing the window during a close animation.
 
 See [this example shader](./examples/close_custom_shader.frag) for a full documentation with several animations to experiment with.
 
-If a custom shader fails to compile, niri will print a warning and fall back to the default, or previous successfully compiled shader.
-When running niri as a systemd service, you can see the warnings in the journal: `journalctl -ef /usr/bin/niri`
+If a custom shader fails to compile, naru will print a warning and fall back to the default, or previous successfully compiled shader.
+When running naru as a systemd service, you can see the warnings in the journal: `journalctl -ef /usr/bin/naru`
 
 > [!WARNING]
 >
@@ -272,7 +272,7 @@ animations {
                     color = mix(from, to, coords_geo.y);
                 }
 
-                return color * (1.0 - niri_clamped_progress);
+                return color * (1.0 - naru_clamped_progress);
             }
         "
     }
@@ -343,8 +343,8 @@ You can write a custom shader for drawing the window during a resize animation.
 
 See [this example shader](./examples/resize_custom_shader.frag) for a full documentation with several animations to experiment with.
 
-If a custom shader fails to compile, niri will print a warning and fall back to the default, or previous successfully compiled shader.
-When running niri as a systemd service, you can see the warnings in the journal: `journalctl -ef /usr/bin/niri`
+If a custom shader fails to compile, naru will print a warning and fall back to the default, or previous successfully compiled shader.
+When running naru as a systemd service, you can see the warnings in the journal: `journalctl -ef /usr/bin/naru`
 
 > [!WARNING]
 >
@@ -358,8 +358,8 @@ animations {
     window-resize {
         custom-shader r"
             vec4 resize_color(vec3 coords_curr_geo, vec3 size_curr_geo) {
-                vec3 coords_tex_next = niri_geo_to_tex_next * coords_curr_geo;
-                vec4 color = texture2D(niri_tex_next, coords_tex_next.st);
+                vec3 coords_tex_next = naru_geo_to_tex_next * coords_curr_geo;
+                vec4 color = texture2D(naru_tex_next, coords_tex_next.st);
                 return color;
             }
         "
@@ -444,7 +444,7 @@ animations {
 
 <sup>Since: 0.1.5</sup>
 
-Sometimes, when two animations are meant to play together synchronized, niri will drive them both with the same configuration.
+Sometimes, when two animations are meant to play together synchronized, naru will drive them both with the same configuration.
 
 For example, if a window resize causes the view to move, then that view movement animation will also use the `window-resize` configuration (rather than the `horizontal-view-movement` configuration).
 This is especially important for animated resizes to look good when using `center-focused-column "always"`.

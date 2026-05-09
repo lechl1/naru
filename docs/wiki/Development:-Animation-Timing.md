@@ -5,7 +5,7 @@ For example, a 170 Hz monitor can draw a frame every ~5.88 ms.
 
 Most of the time, the compositor doesn't actually redraw the monitor: when nothing changes on screen (e.g. you're reading a document and aren't moving your cursor), it would be wasteful to wake up the GPU to composite the same image.
 During an animation however, screen contents do change every frame.
-Niri will generally start drawing the next frame as soon as the previous one shows up on screen.
+Naru will generally start drawing the next frame as soon as the previous one shows up on screen.
 
 Since the monitor refresh cycle is fixed in most cases (even with VRR, there's a maximum refresh rate), the compositor can predict when the next frame will show up on the monitor, and render ongoing animations for that exact moment in time.
 This way, all animation frames are perfectly timed with no jitter, regardless of when exactly the rendering code had a chance to run.
@@ -23,12 +23,12 @@ There are hence several properties that a compositor wants from its timing syste
    Also, fetching the current system time [can be quite expensive](https://mastodon.online/@YaLTeR/109934977035721850) in terms of overhead.
 1. It should be reasonably easy to implement an animation slow-down preference, so all animations can be slowed down or sped up by the same factor.
 
-The solution in niri is a `LazyClock`, a clock that remembers one timestamp.
+The solution in naru is a `LazyClock`, a clock that remembers one timestamp.
 Initially, the timestamp is empty, so when you ask `LazyClock` for the current time, it will fetch and return the system time, and also remember it.
 Subsequently, it will keep returning the same timestamp that it had remembered.
 
 You can also clear the timestamp, then `LazyClock` will fetch the system time anew when it's needed.
-In niri, the timestamp is cleared at the end of every event loop iteration, right before going to sleep waiting for new events.
+In naru, the timestamp is cleared at the end of every event loop iteration, right before going to sleep waiting for new events.
 This way, anything that happens next (like a user key press) will fetch and use the most up-to-date timestamp as soon as one is needed, but then the processing code will keep getting the exact same timestamp, since `LazyClock` stores it.
 
 You can also just manually set the timestamp to a specific value.
@@ -42,5 +42,5 @@ However, our target timestamp (for rendering) comes from the system time, so the
 That is, overriding the timestamp and then querying the `AdjustableClock` will return a *different* timestamp that is correct and consistent with the adjustments made by `AdjustableClock`.
 This is reflected in the API by naming the function `Clock::set_unadjusted()` (and there's also `Clock::now_unadjusted()` to get the raw timestamp).
 
-The clock is shared among all animations in niri through passing around and storing a reference-counted pointer.
+The clock is shared among all animations in naru through passing around and storing a reference-counted pointer.
 This way, overriding the time automatically applies to everything, whereas in tests we can use a separate clock per test so that they don't interfere with each other.

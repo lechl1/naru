@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use niri_config::{Config, ModKey};
+use naru_config::{Config, ModKey};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 
-use crate::niri::Niri;
+use crate::naru::Naru;
 use crate::utils::id::IdCounter;
 
 pub mod tty;
@@ -37,7 +37,7 @@ pub enum RenderResult {
     Skipped,
 }
 
-pub type IpcOutputMap = HashMap<OutputId, niri_ipc::Output>;
+pub type IpcOutputMap = HashMap<OutputId, naru_ipc::Output>;
 
 static OUTPUT_ID_COUNTER: IdCounter = IdCounter::new();
 
@@ -55,12 +55,12 @@ impl OutputId {
 }
 
 impl Backend {
-    pub fn init(&mut self, niri: &mut Niri) {
+    pub fn init(&mut self, naru: &mut Naru) {
         let _span = tracy_client::span!("Backend::init");
         match self {
-            Backend::Tty(tty) => tty.init(niri),
-            Backend::Winit(winit) => winit.init(niri),
-            Backend::Headless(headless) => headless.init(niri),
+            Backend::Tty(tty) => tty.init(naru),
+            Backend::Winit(winit) => winit.init(naru),
+            Backend::Headless(headless) => headless.init(naru),
         }
     }
 
@@ -85,14 +85,14 @@ impl Backend {
 
     pub fn render(
         &mut self,
-        niri: &mut Niri,
+        naru: &mut Naru,
         output: &Output,
         target_presentation_time: Duration,
     ) -> RenderResult {
         match self {
-            Backend::Tty(tty) => tty.render(niri, output, target_presentation_time),
-            Backend::Winit(winit) => winit.render(niri, output),
-            Backend::Headless(headless) => headless.render(niri, output),
+            Backend::Tty(tty) => tty.render(naru, output, target_presentation_time),
+            Backend::Winit(winit) => winit.render(naru, output),
+            Backend::Headless(headless) => headless.render(naru, output),
         }
     }
 
@@ -177,25 +177,25 @@ impl Backend {
         }
     }
 
-    pub fn set_output_on_demand_vrr(&mut self, niri: &mut Niri, output: &Output, enable_vrr: bool) {
+    pub fn set_output_on_demand_vrr(&mut self, naru: &mut Naru, output: &Output, enable_vrr: bool) {
         match self {
-            Backend::Tty(tty) => tty.set_output_on_demand_vrr(niri, output, enable_vrr),
+            Backend::Tty(tty) => tty.set_output_on_demand_vrr(naru, output, enable_vrr),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
         }
     }
 
-    pub fn update_ignored_nodes_config(&mut self, niri: &mut Niri) {
+    pub fn update_ignored_nodes_config(&mut self, naru: &mut Naru) {
         match self {
-            Backend::Tty(tty) => tty.update_ignored_nodes_config(niri),
+            Backend::Tty(tty) => tty.update_ignored_nodes_config(naru),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
         }
     }
 
-    pub fn on_output_config_changed(&mut self, niri: &mut Niri) {
+    pub fn on_output_config_changed(&mut self, naru: &mut Naru) {
         match self {
-            Backend::Tty(tty) => tty.on_output_config_changed(niri),
+            Backend::Tty(tty) => tty.on_output_config_changed(naru),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
         }

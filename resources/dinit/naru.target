@@ -1,0 +1,6 @@
+type           = internal
+restart        = false
+depends-on:    naru
+waits-for.d:   $XDG_CONFIG_HOME/dinit.d/naru.d/
+waits-for.d:   $HOME/.config/dinit.d/naru.d/
+waits-for.d:   /etc/dinit.d/user/naru.d/

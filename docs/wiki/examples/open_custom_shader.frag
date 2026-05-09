@@ -1,9 +1,9 @@
 // Your shader must contain one function (see the bottom of this file).
 //
-// It should not contain any uniform definitions or anything else, as niri
+// It should not contain any uniform definitions or anything else, as naru
 // provides them for you.
 //
-// All symbols defined by niri will have a niri_ prefix, so don't use it for
+// All symbols defined by naru will have a naru_ prefix, so don't use it for
 // your own variables and functions.
 
 // The function that you must define looks like this:
@@ -32,38 +32,38 @@ vec4 open_color(vec3 coords_geo, vec3 size_geo) {
 // It is homogeneous (the Z component is equal to 1).
 //
 // The function must return the color of the pixel (with premultiplied alpha).
-// The pixel color will be further processed by niri (for example, to apply the
+// The pixel color will be further processed by naru (for example, to apply the
 // final opacity from window rules).
 
-// Now let's go over the uniforms that niri defines.
+// Now let's go over the uniforms that naru defines.
 //
 // You should only rely on the uniforms documented here. Any other uniforms can
 // change or be removed without notice.
 
 // The window texture.
-uniform sampler2D niri_tex;
+uniform sampler2D naru_tex;
 
 // Matrix that converts geometry coordinates into the window texture
 // coordinates.
 //
 // The window texture can and will go outside the geometry (for client-side
 // decoration shadows for example), which is why this matrix is necessary.
-uniform mat3 niri_geo_to_tex;
+uniform mat3 naru_geo_to_tex;
 
 
 // Unclamped progress of the animation.
 //
 // Goes from 0 to 1 but may overshoot and oscillate.
-uniform float niri_progress;
+uniform float naru_progress;
 
 // Clamped progress of the animation.
 //
 // Goes from 0 to 1, but will stop at 1 as soon as it first reaches 1. Will not
 // overshoot or oscillate.
-uniform float niri_clamped_progress;
+uniform float naru_clamped_progress;
 
 // Random float in [0; 1), consistent for the duration of the animation.
-uniform float niri_random_seed;
+uniform float naru_random_seed;
 
 // Now let's look at some examples. You can copy everything below this line
 // into your custom-shader to experiment.
@@ -83,7 +83,7 @@ vec4 solid_gradient(vec3 coords_geo, vec3 size_geo) {
     }
 
     // Make it opaque.
-    color *= niri_clamped_progress;
+    color *= naru_clamped_progress;
 
     return color;
 }
@@ -92,15 +92,15 @@ vec4 solid_gradient(vec3 coords_geo, vec3 size_geo) {
 // opening animation.
 vec4 default_open(vec3 coords_geo, vec3 size_geo) {
     // Scale up the window.
-    float scale = max(0.0, (niri_progress / 2.0 + 0.5));
+    float scale = max(0.0, (naru_progress / 2.0 + 0.5));
     coords_geo = vec3((coords_geo.xy - vec2(0.5)) / scale + vec2(0.5), 1.0);
 
     // Get color from the window texture.
-    vec3 coords_tex = niri_geo_to_tex * coords_geo;
-    vec4 color = texture2D(niri_tex, coords_tex.st);
+    vec3 coords_tex = naru_geo_to_tex * coords_geo;
+    vec4 color = texture2D(naru_tex, coords_tex.st);
 
     // Make the window opaque.
-    color *= niri_clamped_progress;
+    color *= naru_clamped_progress;
 
     return color;
 }
@@ -108,12 +108,12 @@ vec4 default_open(vec3 coords_geo, vec3 size_geo) {
 // Example: show the window as an expanding circle.
 // Recommended setting: duration-ms 250
 vec4 expanding_circle(vec3 coords_geo, vec3 size_geo) {
-    vec3 coords_tex = niri_geo_to_tex * coords_geo;
-    vec4 color = texture2D(niri_tex, coords_tex.st);
+    vec3 coords_tex = naru_geo_to_tex * coords_geo;
+    vec4 color = texture2D(naru_tex, coords_tex.st);
 
     vec2 coords = (coords_geo.xy - vec2(0.5, 0.5)) * size_geo.xy * 2.0;
     coords = coords / length(size_geo.xy);
-    float p = niri_clamped_progress;
+    float p = naru_clamped_progress;
     if (p * p <= dot(coords, coords))
         color = vec4(0.0);
 

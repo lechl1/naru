@@ -8,7 +8,7 @@ use smithay::input::pointer::{
 use smithay::input::SeatHandler;
 use smithay::utils::{IsAlive, Logical, Point};
 
-use crate::niri::State;
+use crate::naru::State;
 
 pub struct ResizeGrab {
     start_data: PointerGrabStartData<State>,
@@ -21,9 +21,9 @@ impl ResizeGrab {
     }
 
     fn on_ungrab(&mut self, state: &mut State) {
-        state.niri.layout.interactive_resize_end(&self.window);
+        state.naru.layout.interactive_resize_end(&self.window);
         state
-            .niri
+            .naru
             .cursor_manager
             .set_cursor_image(CursorImageStatus::default_named());
     }
@@ -43,7 +43,7 @@ impl PointerGrab<State> for ResizeGrab {
         if self.window.alive() {
             let delta = event.location - self.start_data.location;
             let ongoing = data
-                .niri
+                .naru
                 .layout
                 .interactive_resize_update(&self.window, delta);
             if ongoing {

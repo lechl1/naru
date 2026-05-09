@@ -1,12 +1,12 @@
 use std::cmp::{max, min};
 
-use niri_config::utils::MergeWith as _;
-use niri_config::window_rule::{Match, WindowRule};
-use niri_config::{
+use naru_config::utils::MergeWith as _;
+use naru_config::window_rule::{Match, WindowRule};
+use naru_config::{
     BackgroundEffect, BlockOutFrom, BorderRule, CornerRadius, FloatingPosition, PresetSize,
     ResolvedPopupsRules, ShadowRule, TabIndicatorRule,
 };
-use niri_ipc::ColumnDisplay;
+use naru_ipc::ColumnDisplay;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Logical, Size};
 use smithay::wayland::compositor::with_states;

@@ -8,7 +8,7 @@ use smithay::input::pointer::{
 use smithay::input::SeatHandler;
 use smithay::utils::{Logical, Point};
 
-use crate::niri::State;
+use crate::naru::State;
 use crate::window::Mapped;
 
 pub struct PickWindowGrab {
@@ -21,15 +21,15 @@ impl PickWindowGrab {
     }
 
     fn on_ungrab(&mut self, state: &mut State) {
-        if let Some(tx) = state.niri.pick_window.take() {
+        if let Some(tx) = state.naru.pick_window.take() {
             let _ = tx.send_blocking(None);
         }
         state
-            .niri
+            .naru
             .cursor_manager
             .set_cursor_image(CursorImageStatus::default_named());
         // Redraw to update the cursor.
-        state.niri.queue_redraw_all();
+        state.naru.queue_redraw_all();
     }
 }
 
@@ -65,11 +65,11 @@ impl PointerGrab<State> for PickWindowGrab {
         }
 
         // We're handling this press, don't send the release to the window.
-        data.niri.suppressed_buttons.insert(event.button);
+        data.naru.suppressed_buttons.insert(event.button);
 
-        if let Some(tx) = data.niri.pick_window.take() {
+        if let Some(tx) = data.naru.pick_window.take() {
             let _ = tx.send_blocking(
-                data.niri
+                data.naru
                     .window_under(handle.current_location())
                     .map(Mapped::id),
             );

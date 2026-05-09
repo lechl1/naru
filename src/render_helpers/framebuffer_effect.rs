@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use glam::{Mat3, Vec2};
-use niri_config::CornerRadius;
+use naru_config::CornerRadius;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Element, Id, RenderElement};
 use smithay::backend::renderer::gles::{
@@ -117,7 +117,7 @@ impl FramebufferEffectElement {
         let clip_geo_size = (self.clip_geo.size.w as f32, self.clip_geo.size.h as f32);
 
         [
-            Uniform::new("niri_scale", self.scale),
+            Uniform::new("naru_scale", self.scale),
             Uniform::new("geo_size", clip_geo_size),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
             mat3_uniform("input_to_geo", input_to_clip_geo),

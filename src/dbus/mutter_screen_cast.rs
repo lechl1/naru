@@ -16,7 +16,7 @@ use crate::utils::{CastSessionId, CastStreamId};
 #[derive(Clone)]
 pub struct ScreenCast {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
-    to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+    to_naru: calloop::channel::Sender<ScreenCastToNaru>,
     #[allow(clippy::type_complexity)]
     sessions: Arc<Mutex<Vec<(Session, InterfaceRef<Session>)>>>,
 }
@@ -25,7 +25,7 @@ pub struct ScreenCast {
 pub struct Session {
     id: CastSessionId,
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
-    to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+    to_naru: calloop::channel::Sender<ScreenCastToNaru>,
     #[allow(clippy::type_complexity)]
     streams: Arc<Mutex<Vec<(Stream, InterfaceRef<Stream>)>>>,
     stopped: Arc<AtomicBool>,
@@ -66,13 +66,13 @@ pub struct Stream {
     target: StreamTarget,
     cursor_mode: CursorMode,
     was_started: Arc<AtomicBool>,
-    to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+    to_naru: calloop::channel::Sender<ScreenCastToNaru>,
 }
 
 #[derive(Clone)]
 enum StreamTarget {
     // FIXME: update on scale changes and whatnot.
-    Output(niri_ipc::Output),
+    Output(naru_ipc::Output),
     Window { id: u64 },
 }
 
@@ -91,7 +91,7 @@ struct StreamParameters {
     size: (i32, i32),
 }
 
-pub enum ScreenCastToNiri {
+pub enum ScreenCastToNaru {
     StartCast {
         session_id: CastSessionId,
         stream_id: CastStreamId,
@@ -121,7 +121,7 @@ impl ScreenCast {
         let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{}", session_id.get());
         let path = OwnedObjectPath::try_from(path).unwrap();
 
-        let session = Session::new(session_id, self.ipc_outputs.clone(), self.to_niri.clone());
+        let session = Session::new(session_id, self.ipc_outputs.clone(), self.to_naru.clone());
         match server.at(&path, session.clone()).await {
             Ok(true) => {
                 let iface = server.interface(&path).await.unwrap();
@@ -168,10 +168,10 @@ impl Session {
 
         Session::closed(&ctxt).await.unwrap();
 
-        if let Err(err) = self.to_niri.send(ScreenCastToNiri::StopCast {
+        if let Err(err) = self.to_naru.send(ScreenCastToNaru::StopCast {
             session_id: self.id,
         }) {
-            warn!("error sending StopCast to niri: {err:?}");
+            warn!("error sending StopCast to naru: {err:?}");
         }
 
         let streams = mem::take(&mut *self.streams.lock().unwrap());
@@ -217,7 +217,7 @@ impl Session {
             self.id,
             target,
             cursor_mode,
-            self.to_niri.clone(),
+            self.to_naru.clone(),
         );
         match server.at(&path, stream.clone()).await {
             Ok(true) => {
@@ -256,7 +256,7 @@ impl Session {
             self.id,
             target,
             cursor_mode,
-            self.to_niri.clone(),
+            self.to_naru.clone(),
         );
         match server.at(&path, stream.clone()).await {
             Ok(true) => {
@@ -308,11 +308,11 @@ impl Stream {
 impl ScreenCast {
     pub fn new(
         ipc_outputs: Arc<Mutex<IpcOutputMap>>,
-        to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+        to_naru: calloop::channel::Sender<ScreenCastToNaru>,
     ) -> Self {
         Self {
             ipc_outputs,
-            to_niri,
+            to_naru,
             sessions: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -337,13 +337,13 @@ impl Session {
     pub fn new(
         id: CastSessionId,
         ipc_outputs: Arc<Mutex<IpcOutputMap>>,
-        to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+        to_naru: calloop::channel::Sender<ScreenCastToNaru>,
     ) -> Self {
         Self {
             id,
             ipc_outputs,
             streams: Arc::new(Mutex::new(vec![])),
-            to_niri,
+            to_naru,
             stopped: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -351,7 +351,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.to_niri.send(ScreenCastToNiri::StopCast {
+        let _ = self.to_naru.send(ScreenCastToNaru::StopCast {
             session_id: self.id,
         });
     }
@@ -363,7 +363,7 @@ impl Stream {
         session_id: CastSessionId,
         target: StreamTarget,
         cursor_mode: CursorMode,
-        to_niri: calloop::channel::Sender<ScreenCastToNiri>,
+        to_naru: calloop::channel::Sender<ScreenCastToNaru>,
     ) -> Self {
         Self {
             id,
@@ -371,7 +371,7 @@ impl Stream {
             target,
             cursor_mode,
             was_started: Arc::new(AtomicBool::new(false)),
-            to_niri,
+            to_naru,
         }
     }
 
@@ -380,7 +380,7 @@ impl Stream {
             return;
         }
 
-        let msg = ScreenCastToNiri::StartCast {
+        let msg = ScreenCastToNaru::StartCast {
             session_id: self.session_id,
             stream_id: self.id,
             target: self.target.make_id(),
@@ -388,8 +388,8 @@ impl Stream {
             signal_ctx: ctxt,
         };
 
-        if let Err(err) = self.to_niri.send(msg) {
-            warn!("error sending StartCast to niri: {err:?}");
+        if let Err(err) = self.to_naru.send(msg) {
+            warn!("error sending StartCast to naru: {err:?}");
         }
     }
 }

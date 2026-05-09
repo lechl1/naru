@@ -1,20 +1,20 @@
 use std::iter::zip;
 
-use niri_config::CornerRadius;
+use naru_config::CornerRadius;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 
 #[derive(Debug)]
 pub struct Shadow {
     shader_rects: Vec<Rectangle<f64, Logical>>,
     shaders: Vec<ShadowRenderElement>,
-    config: niri_config::Shadow,
+    config: naru_config::Shadow,
 }
 
 impl Shadow {
-    pub fn new(config: niri_config::Shadow) -> Self {
+    pub fn new(config: naru_config::Shadow) -> Self {
         Self {
             shader_rects: Vec::new(),
             shaders: Vec::new(),
@@ -22,7 +22,7 @@ impl Shadow {
         }
     }
 
-    pub fn update_config(&mut self, config: niri_config::Shadow) {
+    pub fn update_config(&mut self, config: naru_config::Shadow) {
         self.config = config;
     }
 
@@ -164,7 +164,7 @@ impl Shadow {
 
     pub fn render(
         &self,
-        renderer: &mut impl NiriRenderer,
+        renderer: &mut impl NaruRenderer,
         location: Point<f64, Logical>,
         push: &mut dyn FnMut(ShadowRenderElement),
     ) {

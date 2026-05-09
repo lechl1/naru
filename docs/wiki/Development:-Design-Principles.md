@@ -1,6 +1,6 @@
 ## General principles
 
-These are some of the general principles that I try to follow throughout niri.
+These are some of the general principles that I try to follow throughout naru.
 They can be sidestepped in specific circumstances if there's a good reason.
 
 ### Opening a new window should not affect the sizes of any existing windows.
@@ -43,10 +43,10 @@ This does not impact performance, but helps avoid a lot of edge cases in the cod
 
 ### Be mindful of invisible state.
 
-This is niri state that is not immediately apparent from looking at the screen. This is not bad per se, but you should carefully consider how to reduce the surprise factor.
+This is naru state that is not immediately apparent from looking at the screen. This is not bad per se, but you should carefully consider how to reduce the surprise factor.
 
 - For example, when a monitor disconnects, all its workspaces move to another connected monitor. In order to be able to restore these workspaces when the first monitor connects again, these workspaces keep the knowledge of which was their *original monitor*—this is an example of invisible state, since you can't tell it in any way by looking at the screen. This can have surprising consequences: imagine disconnecting a monitor at home, going to work, completely rearranging the windows there, then coming back home, and suddenly some random workspaces end up on your home monitor. In order to reduce this surprise factor, whenever a new window appears on a workspace, that workspace resets its *original monitor* to its current monitor. This way, the workspaces you actively worked on remain where they were.
-- For example, niri preserves the view position whenever a window appears, or whenever a window goes full-screen, to restore it afterward. This way, dealing with temporary things like dialogs opening and closing, or toggling full-screen, becomes less annoying, since it doesn't mess up the view position. This is also invisible state, as you cannot tell by looking at the screen where closing a window will restore the view position. If taken to the extreme (previous view position saved forever for every open window), this can be surprising, as closing long-running windows would result in the view shifting around pretty much randomly. To reduce this surprise factor, niri remembers only one last view position per workspace, and forgets this stored view position upon window focus change.
+- For example, naru preserves the view position whenever a window appears, or whenever a window goes full-screen, to restore it afterward. This way, dealing with temporary things like dialogs opening and closing, or toggling full-screen, becomes less annoying, since it doesn't mess up the view position. This is also invisible state, as you cannot tell by looking at the screen where closing a window will restore the view position. If taken to the extreme (previous view position saved forever for every open window), this can be surprising, as closing long-running windows would result in the view shifting around pretty much randomly. To reduce this surprise factor, naru remembers only one last view position per workspace, and forgets this stored view position upon window focus change.
 
 ## Window layout
 
@@ -56,11 +56,11 @@ Here are some design considerations for the window layout logic.
 
     The top left area of a window is more likely to contain something important, so it should always be visible.
 
-1. Setting window width or height to a fixed pixel size (e.g. `set-column-width 1280` or `default-column-width { fixed 1280; }`) will set the size of the window itself, however setting to a proportional size (e.g. `set-column-width 50%`) will set the size of the tile, including the border added by niri.
+1. Setting window width or height to a fixed pixel size (e.g. `set-column-width 1280` or `default-column-width { fixed 1280; }`) will set the size of the window itself, however setting to a proportional size (e.g. `set-column-width 50%`) will set the size of the tile, including the border added by naru.
 
     - With proportions, the user is looking to tile multiple windows on the screen, so they should include borders.
     - With fixed sizes, the user wants to test a specific client size or take a specifically sized screenshot, so they should affect the window directly.
-    - After the size is set, it is always converted to a value that includes the borders, to make the code sane. That is, `set-column-width 1000` followed by changing the niri border width will resize the window accordingly.
+    - After the size is set, it is always converted to a value that includes the borders, to make the code sane. That is, `set-column-width 1000` followed by changing the naru border width will resize the window accordingly.
 
 1. Fullscreen windows are a normal part of the scrolling layout.
 
@@ -74,11 +74,11 @@ Here are some design considerations for the window layout logic.
 
 ## Default config
 
-The [default config](https://github.com/niri-wm/niri/blob/main/resources/default-config.kdl) is intended to give a familiar, helpful, and not too jarring experience to new niri users.
+The [default config](https://github.com/lechl1/naru/blob/main/resources/default-config.kdl) is intended to give a familiar, helpful, and not too jarring experience to new naru users.
 Importantly, it is not a "suggested rice config"; we don't want to startle people with full-on rainbow borders and crazy shaders.
 
 Since we're not a complete desktop environment (and don't have the contributor base to become one), we cannot provide a fully integrated experience—distro spins are better positioned to do this.
-As such, new niri users are expected to read through and tinker with the default niri config.
+As such, new naru users are expected to read through and tinker with the default naru config.
 
 The default config is therefore thoroughly commented with links to the relevant wiki sections.
 We don't include every possible option in the default config to avoid overwhelming users too much; anything overly specific or uncommon can stay on the wiki.
@@ -86,7 +86,7 @@ The general rule is to include things that users are reasonably expected to want
 We do also advertise our more unique features though like screencast block-out-from.
 
 We default to CSD (`prefer-no-csd` is commented out).
-This gives new users easy and familiar way to move and close windows via their titlebars, especially considering that niri doesn't have serverside titlebars (so far at least).
+This gives new users easy and familiar way to move and close windows via their titlebars, especially considering that naru doesn't have serverside titlebars (so far at least).
 
 Focus rings are drawn fully behind windows by default.
 While this unfortunately messes with window transparency, [which is a common source of confusion](./FAQ.md#why-are-transparent-windows-tinted-why-is-the-borderfocus-ring-showing-up-through-semitransparent-windows), defaulting to drawing focus rings only around windows would be even worse because it has holes inside clientside rounded corners.
@@ -110,4 +110,4 @@ The general system is: if a hotkey switches somewhere, then adding <kbd>Ctrl</kb
 Adding <kbd>Shift</kbd> does an alternative action: for focus and movement it starts going across monitors, for resizes it starts acting on window height rather than width, etc.
 Workspace switching on <kbd>Mod</kbd><kbd>U</kbd>/<kbd>I</kbd> is one key up from <kbd>Mod</kbd><kbd>J</kbd>/<kbd>K</kbd> used for window switching.
 
-Since <kbd>Alt</kbd> is a modifier in nested niri, binds with explicit <kbd>Alt</kbd> are mainly the ones only useful on the host, for example spawning a screen locker.
+Since <kbd>Alt</kbd> is a modifier in nested naru, binds with explicit <kbd>Alt</kbd> are mainly the ones only useful on the host, for example spawning a screen locker.

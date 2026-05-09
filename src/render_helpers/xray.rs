@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use glam::{Mat3, Vec2};
-use niri_config::CornerRadius;
+use naru_config::CornerRadius;
 use smithay::backend::renderer::element::{Element, Id, RenderElement};
 use smithay::backend::renderer::gles::{
     GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform,
@@ -140,7 +140,7 @@ impl Xray {
                 // covered.
                 //
                 // FIXME: also implement some way to check if the background elements are fully
-                // covered in opaque regions, and not just the niri background color is opaque
+                // covered in opaque regions, and not just the naru background color is opaque
                 let crop = if bg_color.is_opaque() && ws_geo.contains_rect(geo_in_backdrop) {
                     skip_backdrop = true;
                     // No need to intersect, we know it's fully covered.
@@ -261,7 +261,7 @@ impl Xray {
 impl XrayElement {
     fn compute_uniforms(&self) -> [Uniform<'static>; 7] {
         [
-            Uniform::new("niri_scale", self.scale),
+            Uniform::new("naru_scale", self.scale),
             Uniform::new("geo_size", <[f32; 2]>::from(self.clip_geo_size)),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
             mat3_uniform("input_to_geo", self.input_to_clip_geo),

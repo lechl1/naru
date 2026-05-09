@@ -1,7 +1,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::time::Duration;
 
-use niri_config::{Color, Config, CornerRadius, GradientInterpolation, WindowRule};
+use naru_config::{Color, Config, CornerRadius, GradientInterpolation, WindowRule};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -27,11 +27,11 @@ use crate::layout::{
     ConfigureIntent, InteractiveResizeData, LayoutElement, LayoutElementRenderElement,
     LayoutElementRenderSnapshot, SizingMode,
 };
-use crate::niri_render_elements;
+use crate::naru_render_elements;
 use crate::render_helpers::background_effect::BackgroundEffectElement;
 use crate::render_helpers::border::BorderRenderElement;
 use crate::render_helpers::offscreen::OffscreenData;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::surface::{
@@ -107,7 +107,7 @@ pub struct Mapped {
     block_out_buffer: RefCell<SolidColorBuffer>,
 
     /// The blur config, passed for background effect rendering.
-    blur_config: niri_config::Blur,
+    blur_config: naru_config::Blur,
 
     /// Whether the next configure should be animated, if the configured state changed.
     animate_next_configure: bool,
@@ -195,7 +195,7 @@ pub struct Mapped {
     focus_timestamp: Option<Duration>,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     WindowCastRenderElements<R> => {
         Layout = LayoutElementRenderElement<R>,
         // Blocked-out window with rounded corners.
@@ -227,7 +227,7 @@ impl MappedId {
     /// That way, clients can associate a foreign toplevel handle with an IPC window ID.
     ///
     /// We use the decimal representation of the ID, which is up to 20 characters long for u64::MAX.
-    /// This is within the 32-character limit, and is nice because it matches up with how `niri msg`
+    /// This is within the 32-character limit, and is nice because it matches up with how `naru msg`
     /// prints the IDs to the console.
     ///
     /// This namespace can be extended in the future, with any non-numeric prefix to disambiguate.
@@ -495,7 +495,7 @@ impl Mapped {
         &self.last_interactive_resize_start
     }
 
-    pub fn render_for_screen_cast<R: NiriRenderer>(
+    pub fn render_for_screen_cast<R: NaruRenderer>(
         &self,
         renderer: &mut R,
         scale: Scale<f64>,
@@ -626,7 +626,7 @@ impl LayoutElement for Mapped {
         &self.window
     }
 
-    fn update_config(&mut self, blur_config: niri_config::Blur) {
+    fn update_config(&mut self, blur_config: naru_config::Blur) {
         self.blur_config = blur_config;
     }
 
@@ -643,7 +643,7 @@ impl LayoutElement for Mapped {
         self.window.is_in_input_region(&surface_local)
     }
 
-    fn render_normal<R: NiriRenderer>(
+    fn render_normal<R: NaruRenderer>(
         &self,
         ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
@@ -673,7 +673,7 @@ impl LayoutElement for Mapped {
         }
     }
 
-    fn render_popups<R: NiriRenderer>(
+    fn render_popups<R: NaruRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
@@ -691,7 +691,7 @@ impl LayoutElement for Mapped {
             let popup_rules = match popup {
                 PopupKind::Xdg(_) => self.rules.popups,
                 // IME popups aren't affected by rules for regular popups.
-                PopupKind::InputMethod(_) => niri_config::ResolvedPopupsRules::default(),
+                PopupKind::InputMethod(_) => naru_config::ResolvedPopupsRules::default(),
             };
             let alpha = alpha * popup_rules.opacity.unwrap_or(1.).clamp(0., 1.);
 

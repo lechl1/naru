@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
-use niri_config::{Config, OutputName};
+use naru_config::{Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -22,7 +22,7 @@ use smithay::wayland::dmabuf::{DmabufFeedbackBuilder, DmabufGlobal};
 use smithay::wayland::presentation::Refresh;
 
 use super::{IpcOutputMap, OutputId, RenderResult};
-use crate::niri::{Niri, RedrawState, State};
+use crate::naru::{Naru, RedrawState, State};
 use crate::render_helpers::debug::draw_damage;
 use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
@@ -46,8 +46,8 @@ impl Winit {
         let builder = Window::default_attributes()
             .with_inner_size(LogicalSize::new(1280.0, 800.0))
             // .with_resizable(false)
-            .with_title("niri")
-            .with_name("niri", "");
+            .with_title("naru")
+            .with_name("naru", "");
         let (backend, winit) = winit::init_from_attributes(builder)?;
 
         let output = Output::new(
@@ -78,13 +78,13 @@ impl Winit {
         let physical_properties = output.physical_properties();
         let ipc_outputs = Arc::new(Mutex::new(HashMap::from([(
             OutputId::next(),
-            niri_ipc::Output {
+            naru_ipc::Output {
                 name: output.name(),
                 make: physical_properties.make,
                 model: physical_properties.model,
                 serial: None,
                 physical_size: None,
-                modes: vec![niri_ipc::Mode {
+                modes: vec![naru_ipc::Mode {
                     width: backend.window_size().w.clamp(0, u16::MAX as i32) as u16,
                     height: backend.window_size().h.clamp(0, u16::MAX as i32) as u16,
                     refresh_rate: 60_000,
@@ -124,15 +124,15 @@ impl Winit {
                             logical.width = size.w as u32;
                             logical.height = size.h as u32;
                         }
-                        state.niri.ipc_outputs_changed = true;
+                        state.naru.ipc_outputs_changed = true;
                     }
 
-                    state.niri.output_resized(&winit.output);
+                    state.naru.output_resized(&winit.output);
                 }
                 WinitEvent::Input(event) => state.process_input_event(event),
                 WinitEvent::Focus(_) => (),
-                WinitEvent::Redraw => state.niri.queue_redraw(&state.backend.winit().output),
-                WinitEvent::CloseRequested => state.niri.stop_signal.stop(),
+                WinitEvent::Redraw => state.naru.queue_redraw(&state.backend.winit().output),
+                WinitEvent::CloseRequested => state.naru.stop_signal.stop(),
             })
             .unwrap();
 
@@ -146,9 +146,9 @@ impl Winit {
         })
     }
 
-    pub fn init(&mut self, niri: &mut Niri) {
+    pub fn init(&mut self, naru: &mut Naru) {
         let renderer = self.backend.renderer();
-        if let Err(err) = renderer.bind_wl_display(&niri.display_handle) {
+        if let Err(err) = renderer.bind_wl_display(&naru.display_handle) {
             // wl_drm is on its way out so this is expected on most modern distros.
             trace!("error binding legacy EGL to wl_display: {err}");
         } else {
@@ -170,14 +170,14 @@ impl Winit {
         }
         drop(config);
 
-        niri.update_shaders();
+        naru.update_shaders();
 
-        self.create_dmabuf_global(niri);
+        self.create_dmabuf_global(naru);
 
-        niri.add_output(self.output.clone(), None, false);
+        naru.add_output(self.output.clone(), None, false);
     }
 
-    pub fn create_dmabuf_global(&mut self, niri: &mut Niri) {
+    pub fn create_dmabuf_global(&mut self, naru: &mut Naru) {
         let renderer = self.backend.renderer();
 
         let default_feedback = || {
@@ -197,14 +197,14 @@ impl Winit {
 
         // Fallback to dmabuf v3 if we failed to build feedback.
         let dmabuf_global = match default_feedback() {
-            Ok(feedback) => niri
+            Ok(feedback) => naru
                 .dmabuf_state
-                .create_global_with_default_feedback::<State>(&niri.display_handle, &feedback),
+                .create_global_with_default_feedback::<State>(&naru.display_handle, &feedback),
             Err(err) => {
                 debug!("failed building default dmabuf feedback, falling back to v3: {err:?}");
                 let primary_formats = renderer.dmabuf_formats();
-                niri.dmabuf_state
-                    .create_global::<State>(&niri.display_handle, primary_formats)
+                naru.dmabuf_state
+                    .create_global::<State>(&naru.display_handle, primary_formats)
             }
         };
         assert!(self.dmabuf_global.replace(dmabuf_global).is_none());
@@ -221,7 +221,7 @@ impl Winit {
         Some(f(self.backend.renderer()))
     }
 
-    pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
+    pub fn render(&mut self, naru: &mut Naru, output: &Output) -> RenderResult {
         let _span = tracy_client::span!("Winit::render");
 
         // Render the elements.
@@ -230,11 +230,11 @@ impl Winit {
             target: RenderTarget::Output,
             xray: None,
         };
-        let mut elements = niri.render_to_vec(ctx, output, true);
+        let mut elements = naru.render_to_vec(ctx, output, true);
 
         // Visualize the damage, if enabled.
-        if niri.debug_draw_damage {
-            let output_state = niri.output_state.get_mut(output).unwrap();
+        if naru.debug_draw_damage {
+            let output_state = naru.output_state.get_mut(output).unwrap();
             draw_damage(&mut output_state.debug_damage_tracker, &mut elements);
         }
 
@@ -250,7 +250,7 @@ impl Winit {
                 .unwrap()
         };
 
-        niri.update_primary_scanout_output(output, &res.states);
+        naru.update_primary_scanout_output(output, &res.states);
 
         let rv;
         if let Some(damage) = res.damage {
@@ -268,7 +268,7 @@ impl Winit {
 
             self.backend.submit(Some(damage)).unwrap();
 
-            let mut presentation_feedbacks = niri.take_presentation_feedbacks(output, &res.states);
+            let mut presentation_feedbacks = naru.take_presentation_feedbacks(output, &res.states);
             presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
                 get_monotonic_time(),
                 Refresh::Unknown,
@@ -281,7 +281,7 @@ impl Winit {
             rv = RenderResult::NoDamage;
         }
 
-        let output_state = niri.output_state.get_mut(output).unwrap();
+        let output_state = naru.output_state.get_mut(output).unwrap();
         match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
             RedrawState::Idle => unreachable!(),
             RedrawState::Queued => (),

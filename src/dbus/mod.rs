@@ -1,7 +1,7 @@
 use zbus::blocking::Connection;
 use zbus::object_server::Interface;
 
-use crate::niri::State;
+use crate::naru::State;
 
 pub mod freedesktop_a11y;
 pub mod freedesktop_locale1;
@@ -46,18 +46,18 @@ impl DBusServers {
         let _span = tracy_client::span!("DBusServers::start");
 
         let backend = &state.backend;
-        let niri = &mut state.niri;
-        let config = niri.config.borrow();
+        let naru = &mut state.naru;
+        let config = naru.config.borrow();
 
         let mut dbus = Self::default();
 
         if is_session_instance {
-            let (to_niri, from_service_channel) = calloop::channel::channel();
-            let service_channel = ServiceChannel::new(to_niri);
-            niri.event_loop
+            let (to_naru, from_service_channel) = calloop::channel::channel();
+            let service_channel = ServiceChannel::new(to_naru);
+            naru.event_loop
                 .insert_source(from_service_channel, move |event, _, state| match event {
                     calloop::channel::Event::Msg(new_client) => {
-                        state.niri.insert_client(new_client);
+                        state.naru.insert_client(new_client);
                     }
                     calloop::channel::Event::Closed => (),
                 })
@@ -66,9 +66,9 @@ impl DBusServers {
         }
 
         if is_session_instance || config.debug.dbus_interfaces_in_non_session_instances {
-            let (to_niri, from_display_config) = calloop::channel::channel();
-            let display_config = DisplayConfig::new(to_niri, backend.ipc_outputs());
-            niri.event_loop
+            let (to_naru, from_display_config) = calloop::channel::channel();
+            let display_config = DisplayConfig::new(to_naru, backend.ipc_outputs());
+            naru.event_loop
                 .insert_source(from_display_config, move |event, _, state| match event {
                     calloop::channel::Event::Msg(new_conf) => {
                         for (name, conf) in new_conf {
@@ -87,12 +87,12 @@ impl DBusServers {
                 .unwrap();
             dbus.conn_display_config = try_start(display_config);
 
-            let screen_saver = ScreenSaver::new(niri.is_fdo_idle_inhibited.clone());
+            let screen_saver = ScreenSaver::new(naru.is_fdo_idle_inhibited.clone());
             dbus.conn_screen_saver = try_start(screen_saver);
 
-            let (to_niri, from_screenshot) = calloop::channel::channel();
-            let (to_screenshot, from_niri) = async_channel::unbounded();
-            niri.event_loop
+            let (to_naru, from_screenshot) = calloop::channel::channel();
+            let (to_screenshot, from_naru) = async_channel::unbounded();
+            naru.event_loop
                 .insert_source(from_screenshot, move |event, _, state| match event {
                     calloop::channel::Event::Msg(msg) => {
                         state.on_screen_shot_msg(&to_screenshot, msg)
@@ -100,12 +100,12 @@ impl DBusServers {
                     calloop::channel::Event::Closed => (),
                 })
                 .unwrap();
-            let screenshot = gnome_shell_screenshot::Screenshot::new(to_niri, from_niri);
+            let screenshot = gnome_shell_screenshot::Screenshot::new(to_naru, from_naru);
             dbus.conn_screen_shot = try_start(screenshot);
 
-            let (to_niri, from_introspect) = calloop::channel::channel();
-            let (to_introspect, from_niri) = async_channel::unbounded();
-            niri.event_loop
+            let (to_naru, from_introspect) = calloop::channel::channel();
+            let (to_introspect, from_naru) = async_channel::unbounded();
+            naru.event_loop
                 .insert_source(from_introspect, move |event, _, state| match event {
                     calloop::channel::Event::Msg(msg) => {
                         state.on_introspect_msg(&to_introspect, msg)
@@ -113,13 +113,13 @@ impl DBusServers {
                     calloop::channel::Event::Closed => (),
                 })
                 .unwrap();
-            let introspect = Introspect::new(to_niri, from_niri);
+            let introspect = Introspect::new(to_naru, from_naru);
             dbus.conn_introspect = try_start(introspect);
 
             #[cfg(feature = "xdp-gnome-screencast")]
             {
-                let (to_niri, from_screen_cast) = calloop::channel::channel();
-                niri.event_loop
+                let (to_naru, from_screen_cast) = calloop::channel::channel();
+                naru.event_loop
                     .insert_source(from_screen_cast, {
                         move |event, _, state| match event {
                             calloop::channel::Event::Msg(msg) => state.on_screen_cast_msg(msg),
@@ -127,25 +127,25 @@ impl DBusServers {
                         }
                     })
                     .unwrap();
-                let screen_cast = ScreenCast::new(backend.ipc_outputs(), to_niri);
+                let screen_cast = ScreenCast::new(backend.ipc_outputs(), to_naru);
                 dbus.conn_screen_cast = try_start(screen_cast);
             }
 
             let keyboard_monitor = KeyboardMonitor::new();
             if let Some(x) = try_start(keyboard_monitor.clone()) {
                 dbus.conn_keyboard_monitor = Some(x);
-                niri.a11y_keyboard_monitor = Some(keyboard_monitor);
+                naru.a11y_keyboard_monitor = Some(keyboard_monitor);
             }
         }
 
-        let (to_niri, from_login1) = calloop::channel::channel();
-        niri.event_loop
+        let (to_naru, from_login1) = calloop::channel::channel();
+        naru.event_loop
             .insert_source(from_login1, move |event, _, state| match event {
                 calloop::channel::Event::Msg(msg) => state.on_login1_msg(msg),
                 calloop::channel::Event::Closed => (),
             })
             .unwrap();
-        match freedesktop_login1::start(to_niri) {
+        match freedesktop_login1::start(to_naru) {
             Ok(conn) => {
                 dbus.conn_login1 = Some(conn);
             }
@@ -154,14 +154,14 @@ impl DBusServers {
             }
         }
 
-        let (to_niri, from_locale1) = calloop::channel::channel();
-        niri.event_loop
+        let (to_naru, from_locale1) = calloop::channel::channel();
+        naru.event_loop
             .insert_source(from_locale1, move |event, _, state| match event {
                 calloop::channel::Event::Msg(msg) => state.on_locale1_msg(msg),
                 calloop::channel::Event::Closed => (),
             })
             .unwrap();
-        match freedesktop_locale1::start(to_niri) {
+        match freedesktop_locale1::start(to_naru) {
             Ok(conn) => {
                 dbus.conn_locale1 = Some(conn);
             }
@@ -170,7 +170,7 @@ impl DBusServers {
             }
         }
 
-        niri.dbus = Some(dbus);
+        naru.dbus = Some(dbus);
     }
 }
 

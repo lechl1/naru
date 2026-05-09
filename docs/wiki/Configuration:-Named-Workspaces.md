@@ -24,7 +24,7 @@ workspace "chat" {
     open-on-output "DP-2"
 }
 
-// Open Fractal on the "chat" workspace, if it runs at niri startup.
+// Open Fractal on the "chat" workspace, if it runs at naru startup.
 window-rule {
     match at-startup=true app-id=r#"^org\.gnome\.Fractal$"#
     open-on-workspace "chat"
@@ -32,7 +32,7 @@ window-rule {
 ```
 
 Named workspaces initially appear in the order they are declared in the config file.
-When editing the config while niri is running, newly declared named workspaces will appear at the very top of a monitor.
+When editing the config while naru is running, newly declared named workspaces will appear at the very top of a monitor.
 
 If you delete some named workspace from the config, the workspace will become normal (unnamed), and if there are no windows on it, it will be removed (as any other normal workspace).
 There's no way to give a name to an already existing workspace, but you can simply move windows that you want to a new, empty named workspace.

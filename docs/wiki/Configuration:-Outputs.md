@@ -1,6 +1,6 @@
 ### Overview
 
-By default, niri will attempt to turn on all connected monitors using their preferred modes.
+By default, naru will attempt to turn on all connected monitors using their preferred modes.
 You can disable or adjust this with `output` sections.
 
 Here's what it looks like with all properties written out:
@@ -43,7 +43,7 @@ output "Some Company CoolMonitor 1234" {
 ```
 
 Outputs are matched by connector name (i.e. `eDP-1`, `HDMI-A-1`), or by monitor manufacturer, model, and serial, separated by a single space each.
-You can find all of these by running `niri msg outputs`.
+You can find all of these by running `naru msg outputs`.
 
 Usually, the built-in monitor in laptops will be called `eDP-1`.
 
@@ -68,12 +68,12 @@ output "HDMI-A-1" {
 Set the monitor resolution and refresh rate.
 
 The format is `<width>x<height>` or `<width>x<height>@<refresh rate>`.
-If the refresh rate is omitted, niri will pick the highest refresh rate for the resolution.
+If the refresh rate is omitted, naru will pick the highest refresh rate for the resolution.
 
-If the mode is omitted altogether or doesn't work, niri will try to pick one automatically.
+If the mode is omitted altogether or doesn't work, naru will try to pick one automatically.
 
-Run `niri msg outputs` while inside a niri instance to list all outputs and their modes.
-The refresh rate that you set here must match *exactly*, down to the three decimal digits, to what you see in `niri msg outputs`.
+Run `naru msg outputs` while inside a naru instance to list all outputs and their modes.
+The refresh rate that you set here must match *exactly*, down to the three decimal digits, to what you see in `naru msg outputs`.
 
 ```kdl
 // Set a high refresh rate for this monitor.
@@ -98,7 +98,7 @@ You can configure a custom mode (not offered by the monitor) by setting `custom=
 In this case, the refresh rate is mandatory.
 
 Custom modes are not guaranteed to work.
-Niri is asking the monitor to run in a mode that is not supported by the manufacturer.
+Naru is asking the monitor to run in a mode that is not supported by the manufacturer.
 Use at your own risk.
 
 > [!CAUTION]
@@ -120,7 +120,7 @@ Directly configures the monitor's mode via a modeline, overriding any configured
 The modeline can be calculated via utilities such as [cvt](https://man.archlinux.org/man/cvt.1.en) or [gtf](https://man.archlinux.org/man/gtf.1.en).
 
 Modelines are not guaranteed to work.
-Niri is asking the monitor to run in a mode not supported by the manufacturer.
+Naru is asking the monitor to run in a mode not supported by the manufacturer.
 Use at your own risk.
 
 > [!CAUTION]
@@ -138,7 +138,7 @@ output "eDP-3" {
 
 Set the scale of the monitor.
 
-<sup>Since: 0.1.6</sup> If scale is unset, niri will guess an appropriate scale based on the physical dimensions and the resolution of the monitor.
+<sup>Since: 0.1.6</sup> If scale is unset, naru will guess an appropriate scale based on the physical dimensions and the resolution of the monitor.
 
 <sup>Since: 0.1.7</sup> You can use fractional scale values, for example `scale 1.5` for 150% scale.
 
@@ -185,12 +185,12 @@ output "HDMI-A-1" {
 
 #### Automatic Positioning
 
-Niri repositions outputs from scratch every time the output configuration changes (which includes monitors disconnecting and connecting).
+Naru repositions outputs from scratch every time the output configuration changes (which includes monitors disconnecting and connecting).
 The following algorithm is used for positioning outputs.
 
 1. Collect all connected monitors and their logical sizes.
 1. Sort them by their name. This makes it so the automatic positioning does not depend on the order the monitors are connected. This is important because the connection order is non-deterministic at compositor startup.
-1. Try to place every output with explicitly configured `position`, in order. If the output overlaps previously placed outputs, place it to the right of all previously placed outputs. In this case, niri will also print a warning.
+1. Try to place every output with explicitly configured `position`, in order. If the output overlaps previously placed outputs, place it to the right of all previously placed outputs. In this case, naru will also print a warning.
 1. Place every output without explicitly configured `position` by putting it to the right of all previously placed outputs.
 
 ### `variable-refresh-rate`
@@ -199,7 +199,7 @@ The following algorithm is used for positioning outputs.
 
 This flag enables variable refresh rate (VRR, also known as adaptive sync, FreeSync, or G-Sync), if the output supports it.
 
-You can check whether an output supports VRR in `niri msg outputs`.
+You can check whether an output supports VRR in `naru msg outputs`.
 
 > [!NOTE]
 > Some drivers have various issues with VRR.
@@ -229,11 +229,11 @@ output "HDMI-A-1" {
 
 <sup>Since: 25.05</sup>
 
-Focus this output by default when niri starts.
+Focus this output by default when naru starts.
 
 If multiple outputs with `focus-at-startup` are connected, they are prioritized in the order that they appear in the config.
 
-When none of the connected outputs are explicitly `focus-at-startup`, niri will focus the first one sorted by name (same output sorting as used elsewhere in niri).
+When none of the connected outputs are explicitly `focus-at-startup`, naru will focus the first one sorted by name (same output sorting as used elsewhere in naru).
 
 ```kdl
 // Focus HDMI-A-1 by default.
@@ -251,7 +251,7 @@ output "DP-2" {
 
 <sup>Since: 0.1.8</sup>
 
-Set the background color that niri draws for workspaces on this output.
+Set the background color that naru draws for workspaces on this output.
 This is visible when you're not using any background tools like swaybg.
 
 <sup>Until: 25.05</sup> The alpha channel for this color will be ignored.
@@ -268,7 +268,7 @@ output "HDMI-A-1" {
 
 <sup>Since: 25.05</sup>
 
-Set the backdrop color that niri draws for this output.
+Set the backdrop color that naru draws for this output.
 This is visible between workspaces or in the overview.
 
 The alpha channel for this color will be ignored.

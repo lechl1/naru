@@ -1,15 +1,15 @@
 ### Overview
 
-The primary screencasting interface that niri offers is through portals and pipewire.
+The primary screencasting interface that naru offers is through portals and pipewire.
 It is supported by [OBS], Firefox, Chromium, Electron, Telegram, and other apps.
 You can screencast both monitors and individual windows.
 
-In order to use it, you need a working D-Bus session, pipewire, `xdg-desktop-portal-gnome`, and [running niri as a session](./Getting-Started.md) (i.e. through `niri-session` or from a display manager).
+In order to use it, you need a working D-Bus session, pipewire, `xdg-desktop-portal-gnome`, and [running naru as a session](./Getting-Started.md) (i.e. through `naru-session` or from a display manager).
 On widely used distros this should all "just work".
 
-Alternatively, you can use tools that rely on the `wlr-screencopy` protocol, which niri also supports.
+Alternatively, you can use tools that rely on the `wlr-screencopy` protocol, which naru also supports.
 
-There are several features in niri designed for screencasting.
+There are several features in naru designed for screencasting.
 Let's take a look!
 
 ### Block out windows
@@ -48,10 +48,10 @@ Check [the corresponding wiki section](./Configuration:-Window-Rules.md#block-ou
 
 <sup>Since: 25.05</sup>
 
-Niri provides a special screencast stream that you can change dynamically.
-It shows up as "niri Dynamic Cast Target" in the screencast window dialog.
+Naru provides a special screencast stream that you can change dynamically.
+It shows up as "naru Dynamic Cast Target" in the screencast window dialog.
 
-![Screencast dialog showing niri Dynamic Cast Target.](https://github.com/user-attachments/assets/e236ce74-98ec-4f3a-a99b-29ac1ff324dd)
+![Screencast dialog showing naru Dynamic Cast Target.](https://github.com/user-attachments/assets/e236ce74-98ec-4f3a-a99b-29ac1ff324dd)
 
 When you select it, it will start as an empty, transparent video stream.
 Then, you can use the following binds to change what it shows:
@@ -63,7 +63,7 @@ Then, you can use the following binds to change what it shows:
 You can also use these actions from the command line, for example to interactively pick which window to cast:
 
 ```sh
-$ niri msg action set-dynamic-cast-window --id $(niri msg --json pick-window | jq .id)
+$ naru msg action set-dynamic-cast-window --id $(naru msg --json pick-window | jq .id)
 ```
 
 <video controls src="https://github.com/user-attachments/assets/c617a9d6-7d5e-4f1f-b8cc-9301182d9634">
@@ -140,11 +140,11 @@ Here's an example showing a windowed-fullscreen Google Slides [presentation](htt
 ### Screen mirroring
 
 For presentations it can be useful to mirror an output to another.
-Currently, niri doesn't have built-in output mirroring, but you can use a third-party tool [`wl-mirror`](https://github.com/Ferdi265/wl-mirror) that mirrors an output to a window.
+Currently, naru doesn't have built-in output mirroring, but you can use a third-party tool [`wl-mirror`](https://github.com/Ferdi265/wl-mirror) that mirrors an output to a window.
 Note that the command below requires [`jq`](https://jqlang.org/download/) to be installed.
 ```kdl
 binds {
-    Mod+P repeat=false { spawn-sh "wl-mirror $(niri msg --json focused-output | jq -r .name)"; }
+    Mod+P repeat=false { spawn-sh "wl-mirror $(naru msg --json focused-output | jq -r .name)"; }
 }
 ```
 Focus the output you want to mirror, press <kbd>Mod</kbd><kbd>P</kbd> and move the `wl-mirror` window to the target output.

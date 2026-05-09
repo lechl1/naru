@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use calloop::EventLoop;
-use niri_config::Config;
+use naru_config::Config;
 use smithay::reexports::wayland_server::Display;
 
-use crate::niri::State;
+use crate::naru::State;
 
 pub struct Server {
     pub event_loop: EventLoop<'static, State>,

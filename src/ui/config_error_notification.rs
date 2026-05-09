@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use niri_config::Config;
+use naru_config::Config;
 use ordered_float::NotNan;
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::FontDescription;
@@ -16,7 +16,7 @@ use smithay::utils::{Point, Transform};
 
 use crate::animation::{Animation, Clock};
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::utils::{output_size, to_physical_precise_round};
 
@@ -130,7 +130,7 @@ impl ConfigErrorNotification {
         !matches!(self.state, State::Hidden)
     }
 
-    pub fn render<R: NiriRenderer>(
+    pub fn render<R: NaruRenderer>(
         &self,
         renderer: &mut R,
         output: &Output,
@@ -249,9 +249,9 @@ fn render(
 
 pub fn error_text(markup: bool) -> String {
     let command = if markup {
-        "<span face='monospace' bgcolor='#000000'>niri validate</span>"
+        "<span face='monospace' bgcolor='#000000'>naru validate</span>"
     } else {
-        "niri validate"
+        "naru validate"
     };
 
     format!("Failed to parse the config file. Please run {command} to see the errors.")

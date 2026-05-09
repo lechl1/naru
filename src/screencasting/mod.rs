@@ -16,15 +16,15 @@ use smithay::reexports::gbm::Modifier;
 use smithay::utils::{Physical, Point, Scale, Size};
 use zbus::object_server::SignalEmitter;
 
-use crate::dbus::mutter_screen_cast::{self, CursorMode, ScreenCastToNiri, StreamTargetId};
-use crate::niri::{CastTarget, Niri, OutputRenderElements, PointerRenderElements, State};
-use crate::niri_render_elements;
+use crate::dbus::mutter_screen_cast::{self, CursorMode, ScreenCastToNaru, StreamTargetId};
+use crate::naru::{CastTarget, Naru, OutputRenderElements, PointerRenderElements, State};
+use crate::naru_render_elements;
 use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
 use crate::window::mapped::{MappedId, WindowCastRenderElements};
 
 mod pw_utils;
-use pw_utils::{Cast, CastSizeChange, CursorData, PipeWire, PwToNiri};
+use pw_utils::{Cast, CastSizeChange, CursorData, PipeWire, PwToNaru};
 
 pub struct Screencasting {
     pub casts: Vec<Cast>,
@@ -32,7 +32,7 @@ pub struct Screencasting {
     /// Dynamic-target casts waiting for their first target to start.
     pub pending_dynamic_casts: Vec<PendingCast>,
 
-    pub pw_to_niri: calloop::channel::Sender<PwToNiri>,
+    pub pw_to_naru: calloop::channel::Sender<PwToNaru>,
 
     /// Screencast output for each mapped window.
     pub mapped_cast_output: HashMap<Window, Output>,
@@ -54,21 +54,21 @@ pub struct PendingCast {
 
 impl Screencasting {
     pub fn new(event_loop: &LoopHandle<'static, State>) -> Self {
-        let pw_to_niri = {
-            let (pw_to_niri, from_pipewire) = calloop::channel::channel();
+        let pw_to_naru = {
+            let (pw_to_naru, from_pipewire) = calloop::channel::channel();
             event_loop
                 .insert_source(from_pipewire, move |event, _, state| match event {
                     calloop::channel::Event::Msg(msg) => state.on_pw_msg(msg),
                     calloop::channel::Event::Closed => (),
                 })
                 .unwrap();
-            pw_to_niri
+            pw_to_naru
         };
 
         Self {
             casts: vec![],
             pending_dynamic_casts: vec![],
-            pw_to_niri,
+            pw_to_naru,
             mapped_cast_output: HashMap::new(),
             dynamic_cast_id_for_portal: MappedId::next(),
             pipewire: None,
@@ -84,13 +84,13 @@ impl State {
             .context("no GBM device available")?;
 
         // Ensure PipeWire is initialized.
-        if self.niri.casting.pipewire.is_none() {
+        if self.naru.casting.pipewire.is_none() {
             let pw = PipeWire::new(
-                self.niri.event_loop.clone(),
-                self.niri.casting.pw_to_niri.clone(),
+                self.naru.event_loop.clone(),
+                self.naru.casting.pw_to_naru.clone(),
             )
             .context("error initializing PipeWire")?;
-            self.niri.casting.pipewire = Some(pw);
+            self.naru.casting.pipewire = Some(pw);
         }
 
         let mut render_formats = self
@@ -101,7 +101,7 @@ impl State {
             .unwrap_or_default();
 
         {
-            let config = self.niri.config.borrow();
+            let config = self.naru.config.borrow();
             if config.debug.force_pipewire_invalid_modifier {
                 render_formats = render_formats
                     .into_iter()
@@ -113,13 +113,13 @@ impl State {
         Ok((gbm, render_formats))
     }
 
-    pub fn on_pw_msg(&mut self, msg: PwToNiri) {
+    pub fn on_pw_msg(&mut self, msg: PwToNaru) {
         match msg {
-            PwToNiri::StopCast { session_id } => self.niri.stop_cast(session_id),
-            PwToNiri::Redraw { stream_id } => self.redraw_cast(stream_id),
-            PwToNiri::FatalError => {
+            PwToNaru::StopCast { session_id } => self.naru.stop_cast(session_id),
+            PwToNaru::Redraw { stream_id } => self.redraw_cast(stream_id),
+            PwToNaru::FatalError => {
                 warn!("stopping PipeWire due to fatal error");
-                let casting = &mut self.niri.casting;
+                let casting = &mut self.naru.casting;
                 if let Some(pw) = casting.pipewire.take() {
                     let mut ids = HashSet::new();
                     for cast in &casting.pending_dynamic_casts {
@@ -129,9 +129,9 @@ impl State {
                         ids.insert(cast.session_id);
                     }
                     for id in ids {
-                        self.niri.stop_cast(id);
+                        self.naru.stop_cast(id);
                     }
-                    self.niri.event_loop.remove(pw.token);
+                    self.naru.event_loop.remove(pw.token);
                 }
             }
         }
@@ -140,7 +140,7 @@ impl State {
     fn redraw_cast(&mut self, stream_id: CastStreamId) {
         let _span = tracy_client::span!("State::redraw_cast");
 
-        let casts = &mut self.niri.casting.casts;
+        let casts = &mut self.naru.casting.casts;
         let Some(idx) = casts.iter().position(|cast| cast.stream_id == stream_id) else {
             warn!("cast to redraw is missing");
             return;
@@ -158,7 +158,7 @@ impl State {
             }
             CastTarget::Output { output, .. } => {
                 if let Some(output) = output.upgrade() {
-                    self.niri.queue_redraw(&output);
+                    self.naru.queue_redraw(&output);
                 }
                 return;
             }
@@ -166,20 +166,20 @@ impl State {
         };
 
         // Lack of partial borrowing strikes again...
-        let mut casts = mem::take(&mut self.niri.casting.casts);
+        let mut casts = mem::take(&mut self.naru.casting.casts);
         let cast = &mut casts[idx];
         let mut stop = false;
         // Use a loop {} so we can break instead of early-return.
         #[allow(clippy::never_loop)]
         loop {
-            let mut windows = self.niri.layout.windows();
+            let mut windows = self.naru.layout.windows();
             let Some((_, mapped)) = windows.find(|(_, mapped)| mapped.id().get() == id) else {
                 break;
             };
 
             // Use the cached output since it will be present even if the output was
             // currently disconnected.
-            let Some(output) = self.niri.casting.mapped_cast_output.get(&mapped.window) else {
+            let Some(output) = self.naru.casting.mapped_cast_output.get(&mapped.window) else {
                 break;
             };
 
@@ -203,9 +203,9 @@ impl State {
                 let mut elements = Vec::new();
                 let mut pointer_location = Point::default();
 
-                if self.niri.pointer_visibility.is_visible() {
+                if self.naru.pointer_visibility.is_visible() {
                     if let Some((pointer_pos, win_pos)) =
-                        self.niri.pointer_pos_for_window_cast(mapped)
+                        self.naru.pointer_pos_for_window_cast(mapped)
                     {
                         // Pointer location must be relative to the screencast buffer.
                         // - win_pos is the position of the main window surface in output-local
@@ -213,11 +213,11 @@ impl State {
                         // - bbox.loc moves us relative to the screencast buffer
                         let buf_pos = win_pos + bbox.loc.to_f64().to_logical(scale);
                         let output_pos =
-                            self.niri.global_space.output_geometry(output).unwrap().loc;
+                            self.naru.global_space.output_geometry(output).unwrap().loc;
                         pointer_location = pointer_pos - output_pos.to_f64() - buf_pos;
 
                         let pos = buf_pos.to_physical_precise_round(scale).upscale(-1);
-                        self.niri.render_pointer(renderer, output, &mut |elem| {
+                        self.naru.render_pointer(renderer, output, &mut |elem| {
                             let elem =
                                 RelocateRenderElement::from_element(elem, pos, Relocate::Relative);
                             elements.push(CastRenderElement::from(elem));
@@ -247,10 +247,10 @@ impl State {
             break;
         }
         let session_id = cast.session_id;
-        self.niri.casting.casts = casts;
+        self.naru.casting.casts = casts;
 
         if stop {
-            self.niri.stop_cast(session_id);
+            self.naru.stop_cast(session_id);
         }
     }
 
@@ -268,9 +268,9 @@ impl State {
                 }
             }
             CastTarget::Window { id } => {
-                let mut windows = self.niri.layout.windows();
+                let mut windows = self.naru.layout.windows();
                 if let Some((_, mapped)) = windows.find(|(_, mapped)| mapped.id().get() == *id) {
-                    if let Some(output) = self.niri.casting.mapped_cast_output.get(&mapped.window) {
+                    if let Some(output) = self.naru.casting.mapped_cast_output.get(&mapped.window) {
                         refresh = Some(output.current_mode().unwrap().refresh as u32);
                     }
                 }
@@ -279,7 +279,7 @@ impl State {
 
         let mut to_redraw = Vec::new();
         let mut to_stop = Vec::new();
-        for cast in &mut self.niri.casting.casts {
+        for cast in &mut self.naru.casting.casts {
             if !cast.dynamic_target {
                 continue;
             }
@@ -307,7 +307,7 @@ impl State {
     }
 
     fn start_pending_dynamic_casts(&mut self, target: &CastTarget) {
-        let pending = &self.niri.casting.pending_dynamic_casts;
+        let pending = &self.naru.casting.pending_dynamic_casts;
         if pending.is_empty() {
             return;
         }
@@ -325,7 +325,7 @@ impl State {
                 cast_params_for_output(&output)
             }
             CastTarget::Window { id } => {
-                let Some((size, refresh)) = self.niri.cast_params_for_window(*id) else {
+                let Some((size, refresh)) = self.naru.cast_params_for_window(*id) else {
                     return;
                 };
                 (size, refresh)
@@ -337,23 +337,23 @@ impl State {
             Err(err) => {
                 warn!("error starting pending screencasts: {err:?}");
                 let mut ids = HashSet::new();
-                for pending in self.niri.casting.pending_dynamic_casts.drain(..) {
+                for pending in self.naru.casting.pending_dynamic_casts.drain(..) {
                     ids.insert(pending.session_id);
                 }
                 for id in ids {
-                    self.niri.stop_cast(id);
+                    self.naru.stop_cast(id);
                 }
                 return;
             }
         };
-        let pw = self.niri.casting.pipewire.as_ref().unwrap();
+        let pw = self.naru.casting.pipewire.as_ref().unwrap();
 
         // Alpha is always true since the dynamic target can change between window & output.
         let alpha = true;
 
         // Start each pending cast.
         let mut to_stop = HashSet::new();
-        for pending in self.niri.casting.pending_dynamic_casts.drain(..) {
+        for pending in self.naru.casting.pending_dynamic_casts.drain(..) {
             let res = pw.start_cast(
                 gbm.clone(),
                 render_formats.clone(),
@@ -369,7 +369,7 @@ impl State {
             match res {
                 Ok(mut cast) => {
                     cast.dynamic_target = true;
-                    self.niri.casting.casts.push(cast);
+                    self.naru.casting.casts.push(cast);
                 }
                 Err(err) => {
                     warn!("error starting pending screencast: {err:?}");
@@ -379,13 +379,13 @@ impl State {
         }
 
         for session_id in to_stop {
-            self.niri.stop_cast(session_id);
+            self.naru.stop_cast(session_id);
         }
     }
 
-    pub fn on_screen_cast_msg(&mut self, msg: ScreenCastToNiri) {
+    pub fn on_screen_cast_msg(&mut self, msg: ScreenCastToNaru) {
         match msg {
-            ScreenCastToNiri::StartCast {
+            ScreenCastToNaru::StartCast {
                 session_id,
                 stream_id,
                 target,
@@ -397,11 +397,11 @@ impl State {
 
                 let (target, size, refresh, alpha) = match target {
                     StreamTargetId::Output { name } => {
-                        let global_space = &self.niri.global_space;
+                        let global_space = &self.naru.global_space;
                         let output = global_space.outputs().find(|out| out.name() == name);
                         let Some(output) = output else {
                             warn!("error starting screencast: requested output is missing");
-                            self.niri.stop_cast(session_id);
+                            self.naru.stop_cast(session_id);
                             return;
                         };
 
@@ -409,10 +409,10 @@ impl State {
                         (CastTarget::output(output), size, refresh, false)
                     }
                     StreamTargetId::Window { id }
-                        if id == self.niri.casting.dynamic_cast_id_for_portal.get() =>
+                        if id == self.naru.casting.dynamic_cast_id_for_portal.get() =>
                     {
                         debug!("delaying dynamic cast until target is set");
-                        self.niri.casting.pending_dynamic_casts.push(PendingCast {
+                        self.naru.casting.pending_dynamic_casts.push(PendingCast {
                             session_id,
                             stream_id,
                             cursor_mode,
@@ -421,9 +421,9 @@ impl State {
                         return;
                     }
                     StreamTargetId::Window { id } => {
-                        let Some((size, refresh)) = self.niri.cast_params_for_window(id) else {
+                        let Some((size, refresh)) = self.naru.cast_params_for_window(id) else {
                             warn!("error starting screencast: requested window is missing");
-                            self.niri.stop_cast(session_id);
+                            self.naru.stop_cast(session_id);
                             return;
                         };
                         (CastTarget::Window { id }, size, refresh, true)
@@ -434,11 +434,11 @@ impl State {
                     Ok(x) => x,
                     Err(err) => {
                         warn!("error starting screencast: {err:?}");
-                        self.niri.stop_cast(session_id);
+                        self.naru.stop_cast(session_id);
                         return;
                     }
                 };
-                let pw = self.niri.casting.pipewire.as_ref().unwrap();
+                let pw = self.naru.casting.pipewire.as_ref().unwrap();
 
                 let res = pw.start_cast(
                     gbm,
@@ -454,20 +454,20 @@ impl State {
                 );
                 match res {
                     Ok(cast) => {
-                        self.niri.casting.casts.push(cast);
+                        self.naru.casting.casts.push(cast);
                     }
                     Err(err) => {
                         warn!("error starting screencast: {err:?}");
-                        self.niri.stop_cast(session_id);
+                        self.naru.stop_cast(session_id);
                     }
                 }
             }
-            ScreenCastToNiri::StopCast { session_id } => self.niri.stop_cast(session_id),
+            ScreenCastToNaru::StopCast { session_id } => self.naru.stop_cast(session_id),
         }
     }
 }
 
-impl Niri {
+impl Naru {
     pub fn refresh_mapped_cast_window_rules(&mut self) {
         // O(N^2) but should be fine since there aren't many casts usually.
         self.layout.with_windows_mut(|mapped, _| {
@@ -538,7 +538,7 @@ impl Niri {
         output: &Output,
         target_presentation_time: Duration,
     ) {
-        let _span = tracy_client::span!("Niri::render_for_screen_cast");
+        let _span = tracy_client::span!("Naru::render_for_screen_cast");
 
         let weak = output.downgrade();
         let size = output.current_mode().unwrap().size;
@@ -626,7 +626,7 @@ impl Niri {
         output: &Output,
         target_presentation_time: Duration,
     ) {
-        let _span = tracy_client::span!("Niri::render_windows_for_screen_cast");
+        let _span = tracy_client::span!("Naru::render_windows_for_screen_cast");
 
         let scale = Scale::from(output.current_scale().fractional_scale());
 
@@ -706,7 +706,7 @@ impl Niri {
     }
 
     pub fn stop_cast(&mut self, session_id: CastSessionId) {
-        let _span = tracy_client::span!("Niri::stop_cast");
+        let _span = tracy_client::span!("Naru::stop_cast");
         let _span = debug_span!("stop_cast", %session_id).entered();
 
         self.casting
@@ -741,7 +741,7 @@ impl Niri {
     }
 
     pub fn stop_casts_for_target(&mut self, target: CastTarget) {
-        let _span = tracy_client::span!("Niri::stop_casts_for_target");
+        let _span = tracy_client::span!("Naru::stop_casts_for_target");
 
         // This is O(N^2) but it shouldn't be a problem I think.
         let mut saw_dynamic = false;
@@ -794,7 +794,7 @@ fn cast_params_for_output(output: &Output) -> (Size<i32, Physical>, u32) {
     (size, refresh)
 }
 
-niri_render_elements! {
+naru_render_elements! {
     CastRenderElement<R> => {
         Output = OutputRenderElements<R>,
         Window = WindowCastRenderElements<R>,

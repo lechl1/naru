@@ -20,13 +20,13 @@ varying vec2 v_coords;
 uniform float tint;
 #endif
 
-uniform float niri_scale;
+uniform float naru_scale;
 
 uniform vec2 geo_size;
 uniform vec4 corner_radius;
 uniform mat3 input_to_geo;
 
-float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
+float naru_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 vec4 postprocess(vec4 color);
 
 void main() {
@@ -45,7 +45,7 @@ void main() {
         color = vec4(0.0);
     } else {
         // Apply corner rounding inside geometry.
-        color = color * niri_rounding_alpha(coords_geo.xy * geo_size, geo_size, corner_radius);
+        color = color * naru_rounding_alpha(coords_geo.xy * geo_size, geo_size, corner_radius);
     }
 
     // Apply final alpha and tint.

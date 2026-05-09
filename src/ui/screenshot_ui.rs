@@ -7,8 +7,8 @@ use std::rc::Rc;
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
-use niri_config::{Action, Config};
-use niri_ipc::SizeChange;
+use naru_config::{Action, Config};
+use naru_ipc::SizeChange;
 use pango::{Alignment, FontDescription};
 use pangocairo::cairo::{self, ImageSurface};
 use smithay::backend::allocator::Fourcc;
@@ -23,7 +23,7 @@ use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform}
 
 use crate::animation::{Animation, Clock};
 use crate::layout::floating::DIRECTIONAL_MOVE_PX;
-use crate::niri_render_elements;
+use crate::naru_render_elements;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
@@ -103,7 +103,7 @@ pub struct OutputScreenshot {
     pointer: Option<PrimaryGpuTextureRenderElement>,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     ScreenshotUiRenderElement => {
         Screenshot = PrimaryGpuTextureRenderElement,
         SolidColor = SolidColorRenderElement,

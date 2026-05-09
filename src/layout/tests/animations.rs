@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use insta::assert_snapshot;
-use niri_config::animations::{Curve, EasingParams, Kind};
+use naru_config::animations::{Curve, EasingParams, Kind};
 
 use super::*;
 
@@ -29,7 +29,7 @@ fn make_options() -> Options {
     });
 
     let mut options = Options {
-        layout: niri_config::Layout {
+        layout: naru_config::Layout {
             gaps: 0.0,
             ..Default::default()
         },
@@ -124,7 +124,7 @@ fn clientside_height_change_doesnt_animate() {
     ");
 
     let ops = [
-        // The top window shrinks by itself, without a niri-issued resize.
+        // The top window shrinks by itself, without a naru-issued resize.
         Op::SetForcedSize {
             id: 1,
             size: Some(Size::new(100, 50)),

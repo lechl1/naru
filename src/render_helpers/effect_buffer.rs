@@ -11,7 +11,7 @@ use smithay::backend::renderer::{
 };
 use smithay::utils::{Buffer, Logical, Physical, Scale, Size, Transform};
 
-use crate::niri::OutputRenderElements;
+use crate::naru::OutputRenderElements;
 use crate::render_helpers::blur::{Blur, BlurOptions};
 
 #[derive(Debug)]

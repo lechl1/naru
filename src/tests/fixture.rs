@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use calloop::generic::Generic;
 use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
-use niri_config::Config;
+use naru_config::Config;
 use smithay::output::Output;
 
 use super::client::{Client, ClientId};
 use super::server::Server;
-use crate::niri::{NewClient, Niri};
+use crate::naru::{NewClient, Naru};
 
 pub struct Fixture {
     pub event_loop: EventLoop<'static, State>,
@@ -60,44 +60,44 @@ impl Fixture {
             .unwrap();
     }
 
-    pub fn niri_state(&mut self) -> &mut crate::niri::State {
+    pub fn naru_state(&mut self) -> &mut crate::naru::State {
         &mut self.state.server.state
     }
 
-    pub fn niri(&mut self) -> &mut Niri {
-        &mut self.niri_state().niri
+    pub fn naru(&mut self) -> &mut Naru {
+        &mut self.naru_state().naru
     }
 
-    pub fn niri_output(&self, n: u8) -> Output {
-        let niri = &self.state.server.state.niri;
+    pub fn naru_output(&self, n: u8) -> Output {
+        let naru = &self.state.server.state.naru;
         let idx = usize::from(n - 1);
-        let output = niri.global_space.outputs().nth(idx).unwrap();
+        let output = naru.global_space.outputs().nth(idx).unwrap();
         output.clone()
     }
 
-    pub fn niri_focus_output(&mut self, n: u8) {
-        let niri = &mut self.state.server.state.niri;
+    pub fn naru_focus_output(&mut self, n: u8) {
+        let naru = &mut self.state.server.state.naru;
         let idx = usize::from(n - 1);
-        let output = niri.global_space.outputs().nth(idx).unwrap();
-        niri.layout.focus_output(output);
+        let output = naru.global_space.outputs().nth(idx).unwrap();
+        naru.layout.focus_output(output);
     }
 
-    pub fn niri_complete_animations(&mut self) {
-        let niri = self.niri();
-        niri.clock.set_complete_instantly(true);
-        niri.advance_animations();
-        niri.clock.set_complete_instantly(false);
+    pub fn naru_complete_animations(&mut self) {
+        let naru = self.naru();
+        naru.clock.set_complete_instantly(true);
+        naru.advance_animations();
+        naru.clock.set_complete_instantly(false);
     }
 
     pub fn add_output(&mut self, n: u8, size: (u16, u16)) {
-        let state = self.niri_state();
-        let niri = &mut state.niri;
-        state.backend.headless().add_output(niri, n, size);
+        let state = self.naru_state();
+        let naru = &mut state.naru;
+        state.backend.headless().add_output(naru, n, size);
     }
 
     pub fn add_client(&mut self) -> ClientId {
         let (sock1, sock2) = UnixStream::pair().unwrap();
-        self.niri().insert_client(NewClient {
+        self.naru().insert_client(NewClient {
             client: sock1,
             restricted: false,
             credentials_unknown: false,
@@ -137,7 +137,7 @@ impl Fixture {
     /// For some reason, when running tests on many threads at once, a single roundtrip is
     /// sometimes not sufficient to get the configure events to the client.
     ///
-    /// I suspect that this is because these configure events are sent from the niri loop callback,
+    /// I suspect that this is because these configure events are sent from the naru loop callback,
     /// so they arrive after the sync done event and don't get processed in that client dispatch
     /// cycle. I'm not sure why this would be dependent on multithreading. But if this is indeed
     /// the issue, then a double roundtrip fixes it.

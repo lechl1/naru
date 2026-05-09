@@ -73,15 +73,15 @@ layer-rule {
 }
 ```
 
-You can find the namespaces of all open layer-shell surfaces by running `niri msg layers`.
+You can find the namespaces of all open layer-shell surfaces by running `naru msg layers`.
 
 #### `at-startup`
 
 Can be `true` or `false`.
-Matches during the first 60 seconds after starting niri.
+Matches during the first 60 seconds after starting naru.
 
 ```kdl
-// Show layer-shell surfaces with 0.5 opacity at niri startup, but not afterwards.
+// Show layer-shell surfaces with 0.5 opacity at naru startup, but not afterwards.
 layer-rule {
     match at-startup=true
 
@@ -158,10 +158,10 @@ Unlike window shadows, layer surface shadows always need to be enabled with a la
 That is, enabling shadows in the layout config section won't automatically enable them for layer surfaces.
 
 > [!NOTE]
-> Layer surfaces have no way to tell niri about their *visual geometry*.
-> For example, if a layer surface includes some invisible margins (like mako), niri has no way of knowing that, and will draw the shadow behind the entire surface, including the invisible margins.
+> Layer surfaces have no way to tell naru about their *visual geometry*.
+> For example, if a layer surface includes some invisible margins (like mako), naru has no way of knowing that, and will draw the shadow behind the entire surface, including the invisible margins.
 >
-> So to use niri shadows, you'll need to configure layer-shell clients to remove their own margins or shadows.
+> So to use naru shadows, you'll need to configure layer-shell clients to remove their own margins or shadows.
 
 ```kdl
 // Add a shadow for fuzzel.
@@ -269,7 +269,7 @@ Other properties apply independently.
 > This block affects only pop-ups created by the app via Wayland's [xdg-popup](https://wayland.app/protocols/xdg-shell#xdg_popup) (which should be most of them).
 >
 > Some desktop shells will emulate pop-ups by drawing something that looks like a pop-up inside a regular layer surface.
-> As far as niri is concerned, those are just layer surfaces and not pop-ups, so this block won't apply to them.
+> As far as naru is concerned, those are just layer surfaces and not pop-ups, so this block won't apply to them.
 >
 > This block also does not affect input-method pop-ups, such as Fcitx.
 

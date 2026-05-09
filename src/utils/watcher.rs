@@ -6,10 +6,10 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 use std::{io, thread};
 
-use niri_config::{Config, ConfigParseResult, ConfigPath};
+use naru_config::{Config, ConfigParseResult, ConfigPath};
 use smithay::reexports::calloop::channel::SyncSender;
 
-use crate::niri::State;
+use crate::naru::State;
 
 const POLLING_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -196,7 +196,7 @@ pub fn setup(state: &mut State, config_path: &ConfigPath, includes: Vec<PathBuf>
 
     let (tx, rx) = calloop::channel::sync_channel(1);
     state
-        .niri
+        .naru
         .event_loop
         .insert_source(
             rx,
@@ -212,7 +212,7 @@ pub fn setup(state: &mut State, config_path: &ConfigPath, includes: Vec<PathBuf>
         .unwrap();
 
     let watcher = Watcher::new(config_path.clone(), includes, process, tx);
-    state.niri.config_file_watcher = Some(watcher);
+    state.naru.config_file_watcher = Some(watcher);
 }
 
 #[cfg(test)]
@@ -378,11 +378,11 @@ mod tests {
 
     #[test]
     fn change_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.write_file("niri/config.kdl", "a"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.write_file("naru/config.kdl", "a"))
             .assert_initial("a")
             .run(|sh, test| {
-                sh.write_file("niri/config.kdl", "b")?;
+                sh.write_file("naru/config.kdl", "b")?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -391,11 +391,11 @@ mod tests {
 
     #[test]
     fn overwrite_but_dont_change_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.write_file("niri/config.kdl", "a"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.write_file("naru/config.kdl", "a"))
             .assert_initial("a")
             .run(|sh, test| {
-                sh.write_file("niri/config.kdl", "a")?;
+                sh.write_file("naru/config.kdl", "a")?;
                 test.assert_changed_to("a");
 
                 Ok(())
@@ -404,11 +404,11 @@ mod tests {
 
     #[test]
     fn touch_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.write_file("niri/config.kdl", "a"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.write_file("naru/config.kdl", "a"))
             .assert_initial("a")
             .run(|sh, test| {
-                cmd!(sh, "touch niri/config.kdl").run()?;
+                cmd!(sh, "touch naru/config.kdl").run()?;
                 test.assert_changed_to("a");
 
                 Ok(())
@@ -417,11 +417,11 @@ mod tests {
 
     #[test]
     fn create_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.create_dir("niri"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.create_dir("naru"))
             .assert_initial_not_exists()
             .run(|sh, test| {
-                sh.write_file("niri/config.kdl", "a")?;
+                sh.write_file("naru/config.kdl", "a")?;
                 test.assert_changed_to("a");
 
                 Ok(())
@@ -430,10 +430,10 @@ mod tests {
 
     #[test]
     fn create_dir_and_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .without_setup()
             .run(|sh, test| {
-                sh.write_file("niri/config.kdl", "a")?;
+                sh.write_file("naru/config.kdl", "a")?;
                 test.assert_changed_to("a");
 
                 Ok(())
@@ -442,14 +442,14 @@ mod tests {
 
     #[test]
     fn change_linked_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri/config2.kdl", "a")?;
-                cmd!(sh, "ln -sf config2.kdl niri/config.kdl").run()
+                sh.write_file("naru/config2.kdl", "a")?;
+                cmd!(sh, "ln -sf config2.kdl naru/config.kdl").run()
             })
             .assert_initial("a")
             .run(|sh, test| {
-                sh.write_file("niri/config2.kdl", "b")?;
+                sh.write_file("naru/config2.kdl", "b")?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -458,14 +458,14 @@ mod tests {
 
     #[test]
     fn change_file_in_linked_dir() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri2/config.kdl", "a")?;
-                cmd!(sh, "ln -s niri2 niri").run()
+                sh.write_file("naru2/config.kdl", "a")?;
+                cmd!(sh, "ln -s naru2 naru").run()
             })
             .assert_initial("a")
             .run(|sh, test| {
-                sh.write_file("niri2/config.kdl", "b")?;
+                sh.write_file("naru2/config.kdl", "b")?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -474,11 +474,11 @@ mod tests {
 
     #[test]
     fn remove_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.write_file("niri/config.kdl", "a"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.write_file("naru/config.kdl", "a"))
             .assert_initial("a")
             .run(|sh, test| {
-                sh.remove_path("niri/config.kdl")?;
+                sh.remove_path("naru/config.kdl")?;
                 test.assert_unchanged();
 
                 Ok(())
@@ -487,11 +487,11 @@ mod tests {
 
     #[test]
     fn remove_dir() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.write_file("niri/config.kdl", "a"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.write_file("naru/config.kdl", "a"))
             .assert_initial("a")
             .run(|sh, test| {
-                sh.remove_path("niri")?;
+                sh.remove_path("naru")?;
                 test.assert_unchanged();
 
                 Ok(())
@@ -500,12 +500,12 @@ mod tests {
 
     #[test]
     fn recreate_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.write_file("niri/config.kdl", "a"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.write_file("naru/config.kdl", "a"))
             .assert_initial("a")
             .run(|sh, test| {
-                sh.remove_path("niri/config.kdl")?;
-                sh.write_file("niri/config.kdl", "b")?;
+                sh.remove_path("naru/config.kdl")?;
+                sh.write_file("naru/config.kdl", "b")?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -514,15 +514,15 @@ mod tests {
 
     #[test]
     fn recreate_dir() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri/config.kdl", "a")?;
+                sh.write_file("naru/config.kdl", "a")?;
                 Ok(())
             })
             .assert_initial("a")
             .run(|sh, test| {
-                sh.remove_path("niri")?;
-                sh.write_file("niri/config.kdl", "b")?;
+                sh.remove_path("naru")?;
+                sh.write_file("naru/config.kdl", "b")?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -531,13 +531,13 @@ mod tests {
 
     #[test]
     fn swap_dir() -> Result {
-        TestPath::Explicit("niri/config.kdl")
-            .setup(|sh| sh.write_file("niri/config.kdl", "a"))
+        TestPath::Explicit("naru/config.kdl")
+            .setup(|sh| sh.write_file("naru/config.kdl", "a"))
             .assert_initial("a")
             .run(|sh, test| {
-                sh.write_file("niri2/config.kdl", "b")?;
-                sh.remove_path("niri")?;
-                cmd!(sh, "mv niri2 niri").run()?;
+                sh.write_file("naru2/config.kdl", "b")?;
+                sh.remove_path("naru")?;
+                cmd!(sh, "mv naru2 naru").run()?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -546,16 +546,16 @@ mod tests {
 
     #[test]
     fn swap_dir_link() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri2/config.kdl", "a")?;
-                cmd!(sh, "ln -s niri2 niri").run()
+                sh.write_file("naru2/config.kdl", "a")?;
+                cmd!(sh, "ln -s naru2 naru").run()
             })
             .assert_initial("a")
             .run(|sh, test| {
-                sh.write_file("niri3/config.kdl", "b")?;
-                sh.remove_path("niri")?;
-                cmd!(sh, "ln -s niri3 niri").run()?;
+                sh.write_file("naru3/config.kdl", "b")?;
+                sh.remove_path("naru")?;
+                cmd!(sh, "ln -s naru3 naru").run()?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -564,14 +564,14 @@ mod tests {
 
     #[test]
     fn change_included_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri/config.kdl", "include \"colors.kdl\"")?;
-                sh.write_file("niri/colors.kdl", "// Colors")
+                sh.write_file("naru/config.kdl", "include \"colors.kdl\"")?;
+                sh.write_file("naru/colors.kdl", "// Colors")
             })
             .assert_initial("include \"colors.kdl\"")
             .run(|sh, test| {
-                sh.write_file("niri/colors.kdl", "// Updated colors")?;
+                sh.write_file("naru/colors.kdl", "// Updated colors")?;
                 test.assert_changed_to("include \"colors.kdl\"");
 
                 Ok(())
@@ -580,14 +580,14 @@ mod tests {
 
     #[test]
     fn remove_included_file() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri/config.kdl", "include \"colors.kdl\"")?;
-                sh.write_file("niri/colors.kdl", "// Colors")
+                sh.write_file("naru/config.kdl", "include \"colors.kdl\"")?;
+                sh.write_file("naru/colors.kdl", "// Colors")
             })
             .assert_initial("include \"colors.kdl\"")
             .run(|sh, test| {
-                sh.remove_path("niri/colors.kdl")?;
+                sh.remove_path("naru/colors.kdl")?;
                 test.assert_changed_to("include \"colors.kdl\"");
 
                 Ok(())
@@ -596,15 +596,15 @@ mod tests {
 
     #[test]
     fn nested_includes() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri/config.kdl", "include \"a.kdl\"")?;
-                sh.write_file("niri/a.kdl", "include \"b.kdl\"")?;
-                sh.write_file("niri/b.kdl", "// b content")
+                sh.write_file("naru/config.kdl", "include \"a.kdl\"")?;
+                sh.write_file("naru/a.kdl", "include \"b.kdl\"")?;
+                sh.write_file("naru/b.kdl", "// b content")
             })
             .assert_initial("include \"a.kdl\"")
             .run(|sh, test| {
-                sh.write_file("niri/b.kdl", "// updated b")?;
+                sh.write_file("naru/b.kdl", "// updated b")?;
                 test.assert_changed_to("include \"a.kdl\"");
 
                 Ok(())
@@ -613,14 +613,14 @@ mod tests {
 
     #[test]
     fn broken_include_still_gets_watched() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup(|sh| {
-                sh.write_file("niri/config.kdl", "include \"colors.kdl\"")?;
-                sh.write_file("niri/colors.kdl", "broken")
+                sh.write_file("naru/config.kdl", "include \"colors.kdl\"")?;
+                sh.write_file("naru/colors.kdl", "broken")
             })
             .assert_initial("include \"colors.kdl\"")
             .run(|sh, test| {
-                sh.write_file("niri/colors.kdl", "// Fixed")?;
+                sh.write_file("naru/colors.kdl", "// Fixed")?;
                 test.assert_changed_to("include \"colors.kdl\"");
 
                 Ok(())
@@ -643,22 +643,22 @@ mod tests {
 
     #[test]
     fn swap_just_link() -> Result {
-        TestPath::Explicit("niri/config.kdl")
+        TestPath::Explicit("naru/config.kdl")
             .setup_any(|sh| {
-                let dir = sh.current_dir().join("niri");
+                let dir = sh.current_dir().join("naru");
 
                 sh.create_dir(&dir)?;
 
                 create_epoch(dir.join("config2.kdl"), "a")?;
                 create_epoch(dir.join("config3.kdl"), "b")?;
 
-                cmd!(sh, "ln -s config2.kdl niri/config.kdl").run()?;
+                cmd!(sh, "ln -s config2.kdl naru/config.kdl").run()?;
 
                 Ok(())
             })
             .assert_initial("a")
             .run(|sh, test| {
-                cmd!(sh, "ln -sf config3.kdl niri/config.kdl").run()?;
+                cmd!(sh, "ln -sf config3.kdl naru/config.kdl").run()?;
                 test.assert_changed_to("b");
 
                 Ok(())
@@ -668,31 +668,31 @@ mod tests {
     #[test]
     fn swap_many_regular() -> Result {
         TestPath::Regular {
-            user_path: "user-niri/config.kdl",
-            system_path: "system-niri/config.kdl",
+            user_path: "user-naru/config.kdl",
+            system_path: "system-naru/config.kdl",
         }
-        .setup(|sh| sh.write_file("system-niri/config.kdl", "system config"))
+        .setup(|sh| sh.write_file("system-naru/config.kdl", "system config"))
         .assert_initial("system config")
         .run(|sh, test| {
-            sh.write_file("user-niri/config.kdl", "user config")?;
+            sh.write_file("user-naru/config.kdl", "user config")?;
             test.assert_changed_to("user config");
 
-            cmd!(sh, "touch system-niri/config.kdl").run()?;
+            cmd!(sh, "touch system-naru/config.kdl").run()?;
             test.assert_unchanged();
 
-            sh.remove_path("system-niri")?;
+            sh.remove_path("system-naru")?;
             test.assert_unchanged();
 
-            sh.write_file("system-niri/config.kdl", "new system config")?;
+            sh.write_file("system-naru/config.kdl", "new system config")?;
             test.assert_unchanged();
 
-            sh.remove_path("user-niri")?;
+            sh.remove_path("user-naru")?;
             test.assert_changed_to("new system config");
 
-            sh.write_file("system-niri/config.kdl", "updated system config")?;
+            sh.write_file("system-naru/config.kdl", "updated system config")?;
             test.assert_changed_to("updated system config");
 
-            sh.write_file("user-niri/config.kdl", "new user config")?;
+            sh.write_file("user-naru/config.kdl", "new user config")?;
             test.assert_changed_to("new user config");
 
             Ok(())
@@ -702,8 +702,8 @@ mod tests {
     #[test]
     fn swap_many_links_regular_like_nix() -> Result {
         TestPath::Regular {
-            user_path: "user-niri/config.kdl",
-            system_path: "system-niri/config.kdl",
+            user_path: "user-naru/config.kdl",
+            system_path: "system-naru/config.kdl",
         }
         .setup_any(|sh| {
             let store = sh.current_dir().join("store");
@@ -714,8 +714,8 @@ mod tests {
             create_epoch(store.join("gen2"), "gen 2")?;
             create_epoch(store.join("gen3"), "gen 3")?;
 
-            sh.create_dir("user-niri")?;
-            sh.create_dir("system-niri")?;
+            sh.create_dir("user-naru")?;
+            sh.create_dir("system-naru")?;
 
             Ok(())
         })
@@ -724,28 +724,28 @@ mod tests {
             let store = sh.current_dir().join("store");
             test.assert_unchanged();
 
-            cmd!(sh, "ln -s {store}/gen1 user-niri/config.kdl").run()?;
+            cmd!(sh, "ln -s {store}/gen1 user-naru/config.kdl").run()?;
             test.assert_changed_to("gen 1");
 
-            cmd!(sh, "ln -s {store}/gen2 system-niri/config.kdl").run()?;
+            cmd!(sh, "ln -s {store}/gen2 system-naru/config.kdl").run()?;
             test.assert_unchanged();
 
-            cmd!(sh, "unlink user-niri/config.kdl").run()?;
+            cmd!(sh, "unlink user-naru/config.kdl").run()?;
             test.assert_changed_to("gen 2");
 
-            cmd!(sh, "ln -s {store}/gen3 user-niri/config.kdl").run()?;
+            cmd!(sh, "ln -s {store}/gen3 user-naru/config.kdl").run()?;
             test.assert_changed_to("gen 3");
 
-            cmd!(sh, "ln -sf {store}/gen1 system-niri/config.kdl").run()?;
+            cmd!(sh, "ln -sf {store}/gen1 system-naru/config.kdl").run()?;
             test.assert_unchanged();
 
-            cmd!(sh, "unlink system-niri/config.kdl").run()?;
+            cmd!(sh, "unlink system-naru/config.kdl").run()?;
             test.assert_unchanged();
 
-            cmd!(sh, "ln -s {store}/gen1 system-niri/config.kdl").run()?;
+            cmd!(sh, "ln -s {store}/gen1 system-naru/config.kdl").run()?;
             test.assert_unchanged();
 
-            cmd!(sh, "unlink user-niri/config.kdl").run()?;
+            cmd!(sh, "unlink user-naru/config.kdl").run()?;
             test.assert_changed_to("gen 1");
 
             Ok(())

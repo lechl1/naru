@@ -4,9 +4,9 @@ use std::path::Path;
 use std::{env, slice};
 
 use anyhow::{anyhow, bail, Context};
-use niri_config::OutputName;
-use niri_ipc::socket::Socket;
-use niri_ipc::{
+use naru_config::OutputName;
+use naru_ipc::socket::Socket;
+use naru_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
     OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
 };
@@ -16,7 +16,7 @@ use crate::cli::Msg;
 use crate::utils::version;
 
 pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
-    // For actions taking paths, prepend the niri CLI's working directory.
+    // For actions taking paths, prepend the naru CLI's working directory.
     if let Msg::Action {
         action:
             Action::Screenshot { path, .. }
@@ -51,12 +51,12 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::Casts => Request::Casts,
     };
 
-    let mut socket = Socket::connect().context("error connecting to the niri socket")?;
+    let mut socket = Socket::connect().context("error connecting to the naru socket")?;
 
     let result = socket.send(request);
 
-    // For errors that can be caused by a version mismatch between the running niri instance and
-    // the niri msg CLI, we will try to fetch and compare the versions.
+    // For errors that can be caused by a version mismatch between the running naru instance and
+    // the naru msg CLI, we will try to fetch and compare the versions.
     let check_compositor_version = match &result {
         Err(err) => {
             // Response JSON parsing errors.
@@ -65,13 +65,13 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 ErrorKind::InvalidData | ErrorKind::UnexpectedEof
             )
         }
-        // Error returned from niri.
+        // Error returned from naru.
         Ok(Err(_)) => true,
         _ => false,
     };
 
     let compositor_version = if check_compositor_version && !matches!(msg, Msg::Version) {
-        // Reconnect to support older niri versions with one request per connection.
+        // Reconnect to support older naru versions with one request per connection.
         Socket::connect()
             .and_then(|mut socket| socket.send(Request::Version))
             .ok()
@@ -89,16 +89,16 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Some(Ok(Response::Version(compositor_version))) => {
             let cli_version = version();
             if cli_version != compositor_version {
-                eprintln!("Running niri compositor has a different version from the niri CLI:");
+                eprintln!("Running naru compositor has a different version from the naru CLI:");
                 eprintln!("Compositor version: {compositor_version}");
                 eprintln!("CLI version:        {cli_version}");
-                eprintln!("Did you forget to restart niri after an update?");
+                eprintln!("Did you forget to restart naru after an update?");
                 eprintln!();
             }
         }
         Some(_) => {
-            eprintln!("Unable to get the running niri compositor version.");
-            eprintln!("Did you forget to restart niri after an update?");
+            eprintln!("Unable to get the running naru compositor version.");
+            eprintln!("Did you forget to restart naru after an update?");
             eprintln!();
         }
         None => {
@@ -107,8 +107,8 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         }
     }
 
-    let reply = result.context("error communicating with niri")?;
-    let response = reply.map_err(|err_msg| anyhow!(err_msg).context("niri returned an error"))?;
+    let reply = result.context("error communicating with naru")?;
+    let response = reply.map_err(|err_msg| anyhow!(err_msg).context("naru returned an error"))?;
 
     match msg {
         Msg::RequestError => {
@@ -133,8 +133,8 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             }
 
             if cli_version != compositor_version {
-                eprintln!("Running niri compositor has a different version from the niri CLI.");
-                eprintln!("Did you forget to restart niri after an update?");
+                eprintln!("Running naru compositor has a different version from the naru CLI.");
+                eprintln!("Did you forget to restart naru after an update?");
                 eprintln!();
             }
 
@@ -218,19 +218,19 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             });
             let mut iter = layers.iter().peekable();
 
-            let print = |surface: &niri_ipc::LayerSurface| {
+            let print = |surface: &naru_ipc::LayerSurface| {
                 println!("    Surface:");
                 println!("      Namespace: \"{}\"", &surface.namespace);
 
                 let interactivity = match surface.keyboard_interactivity {
-                    niri_ipc::LayerSurfaceKeyboardInteractivity::None => "none",
-                    niri_ipc::LayerSurfaceKeyboardInteractivity::Exclusive => "exclusive",
-                    niri_ipc::LayerSurfaceKeyboardInteractivity::OnDemand => "on-demand",
+                    naru_ipc::LayerSurfaceKeyboardInteractivity::None => "none",
+                    naru_ipc::LayerSurfaceKeyboardInteractivity::Exclusive => "exclusive",
+                    naru_ipc::LayerSurfaceKeyboardInteractivity::OnDemand => "on-demand",
                 };
                 println!("      Keyboard interactivity: {interactivity}");
             };
 
-            let print_layer = |iter: &mut Peekable<slice::Iter<niri_ipc::LayerSurface>>,
+            let print_layer = |iter: &mut Peekable<slice::Iter<naru_ipc::LayerSurface>>,
                                output: &str,
                                layer| {
                 let mut empty = true;
@@ -251,16 +251,16 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 println!("Output \"{output}\":");
 
                 print!("  Background layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Background);
+                print_layer(&mut iter, output, naru_ipc::Layer::Background);
 
                 print!("  Bottom layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Bottom);
+                print_layer(&mut iter, output, naru_ipc::Layer::Bottom);
 
                 print!("  Top layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Top);
+                print_layer(&mut iter, output, naru_ipc::Layer::Top);
 
                 print!("  Overlay layer:");
-                print_layer(&mut iter, output, niri_ipc::Layer::Overlay);
+                print_layer(&mut iter, output, naru_ipc::Layer::Overlay);
             }
         }
         Msg::FocusedOutput => {
@@ -419,7 +419,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
 
             let mut read_event = socket.read_events();
             loop {
-                let event = read_event().context("error reading event from niri")?;
+                let event = read_event().context("error reading event from naru")?;
 
                 if json {
                     let event = serde_json::to_string(&event).context("error formatting event")?;

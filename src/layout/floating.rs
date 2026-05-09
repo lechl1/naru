@@ -2,9 +2,9 @@ use std::cmp::max;
 use std::iter::zip;
 use std::rc::Rc;
 
-use niri_config::utils::MergeWith as _;
-use niri_config::{PresetSize, RelativeTo};
-use niri_ipc::{PositionChange, SizeChange, WindowLayout};
+use naru_config::utils::MergeWith as _;
+use naru_config::{PresetSize, RelativeTo};
+use naru_ipc::{PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 
@@ -16,8 +16,8 @@ use super::{
     ConfigureIntent, InteractiveResizeData, LayoutElement, Options, RemovedTile, SizeFrac,
 };
 use crate::animation::{Animation, Clock};
-use crate::niri_render_elements;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::naru_render_elements;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::RenderCtx;
 use crate::utils::transaction::TransactionBlocker;
@@ -69,7 +69,7 @@ pub struct FloatingSpace<W: LayoutElement> {
     options: Rc<Options>,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     FloatingSpaceRenderElement<R> => {
         Tile = TileRenderElement<R>,
         ClosingWindow = ClosingWindowRenderElement,
@@ -1056,7 +1056,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         true
     }
 
-    pub fn render<R: NiriRenderer>(
+    pub fn render<R: NaruRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         xray_pos: XrayPos,
@@ -1390,7 +1390,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
 }
 
 fn compute_toplevel_bounds(
-    border_config: niri_config::Border,
+    border_config: naru_config::Border,
     working_area_size: Size<f64, Logical>,
 ) -> Size<i32, Logical> {
     let mut border = 0.;

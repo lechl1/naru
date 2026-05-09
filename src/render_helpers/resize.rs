@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use glam::{Mat3, Vec2};
-use niri_config::CornerRadius;
+use naru_config::CornerRadius;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
 use smithay::backend::renderer::gles::{GlesError, GlesFrame, GlesRenderer, GlesTexture, Uniform};
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
@@ -11,7 +11,7 @@ use smithay::gpu_span_location;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transform};
 
-use super::renderer::{AsGlesFrame, NiriRenderer};
+use super::renderer::{AsGlesFrame, NaruRenderer};
 use super::shader_element::ShaderRenderElement;
 use super::shaders::{mat3_uniform, ProgramType, Shaders};
 use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
@@ -94,20 +94,20 @@ impl ResizeRenderElement {
                 scale.x,
                 result_alpha,
                 Rc::new([
-                    mat3_uniform("niri_input_to_curr_geo", input_to_curr_geo),
-                    mat3_uniform("niri_curr_geo_to_prev_geo", curr_geo_to_prev_geo),
-                    mat3_uniform("niri_curr_geo_to_next_geo", curr_geo_to_next_geo),
-                    Uniform::new("niri_curr_geo_size", curr_geo_size.to_array()),
-                    mat3_uniform("niri_geo_to_tex_prev", geo_to_tex_prev),
-                    mat3_uniform("niri_geo_to_tex_next", geo_to_tex_next),
-                    Uniform::new("niri_progress", progress),
-                    Uniform::new("niri_clamped_progress", clamped_progress),
-                    Uniform::new("niri_corner_radius", <[f32; 4]>::from(corner_radius)),
-                    Uniform::new("niri_clip_to_geometry", clip_to_geometry),
+                    mat3_uniform("naru_input_to_curr_geo", input_to_curr_geo),
+                    mat3_uniform("naru_curr_geo_to_prev_geo", curr_geo_to_prev_geo),
+                    mat3_uniform("naru_curr_geo_to_next_geo", curr_geo_to_next_geo),
+                    Uniform::new("naru_curr_geo_size", curr_geo_size.to_array()),
+                    mat3_uniform("naru_geo_to_tex_prev", geo_to_tex_prev),
+                    mat3_uniform("naru_geo_to_tex_next", geo_to_tex_next),
+                    Uniform::new("naru_progress", progress),
+                    Uniform::new("naru_clamped_progress", clamped_progress),
+                    Uniform::new("naru_corner_radius", <[f32; 4]>::from(corner_radius)),
+                    Uniform::new("naru_clip_to_geometry", clip_to_geometry),
                 ]),
                 HashMap::from([
-                    (String::from("niri_tex_prev"), texture_prev),
-                    (String::from("niri_tex_next"), texture_next),
+                    (String::from("naru_tex_prev"), texture_prev),
+                    (String::from("naru_tex_next"), texture_next),
                 ]),
                 Kind::Unspecified,
             )
@@ -115,7 +115,7 @@ impl ResizeRenderElement {
         )
     }
 
-    pub fn has_shader(renderer: &mut impl NiriRenderer) -> bool {
+    pub fn has_shader(renderer: &mut impl NaruRenderer) -> bool {
         Shaders::get(renderer)
             .program(ProgramType::Resize)
             .is_some()

@@ -1,12 +1,12 @@
 use std::iter::zip;
 
-use niri_config::{CornerRadius, Gradient, GradientRelativeTo};
+use naru_config::{CornerRadius, Gradient, GradientRelativeTo};
 use smithay::backend::renderer::element::{Element as _, Kind};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use crate::niri_render_elements;
+use crate::naru_render_elements;
 use crate::render_helpers::border::BorderRenderElement;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 
 #[derive(Debug)]
@@ -18,11 +18,11 @@ pub struct FocusRing {
     full_size: Size<f64, Logical>,
     is_border: bool,
     use_border_shader: bool,
-    config: niri_config::FocusRing,
+    config: naru_config::FocusRing,
     thicken_corners: bool,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     FocusRingRenderElement => {
         SolidColor = SolidColorRenderElement,
         Gradient = BorderRenderElement,
@@ -30,7 +30,7 @@ niri_render_elements! {
 }
 
 impl FocusRing {
-    pub fn new(config: niri_config::FocusRing) -> Self {
+    pub fn new(config: naru_config::FocusRing) -> Self {
         Self {
             buffers: Default::default(),
             locations: Default::default(),
@@ -44,7 +44,7 @@ impl FocusRing {
         }
     }
 
-    pub fn update_config(&mut self, config: niri_config::FocusRing) {
+    pub fn update_config(&mut self, config: naru_config::FocusRing) {
         self.config = config;
     }
 
@@ -217,7 +217,7 @@ impl FocusRing {
 
     pub fn render(
         &self,
-        renderer: &mut impl NiriRenderer,
+        renderer: &mut impl NaruRenderer,
         location: Point<f64, Logical>,
         push: &mut dyn FnMut(FocusRingRenderElement),
     ) {
@@ -270,7 +270,7 @@ impl FocusRing {
         self.thicken_corners = value;
     }
 
-    pub fn config(&self) -> &niri_config::FocusRing {
+    pub fn config(&self) -> &naru_config::FocusRing {
         &self.config
     }
 }

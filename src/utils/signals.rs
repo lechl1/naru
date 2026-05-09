@@ -15,7 +15,7 @@
 //!
 //! Technically, a "more correct" solution would be to remember the original sigmask and restore it
 //! after the child exits, but that's painful *and* likely to cause issues, because the user almost
-//! never intended to spawn niri with a nonempty sigmask. It indicates a bug in whoever spawned us,
+//! never intended to spawn naru with a nonempty sigmask. It indicates a bug in whoever spawned us,
 //! so we may as well clean up after them (which is easier than not doing so).
 
 pub use platform::*;
@@ -25,7 +25,7 @@ mod platform {
     use std::io;
 
     // FIXME: implement for FreeBSD. But probably, that should be done in calloop::signals.
-    pub fn listen(_handle: &calloop::LoopHandle<crate::niri::State>) {}
+    pub fn listen(_handle: &calloop::LoopHandle<crate::naru::State>) {}
 
     // These two actually build as-is on FreeBSD, but without our own signal handling in listen(),
     // they do more harm than good (they block termination signals without actually installing a
@@ -42,7 +42,7 @@ mod platform {
 mod platform {
     use std::{io, mem};
 
-    pub fn listen(handle: &calloop::LoopHandle<crate::niri::State>) {
+    pub fn listen(handle: &calloop::LoopHandle<crate::naru::State>) {
         use calloop::signals::{Signal, Signals};
 
         handle
@@ -50,7 +50,7 @@ mod platform {
                 Signals::new(&[Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP]).unwrap(),
                 |event, _, state| {
                     info!("quitting due to receiving signal {:?}", event.signal());
-                    state.niri.stop_signal.stop();
+                    state.naru.stop_signal.stop();
                 },
             )
             .unwrap();

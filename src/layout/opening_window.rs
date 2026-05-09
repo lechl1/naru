@@ -12,7 +12,7 @@ use smithay::backend::renderer::Texture;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
 use crate::animation::Animation;
-use crate::niri_render_elements;
+use crate::naru_render_elements;
 use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenData, OffscreenRenderElement};
 use crate::render_helpers::shader_element::ShaderRenderElement;
 use crate::render_helpers::shaders::{mat3_uniform, ProgramType, Shaders};
@@ -24,7 +24,7 @@ pub struct OpenAnimation {
     buffer: OffscreenBuffer,
 }
 
-niri_render_elements! {
+naru_render_elements! {
     OpeningWindowRenderElement => {
         Offscreen = RelocateRenderElement<RescaleRenderElement<OffscreenRenderElement>>,
         Shader = ShaderRenderElement,
@@ -104,14 +104,14 @@ impl OpenAnimation {
                 scale.x as f32,
                 alpha,
                 Rc::new([
-                    mat3_uniform("niri_input_to_geo", input_to_geo),
-                    Uniform::new("niri_geo_size", geo_size.to_array()),
-                    mat3_uniform("niri_geo_to_tex", geo_to_tex),
-                    Uniform::new("niri_progress", progress as f32),
-                    Uniform::new("niri_clamped_progress", clamped_progress as f32),
-                    Uniform::new("niri_random_seed", self.random_seed),
+                    mat3_uniform("naru_input_to_geo", input_to_geo),
+                    Uniform::new("naru_geo_size", geo_size.to_array()),
+                    mat3_uniform("naru_geo_to_tex", geo_to_tex),
+                    Uniform::new("naru_progress", progress as f32),
+                    Uniform::new("naru_clamped_progress", clamped_progress as f32),
+                    Uniform::new("naru_random_seed", self.random_seed),
                 ]),
-                HashMap::from([(String::from("niri_tex"), texture.clone())]),
+                HashMap::from([(String::from("naru_tex"), texture.clone())]),
                 Kind::Unspecified,
             )
             .with_location(area.loc);

@@ -3,7 +3,7 @@ use std::iter::zip;
 use std::rc::Rc;
 use std::time::Duration;
 
-use niri_config::{CornerRadius, LayoutPart};
+use naru_config::{CornerRadius, LayoutPart};
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
@@ -20,8 +20,8 @@ use super::workspace::{
 use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
-use crate::niri_render_elements;
-use crate::render_helpers::renderer::NiriRenderer;
+use crate::naru_render_elements;
+use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::SolidColorRenderElement;
 use crate::render_helpers::xray::XrayPos;
@@ -87,7 +87,7 @@ pub struct Monitor<W: LayoutElement> {
     /// Configurable properties of the layout.
     pub(super) options: Rc<Options>,
     /// Layout config overrides for this monitor.
-    layout_config: Option<niri_config::LayoutPart>,
+    layout_config: Option<naru_config::LayoutPart>,
 }
 
 #[derive(Debug)]
@@ -183,7 +183,7 @@ impl<'a, W: LayoutElement> Clone for MonitorAddWindowTarget<'a, W> {
     }
 }
 
-niri_render_elements! {
+naru_render_elements! {
     MonitorInnerRenderElement<R> => {
         Workspace = CropRenderElement<WorkspaceRenderElement<R>>,
         InsertHint = CropRenderElement<InsertHintRenderElement>,
@@ -247,7 +247,7 @@ impl WorkspaceSwitchGesture {
         }
     }
 
-    fn animate_from(&mut self, from: f64, clock: Clock, config: niri_config::Animation) {
+    fn animate_from(&mut self, from: f64, clock: Clock, config: naru_config::Animation) {
         let current = self.animation.as_ref().map_or(0., Animation::value);
         self.animation = Some(Animation::new(clock, from + current, 0., 0., config));
     }
@@ -437,7 +437,7 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn activate_workspace_with_anim_config(
         &mut self,
         idx: usize,
-        config: Option<niri_config::Animation>,
+        config: Option<naru_config::Animation>,
     ) {
         // FIXME: also compute and use current velocity.
         let current_idx = self.workspace_render_idx();
@@ -1210,7 +1210,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.options = options;
     }
 
-    pub fn update_layout_config(&mut self, layout_config: Option<niri_config::LayoutPart>) -> bool {
+    pub fn update_layout_config(&mut self, layout_config: Option<naru_config::LayoutPart>) -> bool {
         if self.layout_config == layout_config {
             return false;
         }
@@ -1643,7 +1643,7 @@ impl<W: LayoutElement> Monitor<W> {
         ws.render_above_top_layer()
     }
 
-    pub fn render_insert_hint_between_workspaces<R: NiriRenderer>(
+    pub fn render_insert_hint_between_workspaces<R: NaruRenderer>(
         &self,
         renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
@@ -1668,7 +1668,7 @@ impl<W: LayoutElement> Monitor<W> {
             });
     }
 
-    pub fn render_workspaces<R: NiriRenderer>(
+    pub fn render_workspaces<R: NaruRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
         focus_ring: bool,
@@ -1749,7 +1749,7 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
-    pub fn render_workspace_shadows<R: NiriRenderer>(
+    pub fn render_workspace_shadows<R: NaruRenderer>(
         &self,
         renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
@@ -2050,7 +2050,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.working_area
     }
 
-    pub fn layout_config(&self) -> Option<&niri_config::LayoutPart> {
+    pub fn layout_config(&self) -> Option<&naru_config::LayoutPart> {
         self.layout_config.as_ref()
     }
 

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Naru
+Comment=A scrollable-tiling Wayland compositor
+Exec=naru-session
+Type=Application
+DesktopNames=naru

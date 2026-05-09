@@ -3,7 +3,7 @@
 <sup>Since: 25.02</sup>
 
 The `gestures` config section contains gesture settings.
-For an overview of all niri gestures, see the [Gestures](./Gestures.md) wiki page.
+For an overview of all naru gestures, see the [Gestures](./Gestures.md) wiki page.
 
 Here's a quick glance at the available settings along with their default values.
 

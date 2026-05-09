@@ -3,34 +3,34 @@ use smithay::backend::input;
 use smithay::backend::winit::WinitVirtualDevice;
 use smithay::output::Output;
 
-use crate::niri::State;
+use crate::naru::State;
 use crate::protocols::virtual_pointer::VirtualPointer;
 
-pub trait NiriInputBackend: input::InputBackend<Device = Self::NiriDevice> {
-    type NiriDevice: NiriInputDevice;
+pub trait NaruInputBackend: input::InputBackend<Device = Self::NaruDevice> {
+    type NaruDevice: NaruInputDevice;
 }
-impl<T: input::InputBackend> NiriInputBackend for T
+impl<T: input::InputBackend> NaruInputBackend for T
 where
-    Self::Device: NiriInputDevice,
+    Self::Device: NaruInputDevice,
 {
-    type NiriDevice = Self::Device;
+    type NaruDevice = Self::Device;
 }
 
-pub trait NiriInputDevice: input::Device {
+pub trait NaruInputDevice: input::Device {
     // FIXME: this should maybe be per-event, not per-device,
     // but it's not clear that this matters in practice?
     // it might be more obvious once we implement it for libinput
     fn output(&self, state: &State) -> Option<Output>;
 }
 
-impl NiriInputDevice for libinput::Device {
+impl NaruInputDevice for libinput::Device {
     fn output(&self, _state: &State) -> Option<Output> {
         // FIXME: Allow specifying the output per-device?
         None
     }
 }
 
-impl NiriInputDevice for WinitVirtualDevice {
+impl NaruInputDevice for WinitVirtualDevice {
     fn output(&self, _state: &State) -> Option<Output> {
         // FIXME: we should be returning the single output that the winit backend creates,
         // but for now, that will cause issues because the output is normally upside down,
@@ -44,7 +44,7 @@ impl NiriInputDevice for WinitVirtualDevice {
     }
 }
 
-impl NiriInputDevice for VirtualPointer {
+impl NaruInputDevice for VirtualPointer {
     fn output(&self, _: &State) -> Option<Output> {
         self.output().cloned()
     }

@@ -1,4 +1,4 @@
-use niri_ipc::PickedColor;
+use naru_ipc::PickedColor;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
@@ -12,7 +12,7 @@ use smithay::input::pointer::{
 use smithay::input::SeatHandler;
 use smithay::utils::{Logical, Physical, Point, Scale, Size, Transform};
 
-use crate::niri::State;
+use crate::naru::State;
 use crate::render_helpers::{render_and_download, RenderCtx, RenderTarget};
 
 pub struct PickColorGrab {
@@ -25,23 +25,23 @@ impl PickColorGrab {
     }
 
     fn on_ungrab(&mut self, state: &mut State) {
-        if let Some(tx) = state.niri.pick_color.take() {
+        if let Some(tx) = state.naru.pick_color.take() {
             let _ = tx.send_blocking(None);
         }
         state
-            .niri
+            .naru
             .cursor_manager
             .set_cursor_image(CursorImageStatus::default_named());
-        state.niri.queue_redraw_all();
+        state.naru.queue_redraw_all();
     }
 
     fn pick_color_at_point(location: Point<f64, Logical>, data: &mut State) -> Option<PickedColor> {
-        let (output, pos_within_output) = data.niri.output_under(location)?;
+        let (output, pos_within_output) = data.naru.output_under(location)?;
         let output = output.clone();
 
         data.backend
             .with_primary_renderer(|renderer| {
-                data.niri.update_render_elements(Some(&output));
+                data.naru.update_render_elements(Some(&output));
 
                 let scale = Scale::from(output.current_scale().fractional_scale());
                 // FIXME: perhaps replace floor with round once we figure out the pointer behavior
@@ -55,7 +55,7 @@ impl PickColorGrab {
                     target: RenderTarget::Output,
                     xray: None,
                 };
-                let elements = data.niri.render_to_vec(ctx, &output, false);
+                let elements = data.naru.render_to_vec(ctx, &output, false);
 
                 let mapping = match render_and_download(
                     renderer,
@@ -127,9 +127,9 @@ impl PointerGrab<State> for PickColorGrab {
         }
 
         // We're handling this press, don't send the release to the window.
-        data.niri.suppressed_buttons.insert(event.button);
+        data.naru.suppressed_buttons.insert(event.button);
 
-        if let Some(tx) = data.niri.pick_color.take() {
+        if let Some(tx) = data.naru.pick_color.take() {
             let color = Self::pick_color_at_point(handle.current_location(), data);
             let _ = tx.send_blocking(color);
         }

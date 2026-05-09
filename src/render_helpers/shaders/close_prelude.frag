@@ -1,22 +1,22 @@
 precision highp float;
 
 #if defined(DEBUG_FLAGS)
-uniform float niri_tint;
+uniform float naru_tint;
 #endif
 
-varying vec2 niri_v_coords;
-uniform vec2 niri_size;
+varying vec2 naru_v_coords;
+uniform vec2 naru_size;
 
-uniform mat3 niri_input_to_geo;
-uniform vec2 niri_geo_size;
+uniform mat3 naru_input_to_geo;
+uniform vec2 naru_geo_size;
 
-uniform sampler2D niri_tex;
-uniform mat3 niri_geo_to_tex;
+uniform sampler2D naru_tex;
+uniform mat3 naru_geo_to_tex;
 
-uniform float niri_progress;
-uniform float niri_clamped_progress;
-uniform float niri_random_seed;
+uniform float naru_progress;
+uniform float naru_clamped_progress;
+uniform float naru_random_seed;
 
-uniform float niri_alpha;
-uniform float niri_scale;
+uniform float naru_alpha;
+uniform float naru_scale;
 
