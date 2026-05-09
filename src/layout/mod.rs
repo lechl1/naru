@@ -368,9 +368,9 @@ pub struct Layout<W: LayoutElement> {
     options: Rc<Options>,
     /// Ephemeral state for the alternating stacking move actions
     /// (`MoveWindow{Left,Right,Up,Down}Stacked`). Lives only across consecutive same-direction
-    /// stacking moves on the same window — any other action clears it. Phase 4 will consume this
+    /// stacking moves on the same window — any other action clears it. Phase 4 consumes this
     /// to flip behavior between "new column/row" and "overlap neighbor" on each repeat.
-    stacking_move_state: Option<StackingMoveState>,
+    stacking_move_state: Option<StackingMoveState<W::Id>>,
 }
 
 /// Direction of a stacking move sequence.
@@ -385,8 +385,8 @@ pub enum StackingMoveDirection {
 /// State threaded across consecutive same-direction stacking moves on the same window.
 /// `last_was_overlap` flips on each repeat to drive the new-column / overlap alternation.
 #[derive(Debug, Clone)]
-pub struct StackingMoveState {
-    pub window_id: u64,
+pub struct StackingMoveState<I> {
+    pub window_id: I,
     pub direction: StackingMoveDirection,
     pub last_was_overlap: bool,
 }
@@ -2083,20 +2083,139 @@ impl<W: LayoutElement> Layout<W> {
     // that safely is a focused follow-up. The stubs log a TODO so users binding the keys early
     // get an obvious signal rather than silent no-ops.
 
+    /// Returns true if the just-completed move should record an "overlap" outcome in the
+    /// alternation state, false to record "new column/row". Called once per stacking-move
+    /// invocation to decide which underlying primitive to call.
+    fn decide_stacking_move_overlap(
+        &self,
+        direction: StackingMoveDirection,
+        focused_id: &W::Id,
+        focused_stack_len: usize,
+    ) -> bool {
+        match &self.stacking_move_state {
+            Some(state) if &state.window_id == focused_id && state.direction == direction => {
+                // Continuation of a same-window same-direction sequence: alternate.
+                !state.last_was_overlap
+            }
+            _ => {
+                // First move (or sequence broken). Decide by source tile cardinality:
+                // multi-window tile -> pull into new column/row; single-window -> overlap.
+                focused_stack_len == 1
+            }
+        }
+    }
+
+    fn record_stacking_move(
+        &mut self,
+        direction: StackingMoveDirection,
+        window_id: W::Id,
+        was_overlap: bool,
+    ) {
+        self.stacking_move_state = Some(StackingMoveState {
+            window_id,
+            direction,
+            last_was_overlap: was_overlap,
+        });
+    }
+
     pub fn move_window_left_stacked(&mut self) {
-        tracing::info!("MoveWindowLeftStacked: stub — Phase 4 implementation pending");
+        let direction = StackingMoveDirection::Left;
+        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
+        let Some(workspace) = self.active_workspace_mut() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let success = if want_overlap {
+            workspace.move_active_window_to_left_neighbor_overlap()
+        } else {
+            workspace.move_active_window_to_new_column_left()
+        };
+        if success {
+            self.record_stacking_move(direction, focused_id, want_overlap);
+        } else {
+            // TODO Phase 5: at workspace edge, move to next workspace in this direction.
+            self.stacking_move_state = None;
+        }
     }
 
     pub fn move_window_right_stacked(&mut self) {
-        tracing::info!("MoveWindowRightStacked: stub — Phase 4 implementation pending");
+        let direction = StackingMoveDirection::Right;
+        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
+        let Some(workspace) = self.active_workspace_mut() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let success = if want_overlap {
+            workspace.move_active_window_to_right_neighbor_overlap()
+        } else {
+            workspace.move_active_window_to_new_column_right()
+        };
+        if success {
+            self.record_stacking_move(direction, focused_id, want_overlap);
+        } else {
+            self.stacking_move_state = None;
+        }
     }
 
     pub fn move_window_up_stacked(&mut self) {
-        tracing::info!("MoveWindowUpStacked: stub — Phase 4 implementation pending");
+        let direction = StackingMoveDirection::Up;
+        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
+        let Some(workspace) = self.active_workspace_mut() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let success = if want_overlap {
+            workspace.move_active_window_to_above_neighbor_overlap()
+        } else {
+            workspace.move_active_window_to_new_row_above()
+        };
+        if success {
+            self.record_stacking_move(direction, focused_id, want_overlap);
+        } else {
+            self.stacking_move_state = None;
+        }
     }
 
     pub fn move_window_down_stacked(&mut self) {
-        tracing::info!("MoveWindowDownStacked: stub — Phase 4 implementation pending");
+        let direction = StackingMoveDirection::Down;
+        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
+        let Some(workspace) = self.active_workspace_mut() else {
+            self.stacking_move_state = None;
+            return;
+        };
+        let success = if want_overlap {
+            workspace.move_active_window_to_below_neighbor_overlap()
+        } else {
+            workspace.move_active_window_to_new_row_below()
+        };
+        if success {
+            self.record_stacking_move(direction, focused_id, want_overlap);
+        } else {
+            self.stacking_move_state = None;
+        }
+    }
+
+    /// Returns (focused window id, focused tile's stack length) for the active scrolling tile.
+    fn active_focused_tile_info(&mut self) -> Option<(W::Id, usize)> {
+        let workspace = self.active_workspace_mut()?;
+        let tile = workspace.active_scrolling_tile_mut()?;
+        Some((tile.window().id().clone(), tile.stack_len()))
     }
 
     pub fn focus_down(&mut self) {

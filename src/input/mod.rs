@@ -682,6 +682,19 @@ impl State {
             touch.cancel(self);
         }
 
+        // E2 reset rule: anything other than another MoveWindow*Stacked action clears the
+        // in-flight alternation state. The state lives only across consecutive same-direction
+        // moves on the same focused window.
+        if !matches!(
+            action,
+            Action::MoveWindowLeftStacked
+                | Action::MoveWindowRightStacked
+                | Action::MoveWindowUpStacked
+                | Action::MoveWindowDownStacked
+        ) {
+            self.naru.layout.clear_stacking_move_state();
+        }
+
         match action {
             Action::Quit(skip_confirmation) => {
                 if !skip_confirmation && self.naru.exit_confirm_dialog.show() {

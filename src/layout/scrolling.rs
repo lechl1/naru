@@ -1762,6 +1762,286 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.columns[self.active_column_idx].move_up()
     }
 
+    // ---- Stacking move primitives (Phase 4) -------------------------------------------------
+    //
+    // Each of the four `move_active_window_*_stacked_*` methods moves a SINGLE window — the
+    // active window of the active tile — per call. The two "new column/row" variants pull the
+    // window into a freshly-created column/tile placed adjacent to the source. The two
+    // "overlap-neighbor" variants push the window onto the active tile of the neighbor's window
+    // stack and remove the source tile (and column, if it was the only tile) when the source's
+    // window stack would otherwise become empty.
+    //
+    // Returns true on success, false on no-op (e.g. at the workspace edge with no neighbor in
+    // the requested direction). The Layout-level orchestrator interprets `false` from an
+    // overlap-variant as "edge → next workspace" handling per E5.
+
+    pub fn move_active_window_to_new_column_left(&mut self) -> bool {
+        if self.columns.is_empty() {
+            return false;
+        }
+        let source_col_idx = self.active_column_idx;
+        let source_tile_idx = self.columns[source_col_idx].active_tile_idx;
+        // Snapshot attributes from the source tile before mutating.
+        let (view_size, scale, clock, options, width) = {
+            let source_tile = &self.columns[source_col_idx].tiles[source_tile_idx];
+            (
+                source_tile.view_size(),
+                source_tile.scale(),
+                source_tile.clock.clone(),
+                source_tile.options.clone(),
+                self.columns[source_col_idx].width,
+            )
+        };
+        // Pop the active window. Source tile remains valid (caller guarantees stack_len > 1).
+        let popped = self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
+        let new_tile = Tile::new(popped, view_size, scale, clock, options);
+        // Insert at source_col_idx so the new column appears immediately to the LEFT of the
+        // current source column. add_column with activate=true moves focus to the new column.
+        self.add_tile(Some(source_col_idx), new_tile, true, width, false, None);
+        true
+    }
+
+    pub fn move_active_window_to_new_column_right(&mut self) -> bool {
+        if self.columns.is_empty() {
+            return false;
+        }
+        let source_col_idx = self.active_column_idx;
+        let source_tile_idx = self.columns[source_col_idx].active_tile_idx;
+        let (view_size, scale, clock, options, width) = {
+            let source_tile = &self.columns[source_col_idx].tiles[source_tile_idx];
+            (
+                source_tile.view_size(),
+                source_tile.scale(),
+                source_tile.clock.clone(),
+                source_tile.options.clone(),
+                self.columns[source_col_idx].width,
+            )
+        };
+        let popped = self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
+        let new_tile = Tile::new(popped, view_size, scale, clock, options);
+        // Insert at source_col_idx + 1 to place the new column immediately to the RIGHT.
+        self.add_tile(
+            Some(source_col_idx + 1),
+            new_tile,
+            true,
+            width,
+            false,
+            None,
+        );
+        true
+    }
+
+    pub fn move_active_window_to_left_neighbor_overlap(&mut self) -> bool {
+        let source_col_idx = self.active_column_idx;
+        if source_col_idx == 0 {
+            return false;
+        }
+        let source_tile_idx = self.columns[source_col_idx].active_tile_idx;
+        let target_col_idx = source_col_idx - 1;
+
+        let source_is_single_window =
+            self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
+
+        let window = if source_is_single_window {
+            // Remove the entire source tile (and column if it was the only tile). Target is to
+            // the LEFT of source so its index doesn't shift regardless of column removal.
+            let mut removed = self.remove_tile_by_idx(
+                source_col_idx,
+                source_tile_idx,
+                Transaction::new(),
+                None,
+            );
+            removed.tile.pop_active_window()
+        } else {
+            // Multi-window source: just pop one window, source tile stays.
+            self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window()
+        };
+
+        // Push onto target column's active tile.
+        let target_col = &mut self.columns[target_col_idx];
+        let target_active_tile_idx = target_col.active_tile_idx;
+        target_col.tiles[target_active_tile_idx].push_window(window);
+
+        // Focus the target column.
+        self.active_column_idx = target_col_idx;
+        true
+    }
+
+    pub fn move_active_window_to_right_neighbor_overlap(&mut self) -> bool {
+        let source_col_idx = self.active_column_idx;
+        if source_col_idx + 1 >= self.columns.len() {
+            return false;
+        }
+        let source_tile_idx = self.columns[source_col_idx].active_tile_idx;
+        let original_target = source_col_idx + 1;
+
+        let source_is_single_window =
+            self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
+
+        let (window, target_col_idx) = if source_is_single_window {
+            let mut removed = self.remove_tile_by_idx(
+                source_col_idx,
+                source_tile_idx,
+                Transaction::new(),
+                None,
+            );
+            // If source was the only tile in its column, the column was removed; the right
+            // neighbor's index shifts left by one.
+            let column_was_removed = !self
+                .columns
+                .get(source_col_idx)
+                .map(|_| true)
+                .unwrap_or(false)
+                || self.columns.len() < original_target + 1;
+            // Simpler check: remove always shifts indices to the right of removed by -1 IF the
+            // column was removed. We can detect that by comparing tile counts before/after, but
+            // since we don't have "before" handy, just check whether `original_target` is still
+            // valid. If columns.len() <= original_target, the target shifted to original_target-1.
+            let _ = column_was_removed;
+            let target = if original_target < self.columns.len() {
+                // Could either still be the same neighbor, or could be the shifted-left neighbor.
+                // remove_tile_by_idx removes the column iff it was the only tile.
+                // Compare: if source column was single-tile, len shrunk by 1 -> target shifts.
+                // We know source_is_single_window is true here; that's per-tile, not per-column.
+                // The column may have had multiple tiles. Need to detect column removal.
+                // Use heuristic: the column at source_col_idx exists iff column wasn't removed.
+                if source_col_idx < self.columns.len() {
+                    original_target
+                } else {
+                    original_target - 1
+                }
+            } else {
+                original_target - 1
+            };
+            (removed.tile.pop_active_window(), target)
+        } else {
+            (
+                self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window(),
+                original_target,
+            )
+        };
+
+        let target_col = &mut self.columns[target_col_idx];
+        let target_active_tile_idx = target_col.active_tile_idx;
+        target_col.tiles[target_active_tile_idx].push_window(window);
+        self.active_column_idx = target_col_idx;
+        true
+    }
+
+    // Vertical stacking moves: act within the active column. Up moves the active window to the
+    // tile above; Down moves to the tile below.
+
+    pub fn move_active_window_to_new_row_above(&mut self) -> bool {
+        if self.columns.is_empty() {
+            return false;
+        }
+        let col_idx = self.active_column_idx;
+        let source_tile_idx = self.columns[col_idx].active_tile_idx;
+        if self.columns[col_idx].tiles[source_tile_idx].stack_len() < 2 {
+            return false;
+        }
+        let (view_size, scale, clock, options) = {
+            let source_tile = &self.columns[col_idx].tiles[source_tile_idx];
+            (
+                source_tile.view_size(),
+                source_tile.scale(),
+                source_tile.clock.clone(),
+                source_tile.options.clone(),
+            )
+        };
+        let popped = self.columns[col_idx].tiles[source_tile_idx].pop_active_window();
+        let new_tile = Tile::new(popped, view_size, scale, clock, options);
+        // Insert above the current tile.
+        self.add_tile_to_column(col_idx, Some(source_tile_idx), new_tile, true);
+        true
+    }
+
+    pub fn move_active_window_to_new_row_below(&mut self) -> bool {
+        if self.columns.is_empty() {
+            return false;
+        }
+        let col_idx = self.active_column_idx;
+        let source_tile_idx = self.columns[col_idx].active_tile_idx;
+        if self.columns[col_idx].tiles[source_tile_idx].stack_len() < 2 {
+            return false;
+        }
+        let (view_size, scale, clock, options) = {
+            let source_tile = &self.columns[col_idx].tiles[source_tile_idx];
+            (
+                source_tile.view_size(),
+                source_tile.scale(),
+                source_tile.clock.clone(),
+                source_tile.options.clone(),
+            )
+        };
+        let popped = self.columns[col_idx].tiles[source_tile_idx].pop_active_window();
+        let new_tile = Tile::new(popped, view_size, scale, clock, options);
+        self.add_tile_to_column(col_idx, Some(source_tile_idx + 1), new_tile, true);
+        true
+    }
+
+    pub fn move_active_window_to_above_neighbor_overlap(&mut self) -> bool {
+        let col_idx = self.active_column_idx;
+        if self.columns.is_empty() {
+            return false;
+        }
+        let source_tile_idx = self.columns[col_idx].active_tile_idx;
+        if source_tile_idx == 0 {
+            return false;
+        }
+        let target_tile_idx = source_tile_idx - 1;
+        let source_is_single_window =
+            self.columns[col_idx].tiles[source_tile_idx].stack_len() == 1;
+
+        let window = if source_is_single_window {
+            let mut removed =
+                self.remove_tile_by_idx(col_idx, source_tile_idx, Transaction::new(), None);
+            removed.tile.pop_active_window()
+        } else {
+            self.columns[col_idx].tiles[source_tile_idx].pop_active_window()
+        };
+
+        // After removal of source tile (if applicable), target_tile_idx is unchanged (it was
+        // ABOVE the source). If the column itself was removed, col_idx may be invalid — but a
+        // single-tile column being removed means there's no above neighbor, so we'd have
+        // returned false earlier. Multi-tile column means column survives.
+        let column = &mut self.columns[col_idx];
+        column.tiles[target_tile_idx].push_window(window);
+        column.active_tile_idx = target_tile_idx;
+        true
+    }
+
+    pub fn move_active_window_to_below_neighbor_overlap(&mut self) -> bool {
+        let col_idx = self.active_column_idx;
+        if self.columns.is_empty() {
+            return false;
+        }
+        let source_tile_idx = self.columns[col_idx].active_tile_idx;
+        if source_tile_idx + 1 >= self.columns[col_idx].tiles.len() {
+            return false;
+        }
+        let original_target = source_tile_idx + 1;
+        let source_is_single_window =
+            self.columns[col_idx].tiles[source_tile_idx].stack_len() == 1;
+
+        let (window, target_tile_idx) = if source_is_single_window {
+            let mut removed =
+                self.remove_tile_by_idx(col_idx, source_tile_idx, Transaction::new(), None);
+            // Removing the source tile shifts the BELOW neighbor's index left by 1.
+            (removed.tile.pop_active_window(), original_target - 1)
+        } else {
+            (
+                self.columns[col_idx].tiles[source_tile_idx].pop_active_window(),
+                original_target,
+            )
+        };
+
+        let column = &mut self.columns[col_idx];
+        column.tiles[target_tile_idx].push_window(window);
+        column.active_tile_idx = target_tile_idx;
+        true
+    }
+
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
         if self.columns.is_empty() {
             return;

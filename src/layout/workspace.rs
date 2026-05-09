@@ -1096,6 +1096,67 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    // ---- Stacking move primitives (Phase 4) -----------------------------------------------
+    // Each delegates to the underlying ScrollingSpace method. They are no-ops in floating
+    // layer for now. Returns true on success, false if at the workspace edge with no
+    // applicable target (callers may then move to a neighboring workspace).
+
+    pub fn move_active_window_to_new_column_left(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_new_column_left()
+    }
+
+    pub fn move_active_window_to_new_column_right(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_new_column_right()
+    }
+
+    pub fn move_active_window_to_left_neighbor_overlap(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_left_neighbor_overlap()
+    }
+
+    pub fn move_active_window_to_right_neighbor_overlap(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_right_neighbor_overlap()
+    }
+
+    pub fn move_active_window_to_new_row_above(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_new_row_above()
+    }
+
+    pub fn move_active_window_to_new_row_below(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_new_row_below()
+    }
+
+    pub fn move_active_window_to_above_neighbor_overlap(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_above_neighbor_overlap()
+    }
+
+    pub fn move_active_window_to_below_neighbor_overlap(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling.move_active_window_to_below_neighbor_overlap()
+    }
+
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
         if window.map_or(self.floating_is_active.get(), |id| {
             self.floating.has_window(id)
