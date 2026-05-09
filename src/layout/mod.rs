@@ -4384,6 +4384,44 @@ impl<W: LayoutElement> Layout<W> {
         // Dragging in the overview shouldn't switch the workspace and so on.
         let allow_to_activate_workspace = !self.overview_open;
 
+        // ---- Stacking drop (Phase 5+) ----------------------------------------------------
+        // If `enable-stacking` is on and the cursor at drop time is over an existing window
+        // that isn't the dragged one, push the dragged window onto that target tile's window
+        // stack instead of placing it as a new column/tile. The dragged tile is consumed
+        // (its single window is moved out and the husk is dropped).
+        if self.options.enable_stacking && !move_.is_floating {
+            let dragged_id = move_.tile.window().id().clone();
+            let target_id = self
+                .window_under(&move_.output, move_.pointer_pos_within_output)
+                .map(|(win, _)| win.id().clone())
+                .filter(|id| id != &dragged_id);
+            if let Some(target_id) = target_id {
+                let mut dragged = Some(move_.tile.pop_active_window());
+                for ws in self.workspaces_mut() {
+                    if !ws.tiles_mut().any(|t| t.window().id() == &target_id) {
+                        continue;
+                    }
+                    {
+                        let target_tile = ws
+                            .tiles_mut()
+                            .find(|t| t.window().id() == &target_id)
+                            .expect("target tile vanished between any() and find()");
+                        target_tile.push_window(dragged.take().unwrap());
+                    }
+                    ws.activate_window(&dragged_id);
+                    return;
+                }
+                // Target window vanished between window_under and the push; this is a rare
+                // race. The dragged_window is dropped here, which leaks the surface. We
+                // don't have a recovery path that's better than restoring the move state.
+                tracing::warn!(
+                    "stacking drop: target window {target_id:?} vanished before push; \
+                     dragged window {dragged_id:?} was discarded"
+                );
+                return;
+            }
+        }
+
         match &mut self.monitor_set {
             MonitorSet::Normal {
                 monitors,
