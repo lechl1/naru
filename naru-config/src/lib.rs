@@ -74,6 +74,11 @@ pub struct Config {
     pub spawn_sh_at_startup: Vec<SpawnShAtStartup>,
     pub layout: Layout,
     pub prefer_no_csd: bool,
+    /// Enables the stacking move actions (`MoveWindow{Left,Right,Up,Down}Stacked`) and the
+    /// alternating new-column / overlap-into-neighbor semantics they implement. When false
+    /// (default), those actions parse and dispatch but become no-ops, so the bound keys are
+    /// inert until the user opts in by adding `enable-stacking` to their config.
+    pub enable_stacking: bool,
     pub cursor: Cursor,
     pub screenshot_path: ScreenshotPath,
     pub clipboard: Clipboard,
@@ -236,6 +241,10 @@ where
 
                 "prefer-no-csd" => {
                     config.borrow_mut().prefer_no_csd = Flag::decode_node(node, ctx)?.0
+                }
+
+                "enable-stacking" => {
+                    config.borrow_mut().enable_stacking = Flag::decode_node(node, ctx)?.0
                 }
 
                 "screenshot-path" => {
@@ -1475,6 +1484,7 @@ mod tests {
                 },
             },
             prefer_no_csd: true,
+            enable_stacking: false,
             cursor: Cursor {
                 xcursor_theme: "breeze_cursors",
                 xcursor_size: 16,

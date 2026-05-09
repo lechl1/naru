@@ -420,6 +420,9 @@ pub struct Options {
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
     pub deactivate_unfocused_windows: bool,
+    /// User opt-in for the alternating stacking move actions (mirror of
+    /// `naru_config::Config::enable_stacking`).
+    pub enable_stacking: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -680,6 +683,7 @@ impl Options {
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,
+            enable_stacking: config.enable_stacking,
         }
     }
 
@@ -2049,6 +2053,9 @@ impl<W: LayoutElement> Layout<W> {
     pub fn focus_window_in_active_tile_next(&mut self) {
         // Cycling focus is itself a non-stacking-move action: clear any in-flight sequence.
         self.stacking_move_state = None;
+        if !self.options.enable_stacking {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
@@ -2059,6 +2066,9 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn focus_window_in_active_tile_prev(&mut self) {
         self.stacking_move_state = None;
+        if !self.options.enable_stacking {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
@@ -2119,6 +2129,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_window_left_stacked(&mut self) {
+        if !self.options.enable_stacking {
+            self.stacking_move_state = None;
+            return;
+        }
         let direction = StackingMoveDirection::Left;
         let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
             self.stacking_move_state = None;
@@ -2143,6 +2157,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_window_right_stacked(&mut self) {
+        if !self.options.enable_stacking {
+            self.stacking_move_state = None;
+            return;
+        }
         let direction = StackingMoveDirection::Right;
         let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
             self.stacking_move_state = None;
@@ -2166,6 +2184,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_window_up_stacked(&mut self) {
+        if !self.options.enable_stacking {
+            self.stacking_move_state = None;
+            return;
+        }
         let direction = StackingMoveDirection::Up;
         let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
             self.stacking_move_state = None;
@@ -2189,6 +2211,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_window_down_stacked(&mut self) {
+        if !self.options.enable_stacking {
+            self.stacking_move_state = None;
+            return;
+        }
         let direction = StackingMoveDirection::Down;
         let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
             self.stacking_move_state = None;

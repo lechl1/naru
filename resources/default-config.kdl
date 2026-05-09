@@ -285,6 +285,17 @@ hotkey-overlay {
 // After enabling or disabling this, you need to restart the apps for this to take effect.
 // prefer-no-csd
 
+// Opt in to the alternating stacking move actions
+// (move-window-{left,right,up,down}-stacked) bound to Mod+Alt+Arrow by default. When disabled
+// (which is the default), those actions are no-ops, so the bound keys are inert. Enable to get:
+//   - First move from a multi-window tile pulls the active window into a new column/row.
+//   - First move from a single-window tile pushes the window onto the neighbor's stack
+//     (overlap), removing the empty source.
+//   - Subsequent same-direction moves on the same window alternate between the two behaviors.
+//   - Any other action resets the alternation.
+// Use focus-window-in-tile-next/prev (unbound by default) to cycle within a stack.
+// enable-stacking
+
 // You can change the path where screenshots are saved.
 // A ~ at the front will be expanded to the home directory.
 // The path is formatted with strftime(3) to give you the screenshot date and time.
