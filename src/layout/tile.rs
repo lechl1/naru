@@ -35,11 +35,64 @@ use crate::utils::{
     baba_is_float_offset, round_logical_in_physical, round_logical_in_physical_max1,
 };
 
+/// A stack of windows occupying the same tile, with one active (visible/focused) at a time.
+///
+/// Phase 1 invariants:
+/// - `windows` is non-empty.
+/// - `active_idx < windows.len()`.
+///
+/// Implements `Deref`/`DerefMut` to the active window so that `tile.window.foo()` keeps working
+/// as a single-window access path while the stack machinery lives underneath.
+#[derive(Debug)]
+pub struct WindowStack<W: LayoutElement> {
+    windows: Vec<W>,
+    active_idx: usize,
+}
+
+impl<W: LayoutElement> WindowStack<W> {
+    pub fn new(window: W) -> Self {
+        Self {
+            windows: vec![window],
+            active_idx: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.windows.len()
+    }
+
+    pub fn active_idx(&self) -> usize {
+        self.active_idx
+    }
+
+    pub fn windows(&self) -> &[W] {
+        &self.windows
+    }
+
+    pub fn windows_mut(&mut self) -> &mut [W] {
+        &mut self.windows
+    }
+}
+
+impl<W: LayoutElement> std::ops::Deref for WindowStack<W> {
+    type Target = W;
+
+    fn deref(&self) -> &W {
+        &self.windows[self.active_idx]
+    }
+}
+
+impl<W: LayoutElement> std::ops::DerefMut for WindowStack<W> {
+    fn deref_mut(&mut self) -> &mut W {
+        &mut self.windows[self.active_idx]
+    }
+}
+
 /// Toplevel window with decorations.
 #[derive(Debug)]
 pub struct Tile<W: LayoutElement> {
-    /// The toplevel window itself.
-    window: W,
+    /// The toplevel window stack. Phase 1: always exactly one window in the stack.
+    window: WindowStack<W>,
 
     /// The border around the window.
     border: FocusRing,
@@ -189,7 +242,7 @@ impl<W: LayoutElement> Tile<W> {
         let sizing_mode = window.sizing_mode();
 
         Self {
-            window,
+            window: WindowStack::new(window),
             border: FocusRing::new(border_config.into()),
             focus_ring: FocusRing::new(focus_ring_config),
             shadow: Shadow::new(shadow_config),
