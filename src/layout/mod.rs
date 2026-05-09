@@ -2131,6 +2131,9 @@ impl<W: LayoutElement> Layout<W> {
     pub fn move_window_left_stacked(&mut self) {
         if !self.options.enable_stacking {
             self.stacking_move_state = None;
+            // Delegate to the legacy column-swap behavior so the default Mod+Ctrl+Arrow
+            // bindings are no-op-free until the user opts in.
+            self.move_left();
             return;
         }
         let direction = StackingMoveDirection::Left;
@@ -2159,6 +2162,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn move_window_right_stacked(&mut self) {
         if !self.options.enable_stacking {
             self.stacking_move_state = None;
+            self.move_right();
             return;
         }
         let direction = StackingMoveDirection::Right;
@@ -2186,6 +2190,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn move_window_up_stacked(&mut self) {
         if !self.options.enable_stacking {
             self.stacking_move_state = None;
+            self.move_up();
             return;
         }
         let direction = StackingMoveDirection::Up;
@@ -2213,6 +2218,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn move_window_down_stacked(&mut self) {
         if !self.options.enable_stacking {
             self.stacking_move_state = None;
+            self.move_down();
             return;
         }
         let direction = StackingMoveDirection::Down;

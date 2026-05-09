@@ -2,3 +2,7 @@
 /result
 
 .idea
+
+# insta inline-snapshot pending-update artifacts
+*.pending-snap
+*.snap.new
