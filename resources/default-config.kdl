@@ -121,6 +121,14 @@ layout {
     //   together with the previously focused column.
     center-focused-column "never"
 
+    // Recompute the workspace view offset after any layout change so that all
+    // columns are horizontally centered as a group when they fit inside the
+    // working area, or so that neither edge has wasted empty space when they
+    // overflow. Useful when you want a balanced layout without manually
+    // scrolling. Triggers on: window add/remove, stacking moves, neighbor
+    // overlap moves. Off by default.
+    // auto-fit-or-center
+
     // You can customize the widths that "switch-preset-column-width" (Mod+R) toggles between.
     preset-column-widths {
         // Proportion sets the width as a fraction of the output width, taking gaps into account.
@@ -138,9 +146,25 @@ layout {
     // preset-window-heights { }
 
     // You can change the default width of the new windows.
-    default-column-width { proportion 0.5; }
+    // Commented out so naru auto-detects: on ultrawide outputs (≥21:9, e.g. 21:9 / 32:10)
+    // non-terminals get `ultrawide-default-column-width` (default 2/5) and apps whose
+    // app_id is in `terminal-app-ids` get `ultrawide-terminal-column-width` (default 1/5).
+    // Otherwise (non-ultrawide) the window decides its own initial width.
+    // default-column-width { proportion 0.5; }
     // If you leave the brackets empty, the windows themselves will decide their initial width.
     // default-column-width {}
+
+    // List of xdg app IDs that naru should treat as terminals on ultrawide displays.
+    // Used only when `default-column-width` is unset — opens a terminal at
+    // `ultrawide-terminal-column-width` (default 1/5) instead of the non-terminal ultrawide
+    // default (`ultrawide-default-column-width`, default 2/5). No effect on non-ultrawide.
+    // terminal-app-ids "foot" "alacritty" "kitty" "org.wezfurlong.wezterm" \
+    //                  "com.mitchellh.ghostty" "konsole" "gnome-terminal" "xterm"
+
+    // Override the auto-detected default width on ultrawide outputs (≥ 21:9). Both apply only
+    // when the global `default-column-width` is unset; both have no effect on non-ultrawide.
+    // ultrawide-default-column-width  { proportion 0.4; }   // non-terminals (default 2/5)
+    // ultrawide-terminal-column-width { proportion 0.2; }   // terminals     (default 1/5)
 
     // By default focus ring and border are rendered as a solid background rectangle
     // behind windows. That is, they will show up through semitransparent windows.
@@ -296,6 +320,13 @@ spawn-at-startup "waybar"
 hotkey-overlay {
     // Uncomment this line to disable the "Important Hotkeys" pop-up at startup.
     // skip-at-startup
+}
+
+// Visual appearance of naru's built-in UI surfaces (window-title bars in the MRU
+// switcher, hotkey overlay, exit-confirm dialog, config-error toast, screenshot UI).
+appearance {
+    // Pixel size of the sans-serif label font. Default is 13.
+    // font-size 13
 }
 
 // Uncomment this line to ask the clients to omit their client-side decorations if possible.

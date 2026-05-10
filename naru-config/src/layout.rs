@@ -19,11 +19,28 @@ pub struct Layout {
     pub preset_window_heights: Vec<PresetSize>,
     pub center_focused_column: CenterFocusedColumn,
     pub always_center_single_column: bool,
+    /// After any layout change, recompute the workspace view offset so that
+    /// either: (a) all columns are horizontally centered as a group when they
+    /// fit inside the working area, or (b) the view is clamped so neither
+    /// edge has wasted empty space when they overflow.
+    pub auto_fit_or_center: bool,
     pub empty_workspace_above_first: bool,
     pub default_column_display: ColumnDisplay,
     pub gaps: f64,
     pub struts: Struts,
     pub background_color: Color,
+    /// XDG app IDs treated as terminals. Used for the ultrawide-only narrower default width
+    /// (`ultrawide_terminal_column_width`) when a window in this list opens on an output with
+    /// aspect ratio ≥ 21:9. Default is empty — populate via
+    /// `layout { terminal-app-ids "foot" "alacritty" ... }`.
+    pub terminal_app_ids: Vec<String>,
+    /// Default column width for non-terminal windows on ultrawide outputs (≥ 21:9), used only
+    /// when the global `default-column-width` is unset. Default is 2/5 of the view width.
+    pub ultrawide_default_column_width: PresetSize,
+    /// Default column width for terminal windows (matched against `terminal_app_ids`) on
+    /// ultrawide outputs (≥ 21:9), used only when the global `default-column-width` is unset.
+    /// Default is 1/5 of the view width.
+    pub ultrawide_terminal_column_width: PresetSize,
 }
 
 impl Default for Layout {
@@ -42,6 +59,7 @@ impl Default for Layout {
             default_column_width: Some(PresetSize::Proportion(0.5)),
             center_focused_column: CenterFocusedColumn::Never,
             always_center_single_column: false,
+            auto_fit_or_center: false,
             empty_workspace_above_first: false,
             default_column_display: ColumnDisplay::Normal,
             gaps: 16.,
@@ -52,6 +70,9 @@ impl Default for Layout {
                 PresetSize::Proportion(2. / 3.),
             ],
             background_color: DEFAULT_BACKGROUND_COLOR,
+            terminal_app_ids: Vec::new(),
+            ultrawide_default_column_width: PresetSize::Proportion(2. / 5.),
+            ultrawide_terminal_column_width: PresetSize::Proportion(1. / 5.),
         }
     }
 }
@@ -66,6 +87,7 @@ impl MergeWith<LayoutPart> for Layout {
             tab_indicator,
             insert_hint,
             always_center_single_column,
+            auto_fit_or_center,
             empty_workspace_above_first,
             gaps,
         );
@@ -82,6 +104,22 @@ impl MergeWith<LayoutPart> for Layout {
 
         if let Some(x) = part.default_column_width {
             self.default_column_width = x.0;
+        }
+
+        if let Some(x) = &part.terminal_app_ids {
+            self.terminal_app_ids = x.0.clone();
+        }
+
+        if let Some(x) = part.ultrawide_default_column_width {
+            if let Some(v) = x.0 {
+                self.ultrawide_default_column_width = v;
+            }
+        }
+
+        if let Some(x) = part.ultrawide_terminal_column_width {
+            if let Some(v) = x.0 {
+                self.ultrawide_terminal_column_width = v;
+            }
         }
 
         if self.preset_column_widths.is_empty() {
@@ -117,6 +155,8 @@ pub struct LayoutPart {
     #[knuffel(child)]
     pub always_center_single_column: Option<Flag>,
     #[knuffel(child)]
+    pub auto_fit_or_center: Option<Flag>,
+    #[knuffel(child)]
     pub empty_workspace_above_first: Option<Flag>,
     #[knuffel(child, unwrap(argument, str))]
     pub default_column_display: Option<ColumnDisplay>,
@@ -126,7 +166,16 @@ pub struct LayoutPart {
     pub struts: Option<Struts>,
     #[knuffel(child)]
     pub background_color: Option<Color>,
+    #[knuffel(child)]
+    pub terminal_app_ids: Option<TerminalAppIds>,
+    #[knuffel(child)]
+    pub ultrawide_default_column_width: Option<DefaultPresetSize>,
+    #[knuffel(child)]
+    pub ultrawide_terminal_column_width: Option<DefaultPresetSize>,
 }
+
+#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
+pub struct TerminalAppIds(#[knuffel(arguments)] pub Vec<String>);
 
 #[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
 pub enum PresetSize {

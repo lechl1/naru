@@ -45,7 +45,8 @@ use crate::layout::ActivateWindow;
 use crate::naru::{CastTarget, PopupGrabState, State};
 use crate::utils::transaction::Transaction;
 use crate::utils::{
-    get_monotonic_time, output_matches_name, send_scale_transform, update_tiled_state, ResizeEdge,
+    get_monotonic_time, output_matches_name, send_scale_transform, update_tiled_state,
+    with_toplevel_role, ResizeEdge,
 };
 use crate::window::{InitialConfigureState, ResolvedWindowRules, Unmapped, WindowRef};
 
@@ -1139,8 +1140,17 @@ impl State {
                 });
             }
 
-            width = ws.resolve_default_width(rules.default_width, false);
-            floating_width = ws.resolve_default_width(rules.default_width, true);
+            let app_id_for_width = with_toplevel_role(toplevel, |role| role.app_id.clone());
+            width = ws.resolve_default_width(
+                rules.default_width,
+                false,
+                app_id_for_width.as_deref(),
+            );
+            floating_width = ws.resolve_default_width(
+                rules.default_width,
+                true,
+                app_id_for_width.as_deref(),
+            );
             height = ws.resolve_default_height(rules.default_height, false);
             floating_height = ws.resolve_default_height(rules.default_height, true);
 

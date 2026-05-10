@@ -330,6 +330,16 @@ pub trait LayoutElement {
     fn interactive_resize_data(&self) -> Option<InteractiveResizeData>;
 
     fn on_commit(&mut self, serial: Serial);
+
+    /// The XDG app ID for this element, if known.
+    ///
+    /// Used for "place new window next to an existing instance of the same app" behavior in
+    /// [`Layout::add_window`]. The default impl returns `None` so test harnesses that don't
+    /// model app IDs continue to compile without further work; the real `Mapped` window
+    /// overrides it to read the toplevel role's `app_id`.
+    fn app_id(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -966,6 +976,24 @@ impl<W: LayoutElement> Layout<W> {
     ) -> Option<&Output> {
         let scrolling_height = height.map(SizeChange::from);
         let id = window.id().clone();
+
+        // Auto-promote `Auto` to `NextTo(same-app instance)` when an instance of the same
+        // xdg app_id already exists in the active workspace. The search includes floating
+        // tiles and picks the last match in workspace iteration order (scrolling l→r, then
+        // floating), giving "rightmost in current workspace" semantics. Falls back to the
+        // original `Auto` (focus-relative placement) when no match exists or when the new
+        // window has no app_id.
+        let same_app_id: Option<W::Id> = if matches!(target, AddWindowTarget::Auto) {
+            window
+                .app_id()
+                .and_then(|app| self.find_same_app_in_active_workspace(&app))
+        } else {
+            None
+        };
+        let target = match (&target, &same_app_id) {
+            (AddWindowTarget::Auto, Some(id)) => AddWindowTarget::NextTo(id),
+            _ => target,
+        };
 
         match &mut self.monitor_set {
             MonitorSet::Normal {
@@ -1625,6 +1653,21 @@ impl<W: LayoutElement> Layout<W> {
         Some(&monitors[*active_monitor_idx].output)
     }
 
+    /// Walks all tiles (scrolling + floating) in the active workspace and returns the id of
+    /// the last one whose xdg app_id matches `app_id`. Iteration order is scrolling l→r then
+    /// floating, so "last match" gives the rightmost in-scroll match if no floating instance
+    /// exists, or the last-iterated floating match otherwise. Returns `None` when no
+    /// instance of the app is open in the active workspace, or when there is no active
+    /// workspace at all.
+    fn find_same_app_in_active_workspace(&self, app_id: &str) -> Option<W::Id> {
+        let workspace = self.active_workspace()?;
+        workspace
+            .tiles()
+            .filter(|tile| tile.window().app_id().as_deref() == Some(app_id))
+            .last()
+            .map(|tile| tile.window().id().clone())
+    }
+
     pub fn active_workspace(&self) -> Option<&Workspace<W>> {
         let MonitorSet::Normal {
             monitors,
@@ -1875,17 +1918,20 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_down(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
+        // Move the active column down within the workspace; if there's no in-
+        // workspace target, fall through to moving the column to the workspace
+        // below (Monitor already implements this fallback).
+        let Some(monitor) = self.active_monitor() else {
             return;
         };
-        workspace.move_down();
+        monitor.move_down_or_to_workspace_down();
     }
 
     pub fn move_up(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             return;
         };
-        workspace.move_up();
+        monitor.move_up_or_to_workspace_up();
     }
 
     pub fn move_down_or_to_workspace_down(&mut self) {
@@ -2199,19 +2245,24 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
-        let Some(workspace) = self.active_workspace_mut() else {
-            self.stacking_move_state = None;
-            return;
-        };
-        let success = if want_overlap {
-            workspace.move_active_window_to_above_neighbor_overlap()
-        } else {
-            workspace.move_active_window_to_new_row_above()
+        let success = {
+            let Some(workspace) = self.active_workspace_mut() else {
+                self.stacking_move_state = None;
+                return;
+            };
+            if want_overlap {
+                workspace.move_active_window_to_above_neighbor_overlap()
+            } else {
+                workspace.move_active_window_to_new_row_above()
+            }
         };
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
         } else {
+            // At the top edge of the column with no in-workspace target: fall through to
+            // moving the window to the workspace above (E5 — "edge → next workspace").
             self.stacking_move_state = None;
+            self.move_to_workspace_up(true);
         }
     }
 
@@ -2227,19 +2278,24 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
-        let Some(workspace) = self.active_workspace_mut() else {
-            self.stacking_move_state = None;
-            return;
-        };
-        let success = if want_overlap {
-            workspace.move_active_window_to_below_neighbor_overlap()
-        } else {
-            workspace.move_active_window_to_new_row_below()
+        let success = {
+            let Some(workspace) = self.active_workspace_mut() else {
+                self.stacking_move_state = None;
+                return;
+            };
+            if want_overlap {
+                workspace.move_active_window_to_below_neighbor_overlap()
+            } else {
+                workspace.move_active_window_to_new_row_below()
+            }
         };
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
         } else {
+            // At the bottom edge of the column with no in-workspace target: fall through to
+            // moving the window to the workspace below (E5 — "edge → next workspace").
             self.stacking_move_state = None;
+            self.move_to_workspace_down(true);
         }
     }
 
@@ -2251,17 +2307,71 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_down(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
+        // Carry the active column's visual center-X so we can land on a
+        // positionally similar column if we cross a workspace boundary.
+        let target_x = self
+            .active_workspace()
+            .and_then(|ws| ws.active_column_visual_center_x());
+
+        let moved = match self.active_workspace_mut() {
+            Some(workspace) => workspace.focus_down(),
+            None => return,
         };
-        workspace.focus_down();
+        if moved {
+            return;
+        }
+
+        // Fall through: try crossing to the workspace below.
+        {
+            let Some(monitor) = self.active_monitor() else {
+                return;
+            };
+            if monitor.active_workspace_idx() + 1 >= monitor.workspaces.len() {
+                return;
+            }
+            monitor.switch_workspace_down();
+        }
+
+        if let Some(x) = target_x {
+            if let Some(workspace) = self.active_workspace_mut() {
+                if let Some(idx) = workspace.closest_column_to_visual_center_x(x) {
+                    workspace.focus_column(idx);
+                }
+            }
+        }
     }
 
     pub fn focus_up(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
+        let target_x = self
+            .active_workspace()
+            .and_then(|ws| ws.active_column_visual_center_x());
+
+        let moved = match self.active_workspace_mut() {
+            Some(workspace) => workspace.focus_up(),
+            None => return,
         };
-        workspace.focus_up();
+        if moved {
+            return;
+        }
+
+        // Fall through: try crossing to the workspace above.
+        {
+            let Some(monitor) = self.active_monitor() else {
+                return;
+            };
+            if monitor.active_workspace_idx() == 0 {
+                return;
+            }
+            monitor.switch_workspace_up();
+        }
+
+        if let Some(x) = target_x {
+            if let Some(workspace) = self.active_workspace_mut() {
+                if let Some(idx) = workspace.closest_column_to_visual_center_x(x) {
+                    workspace.focus_column(idx);
+                }
+            }
+        }
     }
 
     pub fn focus_down_or_left(&mut self) {

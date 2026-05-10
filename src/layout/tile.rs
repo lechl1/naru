@@ -667,6 +667,37 @@ impl<W: LayoutElement> Tile<W> {
         self.resize_animation.as_ref().map(|resize| &resize.anim)
     }
 
+    /// Seed a resize animation that interpolates the rendered window/tile size
+    /// from the given prior geometry toward this tile's current geometry.
+    ///
+    /// Used for stacking moves where the receiving tile slot is already at its
+    /// destination geometry but the client's surface buffer is still old. The
+    /// animation lets `animated_window_size` smoothly grow into the new slot
+    /// while the client catches up on the configure round-trip.
+    pub fn animate_resize_from(
+        &mut self,
+        size_from: Size<f64, Logical>,
+        tile_size_from: Size<f64, Logical>,
+        snapshot: LayoutElementRenderSnapshot,
+    ) {
+        let anim = Animation::new(
+            self.clock.clone(),
+            0.,
+            1.,
+            0.,
+            self.options.animations.window_resize.anim,
+        );
+        self.resize_animation = Some(ResizeAnimation {
+            anim,
+            size_from,
+            snapshot,
+            offscreen: OffscreenBuffer::default(),
+            tile_size_from,
+            fullscreen_progress: None,
+            expanded_progress: None,
+        });
+    }
+
     pub fn animate_move_from(&mut self, from: Point<f64, Logical>) {
         self.animate_move_x_from(from.x);
         self.animate_move_y_from(from.y);

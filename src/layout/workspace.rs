@@ -42,6 +42,38 @@ use crate::utils::{
 };
 use crate::window::ResolvedWindowRules;
 
+/// True when the view's aspect ratio is ≥ 21:9 (covers 21:9 ≈ 2.333 and 32:10 = 3.2).
+fn is_ultrawide_view(view_size: Size<f64, Logical>) -> bool {
+    let h = view_size.h.max(1.0);
+    view_size.w / h >= 21.0 / 9.0
+}
+
+/// When the user hasn't set `default-column-width` in their config, return a sensible default
+/// for ultrawide screens (≥ 21:9, which also covers 32:10): the configurable
+/// `ultrawide_terminal_column_width` (default 1/5) when the window is a terminal (per
+/// `layout.terminal_app_ids`), otherwise the configurable `ultrawide_default_column_width`
+/// (default 2/5). Returns `None` on non-ultrawide so the caller falls back to "windows decide
+/// their own width".
+fn ultrawide_default_column_width(
+    view_size: Size<f64, Logical>,
+    app_id: Option<&str>,
+    terminal_app_ids: &[String],
+    default_for_others: PresetSize,
+    default_for_terminals: PresetSize,
+) -> Option<PresetSize> {
+    if !is_ultrawide_view(view_size) {
+        return None;
+    }
+    let is_terminal = app_id
+        .map(|id| terminal_app_ids.iter().any(|t| t == id))
+        .unwrap_or(false);
+    Some(if is_terminal {
+        default_for_terminals
+    } else {
+        default_for_others
+    })
+}
+
 #[derive(Debug)]
 pub struct Workspace<W: LayoutElement> {
     /// The scrollable-tiling layout.
@@ -791,12 +823,21 @@ impl<W: LayoutElement> Workspace<W> {
         &self,
         default_width: Option<Option<PresetSize>>,
         is_floating: bool,
+        app_id: Option<&str>,
     ) -> Option<PresetSize> {
         match default_width {
             Some(Some(width)) => Some(width),
             Some(None) => None,
             None if is_floating => None,
-            None => self.options.layout.default_column_width,
+            None => self.options.layout.default_column_width.or_else(|| {
+                ultrawide_default_column_width(
+                    self.view_size,
+                    app_id,
+                    &self.options.layout.terminal_app_ids,
+                    self.options.layout.ultrawide_default_column_width,
+                    self.options.layout.ultrawide_terminal_column_width,
+                )
+            }),
         }
     }
 
@@ -954,6 +995,22 @@ impl<W: LayoutElement> Workspace<W> {
             self.focus_tiling();
         }
         self.scrolling.focus_column(index);
+    }
+
+    /// Visual center-X of the active scrolling column. Returns None if the
+    /// scrolling layout is empty or floating is active. Used by Layout-level
+    /// focus/move-up/down to carry positional info across workspaces.
+    pub fn active_column_visual_center_x(&self) -> Option<f64> {
+        if self.floating_is_active.get() {
+            return None;
+        }
+        self.scrolling.active_column_visual_center_x()
+    }
+
+    /// Find the scrolling column whose visual center-X is closest to `target_x`.
+    /// Returns None if the scrolling layout is empty.
+    pub fn closest_column_to_visual_center_x(&self, target_x: f64) -> Option<usize> {
+        self.scrolling.closest_column_to_visual_center_x(target_x)
     }
 
     pub fn focus_window_in_column(&mut self, index: u8) {
@@ -1240,6 +1297,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.toggle_window_width(None, forwards);
         } else {
             self.scrolling.toggle_width(forwards);
+            self.scrolling.auto_fit_or_center_view_offset();
         }
     }
 
@@ -1250,6 +1308,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.toggle_full_width();
+        self.scrolling.auto_fit_or_center_view_offset();
     }
 
     pub fn set_column_width(&mut self, change: SizeChange) {
@@ -1257,6 +1316,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.set_window_width(None, change, true);
         } else {
             self.scrolling.set_window_width(None, change);
+            self.scrolling.auto_fit_or_center_view_offset();
         }
     }
 
@@ -1267,6 +1327,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.set_window_width(window, change, true);
         } else {
             self.scrolling.set_window_width(window, change);
+            self.scrolling.auto_fit_or_center_view_offset();
         }
     }
 
@@ -1277,6 +1338,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.set_window_height(window, change, true);
         } else {
             self.scrolling.set_window_height(window, change);
+            self.scrolling.auto_fit_or_center_view_offset();
         }
     }
 
@@ -1287,6 +1349,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.reset_window_height(window);
+        self.scrolling.auto_fit_or_center_view_offset();
     }
 
     pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
@@ -1296,6 +1359,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.toggle_window_width(window, forwards);
         } else {
             self.scrolling.toggle_window_width(window, forwards);
+            self.scrolling.auto_fit_or_center_view_offset();
         }
     }
 
@@ -1306,6 +1370,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.toggle_window_height(window, forwards);
         } else {
             self.scrolling.toggle_window_height(window, forwards);
+            self.scrolling.auto_fit_or_center_view_offset();
         }
     }
 
@@ -1314,6 +1379,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.expand_column_to_available_width();
+        self.scrolling.auto_fit_or_center_view_offset();
     }
 
     pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) {

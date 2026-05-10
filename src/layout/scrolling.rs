@@ -1021,6 +1021,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.activate_column_with_anim_config(idx, anim_config);
             self.activate_prev_column_on_removal = prev_offset;
         }
+
+        self.auto_fit_or_center_view_offset();
     }
 
     pub fn remove_active_tile(&mut self, transaction: Transaction) -> Option<RemovedTile<W>> {
@@ -1241,6 +1243,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 view_config,
             );
         }
+
+        self.auto_fit_or_center_view_offset();
 
         column
     }
@@ -1781,8 +1785,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
         let source_col_idx = self.active_column_idx;
         let source_tile_idx = self.columns[source_col_idx].active_tile_idx;
-        // Snapshot attributes from the source tile before mutating.
-        let (view_size, scale, clock, options, width) = {
+        // Snapshot attributes from the source tile before mutating. Carry the source
+        // column's `is_full_width` so a full-width source preserves that override
+        // instead of falling back to the underlying proportion (e.g. the 50% default).
+        let (view_size, scale, clock, options, width, is_full_width) = {
             let source_tile = &self.columns[source_col_idx].tiles[source_tile_idx];
             (
                 source_tile.view_size(),
@@ -1790,14 +1796,27 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 source_tile.clock.clone(),
                 source_tile.options.clone(),
                 self.columns[source_col_idx].width,
+                self.columns[source_col_idx].is_full_width,
             )
+        };
+        // Capture the source tile's pre-pop geometry and animation snapshot so we
+        // can drive a smooth resize on the new tile from the old (in-stack) size
+        // to its destination size in the new column.
+        let resize_from = {
+            let st = &mut self.columns[source_col_idx].tiles[source_tile_idx];
+            let snapshot = st.window_mut().take_animation_snapshot();
+            snapshot.map(|s| (st.window_size(), st.tile_size(), s))
         };
         // Pop the active window. Source tile remains valid (caller guarantees stack_len > 1).
         let popped = self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         // Insert at source_col_idx so the new column appears immediately to the LEFT of the
         // current source column. add_column with activate=true moves focus to the new column.
-        self.add_tile(Some(source_col_idx), new_tile, true, width, false, None);
+        self.add_tile(Some(source_col_idx), new_tile, true, width, is_full_width, None);
+        if let Some((window_size, tile_size, snapshot)) = resize_from {
+            self.columns[source_col_idx].tiles[0]
+                .animate_resize_from(window_size, tile_size, snapshot);
+        }
         true
     }
 
@@ -1807,7 +1826,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
         let source_col_idx = self.active_column_idx;
         let source_tile_idx = self.columns[source_col_idx].active_tile_idx;
-        let (view_size, scale, clock, options, width) = {
+        // Carry `is_full_width` so a full-width source preserves the override
+        // instead of revealing the underlying proportion in the new column.
+        let (view_size, scale, clock, options, width, is_full_width) = {
             let source_tile = &self.columns[source_col_idx].tiles[source_tile_idx];
             (
                 source_tile.view_size(),
@@ -1815,7 +1836,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 source_tile.clock.clone(),
                 source_tile.options.clone(),
                 self.columns[source_col_idx].width,
+                self.columns[source_col_idx].is_full_width,
             )
+        };
+        let resize_from = {
+            let st = &mut self.columns[source_col_idx].tiles[source_tile_idx];
+            let snapshot = st.window_mut().take_animation_snapshot();
+            snapshot.map(|s| (st.window_size(), st.tile_size(), s))
         };
         let popped = self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
@@ -1825,9 +1852,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             new_tile,
             true,
             width,
-            false,
+            is_full_width,
             None,
         );
+        if let Some((window_size, tile_size, snapshot)) = resize_from {
+            self.columns[source_col_idx + 1].tiles[0]
+                .animate_resize_from(window_size, tile_size, snapshot);
+        }
         true
     }
 
@@ -1864,6 +1895,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // Focus the target column.
         self.active_column_idx = target_col_idx;
+
+        self.auto_fit_or_center_view_offset();
         true
     }
 
@@ -1925,6 +1958,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let target_active_tile_idx = target_col.active_tile_idx;
         target_col.tiles[target_active_tile_idx].push_window(window);
         self.active_column_idx = target_col_idx;
+
+        self.auto_fit_or_center_view_offset();
         true
     }
 
@@ -1993,6 +2028,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let source_is_single_window =
             self.columns[col_idx].tiles[source_tile_idx].stack_len() == 1;
 
+        // Capture the target tile's pre-mutation geometry + snapshot so we can drive
+        // a smooth resize animation if the column rebalances after a tile removal.
+        let target_resize_from = {
+            let tt = &mut self.columns[col_idx].tiles[target_tile_idx];
+            let snapshot = tt.window_mut().take_animation_snapshot();
+            snapshot.map(|s| (tt.window_size(), tt.tile_size(), s))
+        };
+
         let window = if source_is_single_window {
             let mut removed =
                 self.remove_tile_by_idx(col_idx, source_tile_idx, Transaction::new(), None);
@@ -2008,6 +2051,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let column = &mut self.columns[col_idx];
         column.tiles[target_tile_idx].push_window(window);
         column.active_tile_idx = target_tile_idx;
+        if let Some((window_size, tile_size, snapshot)) = target_resize_from {
+            column.tiles[target_tile_idx]
+                .animate_resize_from(window_size, tile_size, snapshot);
+        }
         true
     }
 
@@ -2024,6 +2071,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let source_is_single_window =
             self.columns[col_idx].tiles[source_tile_idx].stack_len() == 1;
 
+        // Capture the target tile's pre-mutation geometry + snapshot so we can drive
+        // a smooth resize animation if the column rebalances after a tile removal.
+        let target_resize_from = {
+            let tt = &mut self.columns[col_idx].tiles[original_target];
+            let snapshot = tt.window_mut().take_animation_snapshot();
+            snapshot.map(|s| (tt.window_size(), tt.tile_size(), s))
+        };
+
         let (window, target_tile_idx) = if source_is_single_window {
             let mut removed =
                 self.remove_tile_by_idx(col_idx, source_tile_idx, Transaction::new(), None);
@@ -2039,6 +2094,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let column = &mut self.columns[col_idx];
         column.tiles[target_tile_idx].push_window(window);
         column.active_tile_idx = target_tile_idx;
+        if let Some((window_size, tile_size, snapshot)) = target_resize_from {
+            column.tiles[target_tile_idx]
+                .animate_resize_from(window_size, tile_size, snapshot);
+        }
         true
     }
 
@@ -2577,6 +2636,85 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
     pub fn target_view_pos(&self) -> f64 {
         self.column_x(self.active_column_idx) + self.view_offset.target()
+    }
+
+    /// Visual center-X of the active column inside the working area, accounting
+    /// for view_offset and working-area inset. Used as the "carry" coordinate
+    /// when crossing workspaces with focus-up/down so the new workspace's focus
+    /// lands on a positionally similar column.
+    pub fn active_column_visual_center_x(&self) -> Option<f64> {
+        if self.columns.is_empty() {
+            return None;
+        }
+        let idx = self.active_column_idx;
+        let col_x = self.column_x(idx);
+        let width = self.data[idx].width;
+        let view_x = self.target_view_pos();
+        Some(col_x + width / 2. - view_x + self.working_area.loc.x)
+    }
+
+    /// Find the column whose visual center-X is closest to `target_x` (in the
+    /// same coordinate space as `active_column_visual_center_x`). Returns None
+    /// if the workspace is empty.
+    pub fn closest_column_to_visual_center_x(&self, target_x: f64) -> Option<usize> {
+        if self.columns.is_empty() {
+            return None;
+        }
+        let view_x = self.target_view_pos();
+        let working_x = self.working_area.loc.x;
+        let mut best_idx = 0usize;
+        let mut best_dist = f64::INFINITY;
+        for (i, x) in self
+            .column_xs(self.data.iter().copied())
+            .take(self.columns.len())
+            .enumerate()
+        {
+            let center = x + self.data[i].width / 2. - view_x + working_x;
+            let dist = (center - target_x).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = i;
+            }
+        }
+        Some(best_idx)
+    }
+
+    /// If `auto-fit-or-center` is enabled in config, recompute the view offset
+    /// so that all columns are centered as a group when they fit, or so that
+    /// neither edge has wasted empty space when they overflow.
+    ///
+    /// Should be called after any layout-changing operation (window add/remove,
+    /// stacking move, neighbor-overlap move). No-op if the flag is off, the
+    /// workspace is empty, or there's no active column.
+    pub fn auto_fit_or_center_view_offset(&mut self) {
+        if !self.options.layout.auto_fit_or_center {
+            return;
+        }
+        if self.columns.is_empty() {
+            return;
+        }
+
+        let working_x = self.working_area.loc.x;
+        let working_w = self.working_area.size.w;
+        let gap = self.options.layout.gaps;
+
+        // column_xs() yields one extra "past-the-end" position with an extra
+        // trailing gap; total content extent is that position minus the gap.
+        let total_content = self.column_x(self.columns.len()) - gap;
+
+        let new_view_x = if total_content <= working_w {
+            // Fits — center the group inside the working area.
+            -working_x - (working_w - total_content) / 2.
+        } else {
+            // Overflows — clamp so neither extremity has wasted gap.
+            let min_view_x = -working_x;
+            let max_view_x = total_content - working_w - working_x;
+            self.target_view_pos().clamp(min_view_x, max_view_x)
+        };
+
+        let active_col_x = self.column_x(self.active_column_idx);
+        let new_offset = new_view_x - active_col_x;
+        self.animate_view_offset(self.active_column_idx, new_offset);
     }
 
     // HACK: pass a self.data iterator in manually as a workaround for the lack of method partial
