@@ -678,6 +678,17 @@ impl State {
             return;
         }
 
+        // Session-restore Phase 2c.5: any user-dispatched action *might* mutate
+        // persisted state (move column, toggle floating, fullscreen, change
+        // workspace, …). Rather than match-classifying every variant — which would
+        // need updating every time a new action lands — we just bump the debounce
+        // here unconditionally. The 1 s coalescing absorbs the false positives:
+        // actions that don't actually change anything (focus moves, debug toggles,
+        // screenshots, …) at worst rewrite an identical state file once when the
+        // user pauses, and most pauses are followed by another action well before
+        // the deadline. Net: maybe one extra save per minute of active use.
+        self.naru.session_mark_dirty();
+
         if let Some(touch) = self.naru.seat.get_touch() {
             touch.cancel(self);
         }
