@@ -40,6 +40,7 @@ pub mod layout;
 pub mod misc;
 pub mod output;
 pub mod recent_windows;
+pub mod session_restore;
 pub mod utils;
 pub mod window_rule;
 pub mod workspace;
@@ -57,6 +58,9 @@ pub use crate::misc::*;
 pub use crate::output::{Output, OutputName, Outputs, Position, Vrr};
 use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
+pub use crate::session_restore::{
+    LaunchCommand, LaunchCommandPart, SessionRestore, SessionRestorePart,
+};
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
 pub use crate::window_rule::{
@@ -97,6 +101,7 @@ pub struct Config {
     pub debug: Debug,
     pub workspaces: Vec<Workspace>,
     pub recent_windows: RecentWindows,
+    pub session_restore: SessionRestore,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +211,7 @@ where
                 "gestures" => m_merge!(gestures),
                 "overview" => m_merge!(overview),
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
+                "session-restore" => m_merge!(session_restore),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
 

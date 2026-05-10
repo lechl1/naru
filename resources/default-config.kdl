@@ -273,6 +273,26 @@ spawn-at-startup "waybar"
 // To run a shell command (with variables, pipes, etc.), use spawn-sh-at-startup:
 // spawn-sh-at-startup "qs -c ~/source/qs/MyAwesomeShell"
 
+// Session restore: persist the set of open windows + their layout positions across
+// compositor restarts, and respawn them on next startup. Off by default.
+//
+// Each `launch-command` maps a window's xdg `app_id` to the argv used to respawn
+// that window. The literal "%s" is substituted with the captured working directory
+// of the original window (read from /proc/<pid>/cwd at map time). If cwd capture
+// fails (sandboxed client, dead pid), "%s" is dropped from the argv. Apps without
+// a matching entry fall back to running their `app_id` as the executable.
+//
+// User-provided launch-command entries fully replace the built-in list — declare
+// every app you care about, including the ones below if you still want them.
+//
+// session-restore {
+//     on
+//     // state-path "/custom/path/to/session.json"
+//     launch-command app-id="org.kde.dolphin" "dolphin" "%s"
+//     launch-command app-id="org.kde.konsole" "konsole" "--workdir" "%s"
+//     launch-command app-id="firefox" "firefox"
+// }
+
 hotkey-overlay {
     // Uncomment this line to disable the "Important Hotkeys" pop-up at startup.
     // skip-at-startup
