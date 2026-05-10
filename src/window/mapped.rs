@@ -1,4 +1,5 @@
 use std::cell::{Cell, Ref, RefCell};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use naru_config::{Color, Config, CornerRadius, GradientInterpolation, WindowRule};
@@ -56,6 +57,17 @@ pub struct Mapped {
 
     /// Credentials of the process that created the Wayland connection.
     credentials: Option<Credentials>,
+
+    /// Working directory of the client process at the moment this `Mapped` was constructed.
+    ///
+    /// Captured once via `/proc/<pid>/cwd` and never re-read — the goal is to remember
+    /// where the user *was* when they spawned the window, so that session restore can
+    /// re-launch e.g. a terminal back into the same project directory. Re-reading later
+    /// would risk capturing wherever the user `cd`'d after, which would be surprising.
+    ///
+    /// `None` when credentials were unavailable (sandboxed clients), the cwd was
+    /// unreadable, or the resolved path didn't exist on the host.
+    session_cwd: Option<PathBuf>,
 
     /// Pre-commit hook that we have on all mapped toplevel surfaces.
     pre_commit_hook: HookId,
@@ -275,10 +287,17 @@ impl Mapped {
     pub fn new(window: Window, rules: ResolvedWindowRules, hook: HookId, config: &Config) -> Self {
         let surface = window.wl_surface().expect("no X11 support");
         let credentials = get_credentials_for_surface(&surface);
+        // Capture the client's cwd once, at construction time. Re-reading later would
+        // pick up wherever the user has since `cd`'d to, which is not what session
+        // restore wants — it wants the directory the window was *opened in*.
+        let session_cwd = credentials
+            .as_ref()
+            .and_then(|c| crate::session::read_cwd_for_pid(c.pid));
         let mut rv = Self {
             window,
             id: MappedId::next(),
             credentials,
+            session_cwd,
             pre_commit_hook: hook,
             rules,
             need_to_recompute_rules: false,
@@ -361,6 +380,12 @@ impl Mapped {
 
     pub fn credentials(&self) -> Option<&Credentials> {
         self.credentials.as_ref()
+    }
+
+    /// Working directory captured from the client process at this `Mapped`'s
+    /// construction time. See the field doc on `Mapped::session_cwd`.
+    pub fn session_cwd(&self) -> Option<&Path> {
+        self.session_cwd.as_deref()
     }
 
     pub fn offscreen_data(&self) -> Ref<'_, Option<OffscreenData>> {
