@@ -211,19 +211,35 @@ impl CompositorHandler for State {
                     } else {
                         AddWindowTarget::Auto
                     };
-                    // Session-restore Phase 3.5: try to match this newly-mapping
-                    // window against a saved entry from the prior session. If we
-                    // find one, override the floating-vs-tiled choice with the saved
-                    // value so that windows the user had floating come back floating.
-                    // Per-column/tile precision steering is still TODO — landing it
-                    // requires a richer AddWindowTarget than the existing variants
-                    // expose.
+                    // Session-restore: try to match this newly-mapping window
+                    // against a saved entry from the prior session.
                     let saved_entry = mapped.app_id().and_then(|id| {
                         self.naru
                             .session_manager
                             .as_mut()
                             .and_then(|sm| sm.take_pending_for_app(&id))
                     });
+
+                    // Phase 3.6: route to the saved workspace when we recorded a
+                    // named workspace and that name still exists. Per-output
+                    // index-only entries are skipped — workspace indices aren't
+                    // stable across session restarts when the user has reordered
+                    // outputs or renamed monitors, so the saved-Auto fallback is
+                    // safer than blindly picking workspace N on whatever output
+                    // happens to be primary now.
+                    let target = match saved_entry.as_ref().and_then(|e| match &e.workspace {
+                        crate::session::WorkspaceRef::Name { name } => self
+                            .naru
+                            .layout
+                            .find_workspace_by_name(name)
+                            .map(|(_, ws)| ws.id()),
+                        crate::session::WorkspaceRef::Index { .. } => None,
+                    }) {
+                        Some(ws_id) => AddWindowTarget::Workspace(ws_id),
+                        None => target,
+                    };
+
+                    // Floating-vs-tiled override.
                     let is_floating = match &saved_entry {
                         Some(e) => matches!(
                             e.placement,
@@ -242,6 +258,20 @@ impl CompositorHandler for State {
                         activate,
                     );
                     let output = output.cloned();
+
+                    // Phase 3.7: post-add column-index move. Best-effort only —
+                    // `move_column_to_index` operates on the focused column, so we
+                    // gate on `ActivateWindow::Yes` to avoid moving an unrelated
+                    // column when the new window doesn't actually take focus
+                    // (`Smart` and `No` paths). If the saved column index is out
+                    // of bounds for the target workspace, the layout clamps it.
+                    if matches!(activate, crate::layout::ActivateWindow::Yes) {
+                        if let Some(crate::session::Placement::Tiled { column_index, .. }) =
+                            saved_entry.as_ref().map(|e| e.placement.clone())
+                        {
+                            self.naru.layout.move_column_to_index(column_index);
+                        }
+                    }
 
                     // Session-restore: window appearing changes what we'd persist.
                     self.naru.session_mark_dirty();
