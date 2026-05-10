@@ -2183,20 +2183,19 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let direction = StackingMoveDirection::Left;
-        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+        let Some((focused_id, _focused_stack_len)) = self.active_focused_tile_info() else {
             self.stacking_move_state = None;
             return;
         };
-        let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
+        // Horizontal stacking moves never overlap into a neighbor's stack: each press
+        // pulls the window into its own new column. Stack overlap is reserved for
+        // vertical (up/down) moves, where the alternation rule still applies.
+        let want_overlap = false;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
-        let success = if want_overlap {
-            workspace.move_active_window_to_left_neighbor_overlap()
-        } else {
-            workspace.move_active_window_to_new_column_left()
-        };
+        let success = workspace.move_active_window_to_new_column_left();
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
         } else {
@@ -2212,20 +2211,17 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let direction = StackingMoveDirection::Right;
-        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+        let Some((focused_id, _focused_stack_len)) = self.active_focused_tile_info() else {
             self.stacking_move_state = None;
             return;
         };
-        let want_overlap = self.decide_stacking_move_overlap(direction, &focused_id, focused_stack_len);
+        // Horizontal stacking moves never overlap (see move_window_left_stacked).
+        let want_overlap = false;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
-        let success = if want_overlap {
-            workspace.move_active_window_to_right_neighbor_overlap()
-        } else {
-            workspace.move_active_window_to_new_column_right()
-        };
+        let success = workspace.move_active_window_to_new_column_right();
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
         } else {
