@@ -412,6 +412,11 @@ pub struct Naru {
 
     pub satellite: Option<Satellite>,
 
+    /// Runtime state for session restore. `None` when the feature is off in config.
+    /// Owns the on-disk state path and the dirty flag; mutation hooks (Phase 2c.4)
+    /// will set `dirty` and schedule a debounced save.
+    pub session_manager: Option<crate::session::SessionManager>,
+
     #[cfg(feature = "xdp-gnome-screencast")]
     pub casting: Screencasting,
 }
@@ -2482,6 +2487,12 @@ impl Naru {
             .unwrap();
 
         drop(config_);
+
+        // Build the session-restore manager before moving `config` into the struct
+        // literal below. `SessionManager::new` returns `None` when the feature is
+        // off — that's the steady-state for users who haven't opted in.
+        let session_manager = crate::session::SessionManager::new(&config.borrow().session_restore);
+
         let mut naru = Self {
             config,
             config_file_output_config,
@@ -2622,6 +2633,8 @@ impl Naru {
             ipc_outputs_changed: false,
 
             satellite: None,
+
+            session_manager,
 
             #[cfg(feature = "xdp-gnome-screencast")]
             casting: screencasting,
