@@ -1817,6 +1817,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.columns[source_col_idx].tiles[0]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
+        // After add_tile inserted the new column at source_col_idx, the original source
+        // column shifted to source_col_idx + 1. Its tile stack just shrunk, so refresh
+        // its cached column width before any downstream consumer (e.g. column_x or
+        // auto_fit_or_center_view_offset) reads it.
+        let old_source_idx = source_col_idx + 1;
+        if old_source_idx < self.columns.len() {
+            self.data[old_source_idx].update(&self.columns[old_source_idx]);
+        }
         true
     }
 
@@ -1859,6 +1867,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.columns[source_col_idx + 1].tiles[0]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
+        // The source column stays at source_col_idx (insertion was after it). Its tile
+        // stack just shrunk, so refresh its cached column width.
+        if source_col_idx < self.columns.len() {
+            self.data[source_col_idx].update(&self.columns[source_col_idx]);
+        }
         true
     }
 
@@ -1896,6 +1909,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Focus the target column.
         self.active_column_idx = target_col_idx;
 
+        // Pushed window changed the target tile's content; refresh the cached column
+        // width before auto_fit_or_center_view_offset reads it.
+        self.data[target_col_idx].update(&self.columns[target_col_idx]);
         self.auto_fit_or_center_view_offset();
         true
     }
@@ -1959,6 +1975,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         target_col.tiles[target_active_tile_idx].push_window(window);
         self.active_column_idx = target_col_idx;
 
+        // Pushed window changed the target tile's content; refresh the cached column
+        // width before auto_fit_or_center_view_offset reads it.
+        self.data[target_col_idx].update(&self.columns[target_col_idx]);
         self.auto_fit_or_center_view_offset();
         true
     }
@@ -2055,6 +2074,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             column.tiles[target_tile_idx]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
+        // Pushed window changed the target tile's content; refresh the cached column width.
+        self.data[col_idx].update(&self.columns[col_idx]);
         true
     }
 
@@ -2098,6 +2119,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             column.tiles[target_tile_idx]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
+        // Pushed window changed the target tile's content; refresh the cached column width.
+        self.data[col_idx].update(&self.columns[col_idx]);
         true
     }
 
