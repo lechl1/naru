@@ -10,6 +10,8 @@ use naru_config::{
     Action, Bind, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers, MruDirection,
     MruFilter, MruScope, Trigger,
 };
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32Str};
 use pango::FontDescription;
 use pangocairo::cairo::{self, ImageSurface};
 use smithay::backend::allocator::Fourcc;
@@ -170,6 +172,17 @@ struct Inner {
 
     /// Offscreen buffer for the closing fade animation on the main output.
     offscreen: OffscreenBuffer,
+
+    /// True once the activation modifier has been released and the UI has
+    /// transitioned into persistent search-mode. Reset on close.
+    persistent: bool,
+
+    /// Live fuzzy-search query (typed by the user after the modifier is released).
+    /// Empty string = no filtering; thumbnails appear in MRU order.
+    search: String,
+
+    /// Cached search-bar texture, regenerated when the query changes.
+    search_texture: RefCell<SearchBarTexture>,
 }
 
 #[derive(Debug)]
@@ -203,6 +216,14 @@ struct ScopePanel {
     textures: Option<Option<[MruTexture; 3]>>,
 }
 
+/// Cached search-bar texture (regenerated whenever the query string changes).
+#[derive(Debug, Default)]
+struct SearchBarTexture {
+    text: String,
+    scale: f64,
+    texture: Option<Option<MruTexture>>,
+}
+
 #[derive(Debug)]
 struct Thumbnail {
     id: MappedId,
@@ -218,6 +239,8 @@ struct Thumbnail {
     ///
     /// Currently not updated live to avoid having to refilter windows.
     app_id: Option<String>,
+    /// Cached window title — used as fuzzy-search haystack alongside `app_id`.
+    title: String,
     /// Cached size of the window.
     size: Size<i32, Logical>,
 
@@ -233,6 +256,8 @@ struct Thumbnail {
 impl Thumbnail {
     fn from_mapped(mapped: &Mapped, clock: Clock, config: naru_config::MruPreviews) -> Self {
         let app_id = with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone());
+        let title = with_toplevel_role(mapped.toplevel(), |role| role.title.clone())
+            .unwrap_or_default();
 
         let background = FocusRing::new(naru_config::FocusRing {
             off: false,
@@ -252,6 +277,7 @@ impl Thumbnail {
             on_current_output: false,
             on_current_workspace: false,
             app_id,
+            title,
             size: mapped.size(),
             clock,
             config,
@@ -301,6 +327,8 @@ impl Thumbnail {
 
     fn update_window(&mut self, mapped: &Mapped) {
         self.size = mapped.size();
+        self.title = with_toplevel_role(mapped.toplevel(), |role| role.title.clone())
+            .unwrap_or_default();
     }
 
     fn preview_size(&self, output_size: Size<f64, Logical>, scale: f64) -> Size<f64, Logical> {
@@ -954,6 +982,9 @@ impl WindowMruUi {
             scope_panel: Default::default(),
             backdrop_buffers: Default::default(),
             offscreen: OffscreenBuffer::default(),
+            persistent: false,
+            search: String::new(),
+            search_texture: Default::default(),
         };
         inner.view_pos = ViewPos::Static(inner.compute_view_pos());
 
@@ -1081,6 +1112,49 @@ impl WindowMruUi {
             return None;
         };
         inner.wmru.current_id
+    }
+
+    /// True once the activation modifier has been released and the UI has
+    /// transitioned into persistent search-mode.
+    pub fn is_persistent(&self) -> bool {
+        matches!(&self.state, UiState::Open(inner) if inner.persistent)
+    }
+
+    /// Mark the UI as having transitioned into persistent search-mode.
+    /// Idempotent. Called from the input handler when all modifiers are released.
+    pub fn set_persistent(&mut self) {
+        if let UiState::Open(inner) = &mut self.state {
+            inner.persistent = true;
+        }
+    }
+
+    /// Append `c` to the live search query and re-rank thumbnails.
+    pub fn push_search_char(&mut self, c: char) {
+        if let UiState::Open(inner) = &mut self.state {
+            inner.search.push(c);
+            inner.on_search_changed();
+        }
+    }
+
+    /// Pop the last char from the live search query and re-rank thumbnails.
+    /// Returns true if a character was removed.
+    pub fn pop_search_char(&mut self) -> bool {
+        if let UiState::Open(inner) = &mut self.state {
+            if inner.search.pop().is_some() {
+                inner.on_search_changed();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Current search query, if the UI is open.
+    pub fn search_text(&self) -> Option<&str> {
+        if let UiState::Open(inner) = &self.state {
+            Some(&inner.search)
+        } else {
+            None
+        }
     }
 
     pub fn update_window(&mut self, layout: &Layout<Mapped>, id: MappedId) {
@@ -1503,8 +1577,9 @@ impl Inner {
         let padding = round(padding) + round(BORDER);
         let gap = padding + round(GAP) + padding;
 
+        let ordered = self.ordered_thumbnails();
         let mut x = 0.;
-        self.wmru.thumbnails().map(move |thumbnail| {
+        ordered.into_iter().map(move |thumbnail| {
             let size = thumbnail.preview_size(output_size, scale);
             let y = round((output_size.h - size.h) / 2.);
 
@@ -1514,6 +1589,56 @@ impl Inner {
             let geo = Rectangle::new(loc, size);
             (thumbnail, geo)
         })
+    }
+
+    /// Yield visible thumbnails in display order.
+    ///
+    /// When `search` is empty, this matches the MRU-filtered order (existing behaviour).
+    /// When `search` is non-empty, runs nucleo fuzzy-match against `(title, app_id)`,
+    /// hides non-matches, and sorts by descending score with MRU position as tiebreak.
+    fn ordered_thumbnails(&self) -> Vec<&Thumbnail> {
+        if self.search.is_empty() {
+            return self.wmru.thumbnails().collect();
+        }
+
+        let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+        let pattern = Pattern::parse(&self.search, CaseMatching::Smart, Normalization::Smart);
+
+        let mut buf = Vec::new();
+        let mut scored: Vec<(u32, usize, &Thumbnail)> = self
+            .wmru
+            .thumbnails()
+            .enumerate()
+            .filter_map(|(idx, t)| {
+                let app_id = t.app_id.as_deref().unwrap_or("");
+                let haystack = if app_id.is_empty() {
+                    t.title.clone()
+                } else if t.title.is_empty() {
+                    app_id.to_owned()
+                } else {
+                    format!("{} {}", t.title, app_id)
+                };
+                buf.clear();
+                let utf32 = Utf32Str::new(&haystack, &mut buf);
+                pattern.score(utf32, &mut matcher).map(|s| (s, idx, t))
+            })
+            .collect();
+
+        // Score descending; tiebreak by MRU position (lower idx = more recent = higher).
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, _, t)| t).collect()
+    }
+
+    /// Called when the search query changes. Re-ranks thumbnails and snaps the
+    /// current selection to the top match (so the user sees their best hit
+    /// without having to navigate). If there are no matches, the previous
+    /// selection is left untouched so a Backspace can recover it.
+    fn on_search_changed(&mut self) {
+        self.freeze_view = false;
+        let top = self.ordered_thumbnails().first().map(|t| t.id);
+        if let Some(top) = top {
+            self.wmru.set_current(top);
+        }
     }
 
     fn thumbnails_in_view_static(
@@ -1591,6 +1716,34 @@ impl Inner {
                 Kind::Unspecified,
             ));
             push(WindowMruUiRenderElement::TextureElement(elem));
+        }
+
+        // Search bar (bottom-centre) — only when the user has typed something.
+        if !self.search.is_empty() {
+            let search_texture = self.search_texture.borrow_mut().get(
+                ctx.as_gles().renderer,
+                &self.search,
+                scale,
+                font_size,
+            );
+            if let Some(texture) = search_texture {
+                let padding = round_logical_in_physical(scale, f64::from(PANEL_PADDING));
+                let size = texture.logical_size();
+                let location = Point::new(
+                    (output_size.w - size.w) / 2.,
+                    output_size.h - size.h - padding * 2.,
+                );
+                let elem =
+                    PrimaryGpuTextureRenderElement(TextureRenderElement::from_texture_buffer(
+                        texture.clone(),
+                        location,
+                        1.,
+                        None,
+                        None,
+                        Kind::Unspecified,
+                    ));
+                push(WindowMruUiRenderElement::TextureElement(elem));
+            }
         }
 
         let current_id = self.wmru.current_id;
@@ -1749,6 +1902,35 @@ impl ScopePanel {
             .get_or_insert_with(|| generate_scope_panels(renderer, scale, font_size).ok())
             .as_ref()
             .map(|x| x[scope as usize].clone())
+    }
+}
+
+impl SearchBarTexture {
+    fn get(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        text: &str,
+        scale: f64,
+        font_size: u16,
+    ) -> Option<MruTexture> {
+        if self.text != text || self.scale != scale {
+            self.texture = None;
+            self.text = text.to_owned();
+            self.scale = scale;
+        }
+
+        self.texture
+            .get_or_insert_with(|| {
+                // Pango interprets <, >, & as markup; escape so the user's literal
+                // search string survives untouched.
+                let escaped = text
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                let label = format!("<b>Search:</b> {escaped}");
+                render_panel(renderer, scale, font_size, &label).ok()
+            })
+            .clone()
     }
 }
 

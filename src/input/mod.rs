@@ -506,17 +506,47 @@ impl State {
                 }
 
                 // When all modifiers are released while the MRU UI is open, keep the UI open
-                // (transitioning into "persistent" search mode). The user must explicitly
-                // confirm with Enter/Space, cancel with Escape, or click outside to dismiss.
+                // and flip it into "persistent" search mode. The user must explicitly confirm
+                // with Enter, cancel with Escape, or click outside to dismiss.
                 //
                 // Just consume the key release if it was suppressed during the chord, otherwise
                 // forward it. Don't fall through into binding lookup — there are no binds for a
                 // bare modifier release, and downstream handlers shouldn't see this as input.
                 if this.naru.window_mru_ui.is_open() && !pressed && modifiers.is_empty() {
+                    this.naru.window_mru_ui.set_persistent();
+
                     if this.naru.suppressed_keys.remove(&key_code) {
                         return FilterResult::Intercept(None);
                     } else {
                         return FilterResult::Forward;
+                    }
+                }
+
+                // Capture printable keys (and Backspace) as MRU search input while the UI
+                // is in persistent search mode. Tab/arrows/Enter/Esc fall through to the
+                // bindings below so navigation/confirm/cancel still work.
+                //
+                // Only treat the key as search input when no compositor-relevant modifiers
+                // are held: Shift is allowed (for capital letters / shifted punctuation),
+                // but Ctrl/Alt/Super/Compositor combos still go to bindings so global
+                // chords keep working.
+                if pressed
+                    && this.naru.window_mru_ui.is_open()
+                    && this.naru.window_mru_ui.is_persistent()
+                    && (modifiers - Modifiers::SHIFT).is_empty()
+                {
+                    if raw == Some(Keysym::BackSpace) {
+                        if this.naru.window_mru_ui.pop_search_char() {
+                            this.naru.queue_redraw_mru_output();
+                        }
+                        this.naru.suppressed_keys.insert(key_code);
+                        return FilterResult::Intercept(None);
+                    }
+                    if let Some(c) = keysym_to_search_char(modified) {
+                        this.naru.window_mru_ui.push_search_char(c);
+                        this.naru.queue_redraw_mru_output();
+                        this.naru.suppressed_keys.insert(key_code);
+                        return FilterResult::Intercept(None);
                     }
                 }
 
@@ -4615,6 +4645,28 @@ fn modifiers_from_state(mods: ModifiersState) -> Modifiers {
         modifiers |= Modifiers::ISO_LEVEL5_SHIFT;
     }
     modifiers
+}
+
+/// Map a Keysym to the printable character it represents, for fuzzy-search input.
+///
+/// Returns Some only for non-control characters in the Latin-1 keysym range
+/// (0x20..=0x7e and 0xa0..=0xff) and the Unicode-keysym range (0x0100_0000 prefix).
+/// Tab, Enter, Escape, BackSpace, arrows, F-keys, etc. all sit in the 0xff?? range
+/// and return None — the caller falls through to bindings for those.
+fn keysym_to_search_char(sym: Keysym) -> Option<char> {
+    let cp = sym.raw();
+    let c = if (0x20..=0x7e).contains(&cp) || (0xa0..=0xff).contains(&cp) {
+        char::from_u32(cp)?
+    } else if cp & 0xff00_0000 == 0x0100_0000 {
+        char::from_u32(cp & 0x00ff_ffff)?
+    } else {
+        return None;
+    };
+    if c.is_control() {
+        None
+    } else {
+        Some(c)
+    }
 }
 
 fn should_activate_monitors<I: InputBackend>(event: &InputEvent<I>) -> bool {
