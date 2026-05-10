@@ -22,12 +22,9 @@
 //!   place so the *next* save replaces it atomically; deleting it on restore would
 //!   create a window where a crash mid-startup loses the prior session.
 
-use std::path::Path;
-
 use naru_config::SessionRestore;
 
 use super::state::WindowEntry;
-use super::storage::load;
 
 /// Build the argv vector to respawn a saved window.
 ///
@@ -64,37 +61,23 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
         .collect()
 }
 
-/// Load saved session state from `state_path` and respawn each saved window.
+/// Respawn each saved window via its resolved launch-command.
 ///
-/// No-ops if the file is missing or empty (first run, or feature was previously off).
-/// Logs but doesn't propagate parse errors — a corrupt state file shouldn't prevent
-/// the compositor from starting.
-pub fn restore_apps(config: &SessionRestore, state_path: &Path) {
-    let state = match load(state_path) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            debug!(
-                "session-restore: no prior session at {}; nothing to respawn",
-                state_path.display()
-            );
-            return;
-        }
-        Err(e) => {
-            warn!(
-                "session-restore: load failed at {}: {e:#}; skipping respawn",
-                state_path.display()
-            );
-            return;
-        }
-    };
+/// Phase 3.5 hoists state loading out of this function and into
+/// `SessionManager::new` (so the loaded entries can also be consulted by the
+/// add_window matcher), making this a thin pass over an in-memory slice.
+///
+/// A corrupt or unreadable state file is handled at load time in `SessionManager`;
+/// by the time entries reach this function they are already structurally valid.
+pub fn restore_apps(config: &SessionRestore, entries: &[WindowEntry]) {
+    if entries.is_empty() {
+        debug!("session-restore: no prior session entries; nothing to respawn");
+        return;
+    }
 
-    info!(
-        "session-restore: respawning {} window(s) from {}",
-        state.windows.len(),
-        state_path.display()
-    );
+    info!("session-restore: respawning {} window(s)", entries.len());
 
-    for entry in &state.windows {
+    for entry in entries {
         let argv = resolve_launch_argv(entry, config);
         if argv.is_empty() {
             // Defensive: resolve_launch_argv always produces at least one element

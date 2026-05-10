@@ -6,6 +6,7 @@
 //! lifetime of the compositor, owned by `Naru`. The debounce timer wiring (Phase 2c.4)
 //! hangs off the `pending_save_token` field; until then the field stays `None`.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -14,7 +15,8 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 
 use super::snapshot::build_from_naru;
-use super::storage::{default_state_path, save_atomic};
+use super::state::WindowEntry;
+use super::storage::{default_state_path, load, save_atomic};
 
 /// Debounce window: delay between the last `mark_dirty` call and the actual save.
 ///
@@ -46,10 +48,18 @@ pub struct SessionManager {
     /// Calloop registration of the pending debounced-save timer, if one is scheduled.
     ///
     /// `None` means no save is queued (either nothing has changed since the last
-    /// flush, or the manager is freshly constructed). Phase 2c.4 will populate this
-    /// from `mark_dirty(&LoopHandle)`; for now the field exists so the type signature
-    /// of `SessionManager` is stable across the remaining sub-phases.
+    /// flush, or the manager is freshly constructed).
     pub pending_save_token: Option<RegistrationToken>,
+
+    /// Saved-window entries from the prior session, awaiting their respawned
+    /// counterparts to map. Loaded once at construction; entries are popped via
+    /// [`SessionManager::take_pending_for_app`] when a new mapped window's `app_id`
+    /// matches the front entry for that app.
+    ///
+    /// Multi-instance match is FIFO over saved-order — the i-th map of `app_id` X
+    /// gets paired with the i-th saved entry of `app_id` X. Documented since Phase 2a;
+    /// formalized here.
+    pub pending_restore: VecDeque<WindowEntry>,
 }
 
 impl SessionManager {
@@ -69,11 +79,42 @@ impl SessionManager {
             .as_deref()
             .map(PathBuf::from)
             .or_else(default_state_path)?;
+
+        // Load the prior session into memory once. From here on, `pending_restore` is
+        // consumed entry-by-entry as new windows map; entries that never match (e.g.
+        // an app the user uninstalled) just sit there until compositor exit.
+        let pending_restore = match load(&state_path) {
+            Ok(Some(s)) => VecDeque::from(s.windows),
+            Ok(None) => VecDeque::new(),
+            Err(e) => {
+                warn!(
+                    "session-restore: load failed at {}: {e:#}; starting with no \
+                     pending entries",
+                    state_path.display()
+                );
+                VecDeque::new()
+            }
+        };
+
         Some(Self {
             state_path,
             dirty: false,
             pending_save_token: None,
+            pending_restore,
         })
+    }
+
+    /// Pop the front pending entry whose `app_id` matches.
+    ///
+    /// "Front" = saved-order — the i-th window of a given app to map after restart
+    /// is paired with the i-th saved entry of that app. Returns `None` if no entry
+    /// matches; callers should treat that as "this is a new window, not a restore."
+    pub fn take_pending_for_app(&mut self, app_id: &str) -> Option<WindowEntry> {
+        let pos = self
+            .pending_restore
+            .iter()
+            .position(|e| e.app_id == app_id)?;
+        self.pending_restore.remove(pos)
     }
 
     /// Mark the in-memory state as having diverged from disk and (re)schedule a

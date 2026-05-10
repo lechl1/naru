@@ -211,6 +211,27 @@ impl CompositorHandler for State {
                     } else {
                         AddWindowTarget::Auto
                     };
+                    // Session-restore Phase 3.5: try to match this newly-mapping
+                    // window against a saved entry from the prior session. If we
+                    // find one, override the floating-vs-tiled choice with the saved
+                    // value so that windows the user had floating come back floating.
+                    // Per-column/tile precision steering is still TODO — landing it
+                    // requires a richer AddWindowTarget than the existing variants
+                    // expose.
+                    let saved_entry = mapped.app_id().and_then(|id| {
+                        self.naru
+                            .session_manager
+                            .as_mut()
+                            .and_then(|sm| sm.take_pending_for_app(&id))
+                    });
+                    let is_floating = match &saved_entry {
+                        Some(e) => matches!(
+                            e.placement,
+                            crate::session::Placement::Floating { .. }
+                        ),
+                        None => is_floating,
+                    };
+
                     let output = self.naru.layout.add_window(
                         mapped,
                         target,

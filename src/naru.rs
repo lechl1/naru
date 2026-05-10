@@ -2510,13 +2510,13 @@ impl Naru {
         // off — that's the steady-state for users who haven't opted in.
         let session_manager = crate::session::SessionManager::new(&config.borrow().session_restore);
 
-        // Respawn-on-startup. Spawning here (rather than in the struct literal or
-        // after) means the children begin connecting to the Wayland socket as the
-        // compositor finishes initializing, minimizing perceived restore latency.
-        // Position steering for the new windows lands in Phase 3.5; for now they
-        // take whatever placement the layout decides for them.
+        // Respawn-on-startup. The pending entries were loaded from disk in
+        // `SessionManager::new`; here we just iterate them and dispatch the
+        // launch-commands. The entries stay in `pending_restore` after this — the
+        // add_window matcher will consume them as the respawned children map.
         if let Some(sm) = session_manager.as_ref() {
-            crate::session::restore_apps(&config.borrow().session_restore, &sm.state_path);
+            let entries: Vec<_> = sm.pending_restore.iter().cloned().collect();
+            crate::session::restore_apps(&config.borrow().session_restore, &entries);
         }
 
         let mut naru = Self {
