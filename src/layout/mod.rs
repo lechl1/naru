@@ -4491,11 +4491,19 @@ impl<W: LayoutElement> Layout<W> {
         let allow_to_activate_workspace = !self.overview_open;
 
         // ---- Stacking drop (Phase 5+) ----------------------------------------------------
-        // If `enable-stacking` is on and the cursor at drop time is over an existing window
-        // that isn't the dragged one, push the dragged window onto that target tile's window
-        // stack instead of placing it as a new column/tile. The dragged tile is consumed
-        // (its single window is moved out and the husk is dropped).
-        if self.options.enable_stacking && !move_.is_floating {
+        // If `enable-stacking` is on and the cursor at drop time is over the *centre region*
+        // of an existing window that isn't the dragged one, push the dragged window onto
+        // that target tile's window stack instead of placing it as a new column/tile.
+        //
+        // "Centre region" = cursor not within any 1/3 edge of the target tile, i.e. the
+        // middle third both horizontally and vertically. If the cursor is in an edge band
+        // we fall through to the normal insert_position path so the drop becomes a new
+        // column/row before/after the target — letting the user choose stack vs. insert
+        // by aiming at centre vs. edge of a window.
+        let in_target_centre = self
+            .resize_edges_under(&move_.output, move_.pointer_pos_within_output)
+            .is_some_and(|edges| edges.is_empty());
+        if self.options.enable_stacking && !move_.is_floating && in_target_centre {
             let dragged_id = move_.tile.window().id().clone();
             let target_id = self
                 .window_under(&move_.output, move_.pointer_pos_within_output)
