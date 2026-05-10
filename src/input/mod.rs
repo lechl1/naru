@@ -505,11 +505,14 @@ impl State {
                     return FilterResult::Intercept(None);
                 }
 
-                // Check if all modifiers were released while the MRU UI was open. If so, close the
-                // UI (which will also transfer the focus to the current MRU UI selection).
+                // When all modifiers are released while the MRU UI is open, keep the UI open
+                // (transitioning into "persistent" search mode). The user must explicitly
+                // confirm with Enter/Space, cancel with Escape, or click outside to dismiss.
+                //
+                // Just consume the key release if it was suppressed during the chord, otherwise
+                // forward it. Don't fall through into binding lookup — there are no binds for a
+                // bare modifier release, and downstream handlers shouldn't see this as input.
                 if this.naru.window_mru_ui.is_open() && !pressed && modifiers.is_empty() {
-                    this.do_action(Action::MruConfirm, false);
-
                     if this.naru.suppressed_keys.remove(&key_code) {
                         return FilterResult::Intercept(None);
                     } else {
