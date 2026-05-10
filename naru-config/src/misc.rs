@@ -101,6 +101,29 @@ impl MergeWith<ConfigNotificationPart> for ConfigNotification {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Appearance {
+    pub font_size: u16,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { font_size: 13 }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AppearancePart {
+    #[knuffel(child, unwrap(argument))]
+    pub font_size: Option<u16>,
+}
+
+impl MergeWith<AppearancePart> for Appearance {
+    fn merge_with(&mut self, part: &AppearancePart) {
+        merge_clone!((self, part), font_size);
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Clipboard {
     pub disable_primary: bool,

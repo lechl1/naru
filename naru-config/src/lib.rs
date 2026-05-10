@@ -88,6 +88,7 @@ pub struct Config {
     pub clipboard: Clipboard,
     pub hotkey_overlay: HotkeyOverlay,
     pub config_notification: ConfigNotification,
+    pub appearance: Appearance,
     pub animations: Animations,
     pub blur: Blur,
     pub gestures: Gestures,
@@ -206,6 +207,7 @@ where
                 "clipboard" => m_merge!(clipboard),
                 "hotkey-overlay" => m_merge!(hotkey_overlay),
                 "config-notification" => m_merge!(config_notification),
+                "appearance" => m_merge!(appearance),
                 "animations" => m_merge!(animations),
                 "blur" => m_merge!(blur),
                 "gestures" => m_merge!(gestures),
@@ -1513,6 +1515,9 @@ mod tests {
             },
             config_notification: ConfigNotification {
                 disable_failed: false,
+            },
+            appearance: Appearance {
+                font_size: 13,
             },
             animations: Animations {
                 off: false,

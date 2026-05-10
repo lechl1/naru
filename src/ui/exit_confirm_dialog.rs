@@ -24,7 +24,7 @@ use crate::utils::{output_size, to_physical_precise_round};
 
 const KEY_NAME: &str = "Enter";
 const PADDING: i32 = 16;
-const FONT: &str = "sans 14px";
+const FONT_FAMILY: &str = "sans";
 const BORDER: i32 = 8;
 const BACKDROP_COLOR: [f32; 4] = [0., 0., 0., 0.4];
 
@@ -56,7 +56,8 @@ enum State {
 
 impl ExitConfirmDialog {
     pub fn new(clock: Clock, config: Rc<RefCell<Config>>) -> Self {
-        let buffer = match render(1.) {
+        let font_size = config.borrow().appearance.font_size;
+        let buffer = match render(1., font_size) {
             Ok(x) => Some(x),
             Err(err) => {
                 warn!("error creating the exit confirm dialog: {err:?}");
@@ -171,9 +172,10 @@ impl ExitConfirmDialog {
             return;
         };
 
+        let font_size = self.config.borrow().appearance.font_size;
         let buffer = buffers
             .entry(NotNan::new(scale).unwrap())
-            .or_insert_with(|| render(scale).ok());
+            .or_insert_with(|| render(scale, font_size).ok());
         let buffer = buffer.as_ref().unwrap_or(&fallback);
 
         let size = buffer.logical_size();
@@ -222,14 +224,14 @@ impl ExitConfirmDialog {
     }
 }
 
-fn render(scale: f64) -> anyhow::Result<MemoryBuffer> {
+fn render(scale: f64, font_size: u16) -> anyhow::Result<MemoryBuffer> {
     let _span = tracy_client::span!("exit_confirm_dialog::render");
 
     let markup = text(true);
 
     let padding: i32 = to_physical_precise_round(scale, PADDING);
 
-    let mut font = FontDescription::from_string(FONT);
+    let mut font = FontDescription::from_string(&format!("{FONT_FAMILY} {font_size}px"));
     font.set_absolute_size(to_physical_precise_round(scale, font.size()));
 
     let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;

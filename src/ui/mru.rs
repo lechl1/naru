@@ -71,8 +71,9 @@ const PANEL_BORDER: i32 = 4;
 /// Backdrop color behind the previews.
 const BACKDROP_COLOR: Color32F = Color32F::new(0., 0., 0., 0.8);
 
-/// Font used to render the window titles.
-const FONT: &str = "sans 14px";
+/// Font family used to render the window titles. Size comes from
+/// `config.appearance.font_size`.
+const FONT_FAMILY: &str = "sans";
 
 /// Scopes in the order they are cycled through.
 ///
@@ -327,11 +328,14 @@ impl Thumbnail {
         renderer: &mut GlesRenderer,
         mapped: &Mapped,
         scale: f64,
+        font_size: u16,
     ) -> Option<MruTexture> {
         with_toplevel_role(mapped.toplevel(), |role| {
-            role.title
-                .as_ref()
-                .and_then(|title| self.title_texture.borrow_mut().get(renderer, title, scale))
+            role.title.as_ref().and_then(|title| {
+                self.title_texture
+                    .borrow_mut()
+                    .get(renderer, title, scale, font_size)
+            })
         })
     }
 
@@ -340,6 +344,7 @@ impl Thumbnail {
         &self,
         mut ctx: RenderCtx<R>,
         config: &naru_config::RecentWindows,
+        font_size: u16,
         mapped: &Mapped,
         preview_geo: Rectangle<f64, Logical>,
         scale: f64,
@@ -455,7 +460,7 @@ impl Thumbnail {
         });
 
         let mut title_size = None;
-        let title_texture = self.title_texture(ctx.as_gles().renderer, mapped, scale);
+        let title_texture = self.title_texture(ctx.as_gles().renderer, mapped, scale, font_size);
         let title_texture = title_texture.map(|texture| {
             let mut size = texture.logical_size();
             size.w = f64::min(size.w, preview_geo.size.w);
@@ -586,11 +591,17 @@ impl WindowMru {
             let on_current_output = mon.output() == output;
             let on_current_workspace = on_current_output && mon.active_workspace_idx() == ws_idx;
 
-            for mapped in ws.windows() {
-                let mut thumbnail = Thumbnail::from_mapped(mapped, naru.clock.clone(), config);
-                thumbnail.on_current_output = on_current_output;
-                thumbnail.on_current_workspace = on_current_workspace;
-                thumbnails.push(thumbnail);
+            // Iterate per-tile and flatten over the tile's full stack so that
+            // windows hidden behind the active stack member still show up in
+            // Alt+Tab. ws.windows() would only yield one window per tile.
+            for tile in ws.tiles() {
+                for mapped in tile.stacked_windows() {
+                    let mut thumbnail =
+                        Thumbnail::from_mapped(mapped, naru.clock.clone(), config);
+                    thumbnail.on_current_output = on_current_output;
+                    thumbnail.on_current_workspace = on_current_workspace;
+                    thumbnails.push(thumbnail);
+                }
             }
         }
 
@@ -1558,11 +1569,14 @@ impl Inner {
     ) {
         let output_size = output_size(&self.output);
         let scale = self.output.current_scale().fractional_scale();
+        let font_size = self.config.borrow().appearance.font_size;
 
-        let panel_texture =
-            self.scope_panel
-                .borrow_mut()
-                .get(ctx.as_gles().renderer, scale, self.wmru.scope);
+        let panel_texture = self.scope_panel.borrow_mut().get(
+            ctx.as_gles().renderer,
+            scale,
+            font_size,
+            self.wmru.scope,
+        );
         if let Some(texture) = panel_texture {
             let padding = round_logical_in_physical(scale, f64::from(PANEL_PADDING));
 
@@ -1596,7 +1610,17 @@ impl Inner {
             let config = &config.recent_windows;
 
             let is_active = Some(id) == current_id;
-            thumbnail.render(ctx.r(), config, mapped, geo, scale, is_active, bob_y, push);
+            thumbnail.render(
+                ctx.r(),
+                config,
+                font_size,
+                mapped,
+                geo,
+                scale,
+                is_active,
+                bob_y,
+                push,
+            );
         }
     }
 
@@ -1632,7 +1656,13 @@ impl Inner {
 }
 
 impl TitleTexture {
-    fn get(&mut self, renderer: &mut GlesRenderer, title: &str, scale: f64) -> Option<MruTexture> {
+    fn get(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        title: &str,
+        scale: f64,
+        font_size: u16,
+    ) -> Option<MruTexture> {
         if self.title != title || self.scale != scale {
             self.texture = None;
             self.title = title.to_owned();
@@ -1640,7 +1670,7 @@ impl TitleTexture {
         }
 
         self.texture
-            .get_or_insert_with(|| generate_title_texture(renderer, title, scale).ok())
+            .get_or_insert_with(|| generate_title_texture(renderer, title, scale, font_size).ok())
             .clone()
     }
 
@@ -1657,10 +1687,11 @@ fn generate_title_texture(
     renderer: &mut GlesRenderer,
     title: &str,
     scale: f64,
+    font_size: u16,
 ) -> anyhow::Result<MruTexture> {
     let _span = tracy_client::span!("mru::generate_title_texture");
 
-    let mut font = FontDescription::from_string(FONT);
+    let mut font = FontDescription::from_string(&format!("{FONT_FAMILY} {font_size}px"));
     font.set_absolute_size(to_physical_precise_round(scale, font.size()));
 
     let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
@@ -1706,6 +1737,7 @@ impl ScopePanel {
         &mut self,
         renderer: &mut GlesRenderer,
         scale: f64,
+        font_size: u16,
         scope: MruScope,
     ) -> Option<MruTexture> {
         if self.scale != scale {
@@ -1714,7 +1746,7 @@ impl ScopePanel {
         }
 
         self.textures
-            .get_or_insert_with(|| generate_scope_panels(renderer, scale).ok())
+            .get_or_insert_with(|| generate_scope_panels(renderer, scale, font_size).ok())
             .as_ref()
             .map(|x| x[scope as usize].clone())
     }
@@ -1723,6 +1755,7 @@ impl ScopePanel {
 fn generate_scope_panels(
     renderer: &mut GlesRenderer,
     scale: f64,
+    font_size: u16,
 ) -> anyhow::Result<[MruTexture; 3]> {
     fn make_panel_text(idx: usize) -> String {
         let span_unselected = "<span fgcolor='#999999'>";
@@ -1755,16 +1788,21 @@ fn generate_scope_panels(
 
     // Can't wait for array::try_map()
     Ok([
-        render_panel(renderer, scale, &make_panel_text(0))?,
-        render_panel(renderer, scale, &make_panel_text(1))?,
-        render_panel(renderer, scale, &make_panel_text(2))?,
+        render_panel(renderer, scale, font_size, &make_panel_text(0))?,
+        render_panel(renderer, scale, font_size, &make_panel_text(1))?,
+        render_panel(renderer, scale, font_size, &make_panel_text(2))?,
     ])
 }
 
-fn render_panel(renderer: &mut GlesRenderer, scale: f64, text: &str) -> anyhow::Result<MruTexture> {
+fn render_panel(
+    renderer: &mut GlesRenderer,
+    scale: f64,
+    font_size: u16,
+    text: &str,
+) -> anyhow::Result<MruTexture> {
     let _span = tracy_client::span!("mru::render_panel");
 
-    let mut font = FontDescription::from_string(FONT);
+    let mut font = FontDescription::from_string(&format!("{FONT_FAMILY} {font_size}px"));
     font.set_absolute_size(to_physical_precise_round(scale, font.size()));
 
     let padding: i32 = to_physical_precise_round(scale, PANEL_PADDING);

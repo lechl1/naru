@@ -21,7 +21,7 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::utils::{output_size, to_physical_precise_round};
 
 const PADDING: i32 = 8;
-const FONT: &str = "sans 14px";
+const FONT_FAMILY: &str = "sans";
 const BORDER: i32 = 4;
 
 pub struct ConfigErrorNotification {
@@ -143,10 +143,13 @@ impl ConfigErrorNotification {
         let output_size = output_size(output);
         let path = self.created_path.as_deref();
 
+        let font_size = self.config.borrow().appearance.font_size;
         let mut buffers = self.buffers.borrow_mut();
         let buffer = buffers
             .entry(NotNan::new(scale).unwrap())
-            .or_insert_with(move || render(renderer.as_gles_renderer(), scale, path).ok());
+            .or_insert_with(move || {
+                render(renderer.as_gles_renderer(), scale, path, font_size).ok()
+            });
         let buffer = buffer.clone()?;
 
         let size = buffer.logical_size();
@@ -178,6 +181,7 @@ fn render(
     renderer: &mut GlesRenderer,
     scale: f64,
     created_path: Option<&Path>,
+    font_size: u16,
 ) -> anyhow::Result<TextureBuffer<GlesTexture>> {
     let _span = tracy_client::span!("config_error_notification::render");
 
@@ -193,7 +197,7 @@ fn render(
         border_color = (0.5, 1., 0.5);
     };
 
-    let mut font = FontDescription::from_string(FONT);
+    let mut font = FontDescription::from_string(&format!("{FONT_FAMILY} {font_size}px"));
     font.set_absolute_size(to_physical_precise_round(scale, font.size()));
 
     let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;

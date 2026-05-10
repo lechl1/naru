@@ -34,7 +34,7 @@ const SELECTION_BORDER: i32 = 2;
 
 const PADDING: i32 = 8;
 const RADIUS: i32 = 16;
-const FONT: &str = "sans 14px";
+const FONT_FAMILY: &str = "sans";
 const BORDER: i32 = 4;
 const TEXT_HIDE_P: &str =
     "Press <span face='mono' bgcolor='#2C2C2C'> Space </span> to save the screenshot.\n\
@@ -157,6 +157,8 @@ impl ScreenshotUi {
             return false;
         };
 
+        let font_size = config.borrow().appearance.font_size;
+
         let last_selection = last_selection
             .take()
             .and_then(|(weak, sel)| weak.upgrade().map(|output| (output, sel)));
@@ -203,7 +205,7 @@ impl ScreenshotUi {
                 let locations = [Default::default(); 8];
 
                 let mut render_panel_ = |text| {
-                    render_panel(renderer, scale, text)
+                    render_panel(renderer, scale, text, font_size)
                         .map_err(|err| warn!("error rendering help panel: {err:?}"))
                         .ok()
                 };
@@ -1135,6 +1137,7 @@ fn render_panel(
     renderer: &mut GlesRenderer,
     scale: f64,
     text: &str,
+    font_size: u16,
 ) -> anyhow::Result<TextureBuffer<GlesTexture>> {
     let _span = tracy_client::span!("screenshot_ui::render_panel");
 
@@ -1148,7 +1151,7 @@ fn render_panel(
     // Add 2 px of spacing to separate the backgrounds of the "Space" and "P" keys.
     let spacing = to_physical_precise_round::<i32>(scale, 2) * 1024;
 
-    let mut font = FontDescription::from_string(FONT);
+    let mut font = FontDescription::from_string(&format!("{FONT_FAMILY} {font_size}px"));
     font.set_absolute_size(to_physical_precise_round(scale, font.size()));
 
     let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;

@@ -22,7 +22,7 @@ use crate::utils::{output_size, to_physical_precise_round};
 
 const PADDING: i32 = 8;
 // const MARGIN: i32 = PADDING * 2;
-const FONT: &str = "sans 14px";
+const FONT_FAMILY: &str = "sans";
 const BORDER: i32 = 4;
 const LINE_INTERVAL: i32 = 2;
 const TITLE: &str = "Important Hotkeys";
@@ -332,7 +332,8 @@ fn render(
         })
         .collect::<Vec<_>>();
 
-    let mut font = FontDescription::from_string(FONT);
+    let mut font =
+        FontDescription::from_string(&format!("{FONT_FAMILY} {}px", config.appearance.font_size));
     font.set_absolute_size(to_physical_precise_round(scale, font.size()));
 
     let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
