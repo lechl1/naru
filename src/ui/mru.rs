@@ -1595,7 +1595,10 @@ impl Inner {
     ///
     /// When `search` is empty, this matches the MRU-filtered order (existing behaviour).
     /// When `search` is non-empty, runs nucleo fuzzy-match against `(title, app_id)`,
-    /// hides non-matches, and sorts by descending score with MRU position as tiebreak.
+    /// hides non-matches, and reorders results into an alternating fan-out around the
+    /// best match — display order left-to-right is `[…, r4, r2, r0, r1, r3, r5, …]`
+    /// so rank 0 sits centred, rank 1 to its immediate right, rank 2 to its
+    /// immediate left, rank 3 further right, rank 4 further left, etc.
     fn ordered_thumbnails(&self) -> Vec<&Thumbnail> {
         if self.search.is_empty() {
             return self.wmru.thumbnails().collect();
@@ -1626,7 +1629,31 @@ impl Inner {
 
         // Score descending; tiebreak by MRU position (lower idx = more recent = higher).
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored.into_iter().map(|(_, _, t)| t).collect()
+
+        // Fan out around the top match: odd ranks (1, 3, 5, …) to the right,
+        // even ranks (2, 4, 6, …) to the left. Left side is reversed so the
+        // furthest-out element comes first when iterating left-to-right.
+        let mut center: Option<&Thumbnail> = None;
+        let mut left: Vec<&Thumbnail> = Vec::with_capacity(scored.len() / 2);
+        let mut right: Vec<&Thumbnail> = Vec::with_capacity(scored.len() / 2 + 1);
+        for (rank, (_, _, t)) in scored.into_iter().enumerate() {
+            if rank == 0 {
+                center = Some(t);
+            } else if rank % 2 == 1 {
+                right.push(t);
+            } else {
+                left.push(t);
+            }
+        }
+        left.reverse();
+
+        let mut out = Vec::with_capacity(left.len() + right.len() + 1);
+        out.extend(left);
+        if let Some(c) = center {
+            out.push(c);
+        }
+        out.extend(right);
+        out
     }
 
     /// Called when the search query changes. Re-ranks thumbnails and snaps the
