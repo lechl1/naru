@@ -862,6 +862,8 @@ impl XdgShellHandler for State {
 
         self.naru.window_mru_ui.remove_window(id);
         self.naru.layout.remove_window(&window, transaction.clone());
+        // Session-restore: toplevel destroyed → window list changed.
+        self.naru.session_mark_dirty();
 
         let surface = surface.wl_surface();
         // This check is necessary because implicit resource destruction is done with

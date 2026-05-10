@@ -2228,6 +2228,23 @@ impl State {
 }
 
 impl Naru {
+    /// Notify the session-restore manager that persisted state is now stale.
+    ///
+    /// Cheap no-op when the feature is off (`session_manager` is `None`). Otherwise
+    /// resets the debounced save timer so the on-disk state is rewritten ~1 s after
+    /// the last burst of layout changes settles. See
+    /// `crate::session::SessionManager::mark_dirty` for the debounce semantics.
+    ///
+    /// Cloning the loop handle is cheap (it's a refcounted handle into calloop) and
+    /// sidesteps a split-borrow of `self` between `event_loop` and `session_manager`
+    /// at every hook site.
+    pub fn session_mark_dirty(&mut self) {
+        let loop_handle = self.event_loop.clone();
+        if let Some(sm) = self.session_manager.as_mut() {
+            sm.mark_dirty(&loop_handle);
+        }
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,

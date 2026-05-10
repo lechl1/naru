@@ -7,11 +7,22 @@
 //! hangs off the `pending_save_token` field; until then the field stays `None`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use naru_config::SessionRestore;
-use smithay::reexports::calloop::RegistrationToken;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 
-use super::storage::default_state_path;
+use super::snapshot::build_from_naru;
+use super::storage::{default_state_path, save_atomic};
+
+/// Debounce window: delay between the last `mark_dirty` call and the actual save.
+///
+/// Picked to swallow user-driven bursts (e.g. dragging a window across several
+/// columns in a fraction of a second) without making the on-disk state lag noticeably
+/// behind reality. One second is the same window IPC clients expect for similar
+/// "settled state" reads.
+const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Per-process runtime state for session-restore.
 ///
@@ -65,13 +76,51 @@ impl SessionManager {
         })
     }
 
-    /// Mark the in-memory state as having diverged from disk.
+    /// Mark the in-memory state as having diverged from disk and (re)schedule a
+    /// debounced save.
     ///
-    /// In Phase 2c.4 this will additionally schedule (or reset) a debounced calloop
-    /// timer; for now it just sets the flag so call sites can be wired in their final
-    /// shape across the remaining sub-phases without churn.
-    pub fn mark_dirty(&mut self) {
+    /// The debounce semantics are "delay from the last call": each `mark_dirty`
+    /// cancels any prior pending timer and inserts a fresh one with [`SAVE_DEBOUNCE`].
+    /// A burst of layout changes (e.g. ten column-moves in half a second) coalesces
+    /// into a single save 1 s after the last mutation rather than ten saves spread
+    /// across the burst.
+    ///
+    /// The fired timer's callback rebuilds the snapshot from the live state and
+    /// calls [`save_atomic`]; failures are logged but never propagated, since a
+    /// failed save shouldn't crash the compositor.
+    pub fn mark_dirty(&mut self, loop_handle: &LoopHandle<'static, crate::naru::State>) {
         self.dirty = true;
+
+        // Cancel any prior pending save so the timer always reflects the most recent
+        // dirty mark. Without this, two `mark_dirty`s in quick succession would queue
+        // two saves, the first redundant.
+        if let Some(token) = self.pending_save_token.take() {
+            loop_handle.remove(token);
+        }
+
+        let timer = Timer::from_duration(SAVE_DEBOUNCE);
+        let token = loop_handle
+            .insert_source(timer, |_deadline, _, state| {
+                // Build the snapshot first (read-only borrow of naru) before reaching
+                // for the manager's mutable bits — Rust's NLL handles the staggered
+                // borrows of distinct fields.
+                let snapshot = build_from_naru(&state.naru);
+
+                if let Some(sm) = state.naru.session_manager.as_mut() {
+                    sm.pending_save_token = None;
+                    if sm.take_dirty() {
+                        if let Err(e) = save_atomic(&sm.state_path, &snapshot) {
+                            warn!("session-restore: save failed: {e:#}");
+                        }
+                    }
+                }
+
+                TimeoutAction::Drop
+            })
+            .map_err(|e| warn!("session-restore: scheduling save timer failed: {e}"))
+            .ok();
+
+        self.pending_save_token = token;
     }
 
     /// Test-and-clear the dirty flag.
@@ -131,13 +180,15 @@ mod tests {
     }
 
     #[test]
-    fn mark_dirty_then_take_dirty() {
+    fn take_dirty_clears_flag() {
         let c = cfg(false, Some("/tmp/x.json"));
         let mut m = SessionManager::new(&c).expect("manager");
         assert!(!m.take_dirty());
-        m.mark_dirty();
+        // Bypass mark_dirty (which requires a real calloop LoopHandle) and exercise
+        // the flag round-trip directly. The mark_dirty path is exercised at runtime
+        // through the hook sites in handlers/compositor.rs and handlers/xdg_shell.rs.
+        m.dirty = true;
         assert!(m.take_dirty());
-        // take_dirty clears the flag.
         assert!(!m.take_dirty());
     }
 }

@@ -222,6 +222,9 @@ impl CompositorHandler for State {
                     );
                     let output = output.cloned();
 
+                    // Session-restore: window appearing changes what we'd persist.
+                    self.naru.session_mark_dirty();
+
                     // The window state cannot contain Fullscreen and Maximized at once. Therefore,
                     // if the window ended up fullscreen, then we only know that it is also
                     // maximized from the is_pending_maximized variable. Tell the layout about it
@@ -296,6 +299,8 @@ impl CompositorHandler for State {
 
                     self.naru.window_mru_ui.remove_window(id);
                     self.naru.layout.remove_window(&window, transaction.clone());
+                    // Session-restore: window vanishing changes what we'd persist.
+                    self.naru.session_mark_dirty();
                     self.add_default_dmabuf_pre_commit_hook(surface);
 
                     // If this is the only instance, then this transaction will complete
