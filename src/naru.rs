@@ -2510,6 +2510,15 @@ impl Naru {
         // off — that's the steady-state for users who haven't opted in.
         let session_manager = crate::session::SessionManager::new(&config.borrow().session_restore);
 
+        // Respawn-on-startup. Spawning here (rather than in the struct literal or
+        // after) means the children begin connecting to the Wayland socket as the
+        // compositor finishes initializing, minimizing perceived restore latency.
+        // Position steering for the new windows lands in Phase 3.5; for now they
+        // take whatever placement the layout decides for them.
+        if let Some(sm) = session_manager.as_ref() {
+            crate::session::restore_apps(&config.borrow().session_restore, &sm.state_path);
+        }
+
         let mut naru = Self {
             config,
             config_file_output_config,
