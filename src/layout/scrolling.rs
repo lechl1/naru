@@ -3028,10 +3028,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
-        let col = &mut self.columns[self.active_column_idx];
+        let col_idx = self.active_column_idx;
+        let col = &mut self.columns[col_idx];
         col.toggle_width(None, forwards);
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
+        // Refresh cached column width so the workspace wrapper's auto_fit/center call
+        // sees the post-toggle width and recentres correctly when columns now fit.
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn toggle_full_width(&mut self) {
@@ -3039,10 +3043,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
-        let col = &mut self.columns[self.active_column_idx];
+        let col_idx = self.active_column_idx;
+        let col = &mut self.columns[col_idx];
         col.toggle_full_width();
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
@@ -3134,23 +3140,28 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
-        let (col, tile_idx) = if let Some(window) = window {
+        let (col_idx, tile_idx) = if let Some(window) = window {
             self.columns
-                .iter_mut()
-                .find_map(|col| {
+                .iter()
+                .enumerate()
+                .find_map(|(i, col)| {
                     col.tiles
                         .iter()
                         .position(|tile| tile.window().id() == window)
-                        .map(|tile_idx| (col, Some(tile_idx)))
+                        .map(|tile_idx| (i, Some(tile_idx)))
                 })
                 .unwrap()
         } else {
-            (&mut self.columns[self.active_column_idx], None)
+            (self.active_column_idx, None)
         };
 
+        let col = &mut self.columns[col_idx];
         col.toggle_width(tile_idx, forwards);
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
+        // Refresh cached column width so the workspace wrapper's auto_fit/center call
+        // sees the post-toggle width.
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
@@ -4068,6 +4079,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         };
 
+        let resized_window = resize.window.clone();
+
         if let Some(window) = window {
             if window != &resize.window {
                 return;
@@ -4080,6 +4093,20 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         self.interactive_resize = None;
+
+        // Interactive resize mutates column width via `col.set_column_width(..)` directly
+        // (in interactive_resize_update), bypassing the wrapper that refreshes
+        // `self.data[col_idx].width`. Refresh it now so subsequent layout math sees the
+        // post-resize width, then re-run auto-fit/center so the view recentres if the
+        // total content shrunk to fit the workspace.
+        if let Some(col_idx) = self
+            .columns
+            .iter()
+            .position(|col| col.contains(&resized_window))
+        {
+            self.data[col_idx].update(&self.columns[col_idx]);
+        }
+        self.auto_fit_or_center_view_offset();
     }
 
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
