@@ -3027,23 +3027,35 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
-        let (col, tile_idx) = if let Some(window) = window {
+        let (col_idx, tile_idx) = if let Some(window) = window {
             self.columns
-                .iter_mut()
-                .find_map(|col| {
+                .iter()
+                .enumerate()
+                .find_map(|(i, col)| {
                     col.tiles
                         .iter()
                         .position(|tile| tile.window().id() == window)
-                        .map(|tile_idx| (col, Some(tile_idx)))
+                        .map(|tile_idx| (i, Some(tile_idx)))
                 })
                 .unwrap()
         } else {
-            (&mut self.columns[self.active_column_idx], None)
+            (self.active_column_idx, None)
         };
 
+        let col = &mut self.columns[col_idx];
         col.set_column_width(change, tile_idx, true);
-
         cancel_resize_for_column(&mut self.interactive_resize, col);
+
+        // Refresh the cached column width so `column_x` (and downstream consumers like
+        // `auto_fit_or_center_view_offset`, which workspace.rs calls right after this)
+        // see the post-resize width.
+        //
+        // Without this, the cached `self.data[col_idx].width` stays at the pre-resize
+        // value, `total_content` is stale, and the centering math positions the view
+        // as though the columns were still the old size. The visible result: zoom in
+        // shifts windows right (centering target underestimates new total → view too
+        // far left), zoom out shifts windows left (symmetric).
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
