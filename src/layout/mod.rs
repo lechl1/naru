@@ -1742,17 +1742,28 @@ impl<W: LayoutElement> Layout<W> {
         mut f: impl FnMut(&W, Option<&Output>, Option<WorkspaceId>, WindowLayout),
     ) {
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
-            // We don't fill any positions for interactively moved windows.
+            // We don't fill any positions for interactively moved windows. The dragged
+            // tile may carry a window stack — surface every window in the stack so
+            // foreign-toplevel listeners (Plasma's Alt+Tab, taskbars, etc.) see the
+            // full set, not just the visible top of the stack.
             let layout = move_.tile.ipc_layout_template();
-            f(move_.tile.window(), Some(&move_.output), None, layout);
+            for w in move_.tile.stacked_windows() {
+                f(w, Some(&move_.output), None, layout.clone());
+            }
         }
 
+        // Iterate every window in every tile's stack. Previously we only emitted the
+        // active (frontmost) window per tile, which hid stacked windows from
+        // foreign-toplevel, the IPC `windows` listing, GNOME-Shell introspection, and
+        // screencasting picker UIs.
         match &self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
                     for ws in &mon.workspaces {
                         for (tile, layout) in ws.tiles_with_ipc_layouts() {
-                            f(tile.window(), Some(&mon.output), Some(ws.id()), layout);
+                            for w in tile.stacked_windows() {
+                                f(w, Some(&mon.output), Some(ws.id()), layout.clone());
+                            }
                         }
                     }
                 }
@@ -1760,7 +1771,9 @@ impl<W: LayoutElement> Layout<W> {
             MonitorSet::NoOutputs { workspaces } => {
                 for ws in workspaces {
                     for (tile, layout) in ws.tiles_with_ipc_layouts() {
-                        f(tile.window(), None, Some(ws.id()), layout);
+                        for w in tile.stacked_windows() {
+                            f(w, None, Some(ws.id()), layout.clone());
+                        }
                     }
                 }
             }
