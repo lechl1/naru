@@ -1,0 +1,212 @@
+//! Serializable schema for the persisted session state.
+//!
+//! The on-disk format is JSON. KDL would match the user-facing config format, but the
+//! `knuffel` crate is decode-only — for an internal state file written tens of times per
+//! session, the round-trip burden of hand-rolling a KDL serializer outweighs the
+//! consistency benefit. JSON via `serde_json` keeps the writer trivial and the file
+//! easy to inspect with `jq` when something goes wrong.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// Bump this when the on-disk schema changes incompatibly. `load()` treats a mismatch as
+/// a missing state file rather than an error, so an upgrade simply discards the prior
+/// session — better than crashing the compositor on startup.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Top-level on-disk session state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionState {
+    /// Schema version. See [`SCHEMA_VERSION`].
+    pub version: u32,
+    /// Saved windows, in the order they should be respawned at restore time.
+    ///
+    /// Multi-instance disambiguation uses this order: when several saved entries share
+    /// an `app_id`, the i-th window of that app to map after restart is matched to the
+    /// i-th saved entry. Captured `cwd` is informational; matching does not consult it
+    /// (avoids surprising mismatches if the user’s shell `cd`’d after window creation).
+    pub windows: Vec<WindowEntry>,
+}
+
+impl SessionState {
+    pub fn empty() -> Self {
+        Self {
+            version: SCHEMA_VERSION,
+            windows: Vec::new(),
+        }
+    }
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// One persisted window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowEntry {
+    /// xdg `app_id` reported by the client. Used both as the dispatch key for
+    /// `launch-command` lookup and as the post-respawn matching key.
+    pub app_id: String,
+
+    /// Last-known window title. Captured for diagnostics and human-readability of the
+    /// state file — never used for matching, since titles are unstable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Working directory captured from `/proc/<client-pid>/cwd` at map time.
+    ///
+    /// `None` means cwd capture failed (sandboxed Flatpak/snap client whose `/proc`
+    /// view is its own root, dead PID, EACCES). At restore time this leaves the `%s`
+    /// placeholder in the launch-command unfilled — the placeholder is dropped from
+    /// the argv rather than substituted with a sentinel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+
+    /// Connector name of the output the window was on, e.g. `"DP-1"`. `None` for the
+    /// "any output" wildcard at restore time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+
+    /// Workspace identity. Stored as either a name (preferred when the user has named
+    /// workspaces) or a per-output index.
+    pub workspace: WorkspaceRef,
+
+    /// How the window sat within its workspace.
+    pub placement: Placement,
+}
+
+/// Workspace identity. Names are preferred since they survive workspace re-ordering;
+/// indices are a fallback for unnamed workspaces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum WorkspaceRef {
+    Name { name: String },
+    Index { index: usize },
+}
+
+/// How a window was positioned within its workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Placement {
+    /// Tiled into the scrolling layout at a specific column + tile slot.
+    Tiled {
+        /// 0-based column index from the left of the scrolling row.
+        column_index: usize,
+        /// 0-based index of the window within its column (relevant when columns
+        /// hold multiple stacked windows).
+        tile_index: usize,
+        /// Whether the column was at preset width when saved (informational).
+        #[serde(default)]
+        is_fullscreen: bool,
+        #[serde(default)]
+        is_maximized: bool,
+    },
+    /// Free-floating window with explicit logical-pixel geometry.
+    Floating {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        #[serde(default)]
+        is_fullscreen: bool,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_round_trips() {
+        let s = SessionState::empty();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+        assert_eq!(s.version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn one_window_round_trips() {
+        let s = SessionState {
+            version: SCHEMA_VERSION,
+            windows: vec![WindowEntry {
+                app_id: "org.kde.konsole".into(),
+                title: Some("~/work".into()),
+                cwd: Some(PathBuf::from("/home/leo/work")),
+                output: Some("DP-1".into()),
+                workspace: WorkspaceRef::Name {
+                    name: "code".into(),
+                },
+                placement: Placement::Tiled {
+                    column_index: 2,
+                    tile_index: 0,
+                    is_fullscreen: false,
+                    is_maximized: false,
+                },
+            }],
+        };
+        let json = serde_json::to_string_pretty(&s).unwrap();
+        // Spot-check a couple of stable fields appear in the JSON.
+        assert!(json.contains("\"app_id\""));
+        assert!(json.contains("\"org.kde.konsole\""));
+        assert!(json.contains("\"by\": \"name\""));
+        assert!(json.contains("\"kind\": \"tiled\""));
+
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn floating_round_trips() {
+        let entry = WindowEntry {
+            app_id: "firefox".into(),
+            title: None,
+            cwd: None,
+            output: None,
+            workspace: WorkspaceRef::Index { index: 0 },
+            placement: Placement::Floating {
+                x: 100.0,
+                y: 50.0,
+                width: 800.0,
+                height: 600.0,
+                is_fullscreen: false,
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: WindowEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+        // None fields should be omitted, not serialized as null.
+        assert!(!json.contains("\"cwd\""));
+        assert!(!json.contains("\"title\""));
+    }
+
+    #[test]
+    fn missing_optional_fields_default_on_load() {
+        // Older format that didn't yet have `is_maximized` should still parse.
+        let json = r#"{
+            "version": 1,
+            "windows": [{
+                "app_id": "x",
+                "workspace": {"by": "index", "index": 0},
+                "placement": {"kind": "tiled", "column_index": 0, "tile_index": 0}
+            }]
+        }"#;
+        let s: SessionState = serde_json::from_str(json).unwrap();
+        assert_eq!(s.windows.len(), 1);
+        let p = &s.windows[0].placement;
+        match p {
+            Placement::Tiled {
+                is_fullscreen,
+                is_maximized,
+                ..
+            } => {
+                assert!(!is_fullscreen);
+                assert!(!is_maximized);
+            }
+            _ => panic!("expected Tiled"),
+        }
+    }
+}
