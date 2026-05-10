@@ -1037,6 +1037,14 @@ impl WindowMruUi {
             inner.set_filter(filter);
         }
 
+        // When a search query is active, Tab/Shift+Tab walks the rank-ordered list
+        // so cycling can never land on a thumbnail that the query has filtered out.
+        // Without a query we keep the MRU walk so default Alt-Tab cycling is unchanged.
+        if !inner.search.is_empty() {
+            inner.advance_ranked(dir);
+            return;
+        }
+
         match dir {
             MruDirection::Forward => inner.wmru.forward(),
             MruDirection::Backward => inner.wmru.backward(),
@@ -1591,17 +1599,13 @@ impl Inner {
         })
     }
 
-    /// Yield visible thumbnails in display order.
+    /// Visible thumbnails in pure rank order (best match first).
     ///
-    /// When `search` is empty, this matches the MRU-filtered order (existing behaviour).
-    /// When `search` is non-empty, runs nucleo fuzzy-match against `(title, app_id)`,
-    /// hides non-matches, and reorders results into an alternating fan-out around the
-    /// best match — display order left-to-right is `[…, r4, r2, r0, r1, r3, r5, …]`
-    /// so rank 0 sits centred, rank 1 to its immediate right, rank 2 to its
-    /// immediate left, rank 3 further right, rank 4 further left, etc.
-    fn ordered_thumbnails(&self) -> Vec<&Thumbnail> {
+    /// Returns an empty vec when no search is active — callers should fall back to
+    /// `wmru.thumbnails()` for the MRU strip in that case.
+    fn ranked_thumbnails(&self) -> Vec<&Thumbnail> {
         if self.search.is_empty() {
-            return self.wmru.thumbnails().collect();
+            return Vec::new();
         }
 
         let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
@@ -1629,14 +1633,26 @@ impl Inner {
 
         // Score descending; tiebreak by MRU position (lower idx = more recent = higher).
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, _, t)| t).collect()
+    }
 
-        // Fan out around the top match: odd ranks (1, 3, 5, …) to the right,
-        // even ranks (2, 4, 6, …) to the left. Left side is reversed so the
-        // furthest-out element comes first when iterating left-to-right.
+    /// Yield visible thumbnails in display order.
+    ///
+    /// When `search` is empty, this matches the MRU-filtered order (existing behaviour).
+    /// When `search` is non-empty, reorders the ranked list into an alternating fan-out
+    /// around the best match — display order left-to-right is
+    /// `[…, r4, r2, r0, r1, r3, r5, …]` so rank 0 sits centred, rank 1 to its immediate
+    /// right, rank 2 to its immediate left, etc.
+    fn ordered_thumbnails(&self) -> Vec<&Thumbnail> {
+        if self.search.is_empty() {
+            return self.wmru.thumbnails().collect();
+        }
+
+        let ranked = self.ranked_thumbnails();
         let mut center: Option<&Thumbnail> = None;
-        let mut left: Vec<&Thumbnail> = Vec::with_capacity(scored.len() / 2);
-        let mut right: Vec<&Thumbnail> = Vec::with_capacity(scored.len() / 2 + 1);
-        for (rank, (_, _, t)) in scored.into_iter().enumerate() {
+        let mut left: Vec<&Thumbnail> = Vec::with_capacity(ranked.len() / 2);
+        let mut right: Vec<&Thumbnail> = Vec::with_capacity(ranked.len() / 2 + 1);
+        for (rank, t) in ranked.into_iter().enumerate() {
             if rank == 0 {
                 center = Some(t);
             } else if rank % 2 == 1 {
@@ -1654,6 +1670,24 @@ impl Inner {
         }
         out.extend(right);
         out
+    }
+
+    /// Cycle current_id through the rank-ordered list (used by Tab/Shift+Tab when
+    /// a search query is active). Forward = next rank (towards lower scores),
+    /// Backward = previous rank (towards higher scores). Wraps at both ends.
+    /// `compute_view_pos` keeps the new current centred on screen.
+    fn advance_ranked(&mut self, dir: MruDirection) {
+        let ranked: Vec<MappedId> = self.ranked_thumbnails().iter().map(|t| t.id).collect();
+        if ranked.is_empty() {
+            return;
+        }
+        let cur_idx = self.wmru.current_id.and_then(|id| ranked.iter().position(|x| *x == id));
+        let next = match (cur_idx, dir) {
+            (Some(i), MruDirection::Forward) => (i + 1) % ranked.len(),
+            (Some(i), MruDirection::Backward) => (i + ranked.len() - 1) % ranked.len(),
+            (None, _) => 0,
+        };
+        self.wmru.set_current(ranked[next]);
     }
 
     /// Called when the search query changes. Re-ranks thumbnails and snaps the
