@@ -18,9 +18,11 @@
 //! clients can NOT be retroactively snapped into saved positions.
 
 pub mod cwd;
+pub mod snapshot;
 pub mod state;
 pub mod storage;
 
-pub use cwd::read_cwd_for_pid;
+pub use cwd::{cwd_for_surface, read_cwd_for_pid};
+pub use snapshot::build_from_naru;
 pub use state::{Placement, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION};
 pub use storage::{default_state_path, load, save_atomic};

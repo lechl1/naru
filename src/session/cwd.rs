@@ -22,6 +22,10 @@
 use std::fs;
 use std::path::PathBuf;
 
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+
+use crate::utils::get_credentials_for_surface;
+
 /// Read the working directory of process `pid`.
 ///
 /// Returns `None` on any error or if the resolved path is not absolute. Callers should
@@ -51,6 +55,22 @@ pub fn read_cwd_for_pid(pid: i32) -> Option<PathBuf> {
     }
 
     Some(target)
+}
+
+/// Read the working directory of the client backing a Wayland surface.
+///
+/// Composes [`get_credentials_for_surface`] (which exposes the connecting client's
+/// `SO_PEERCRED`-derived PID) with [`read_cwd_for_pid`]. Returns `None` if either step
+/// fails, with the same tolerant semantics as `read_cwd_for_pid` (sandboxed clients,
+/// dead PIDs, paths not present on the host).
+///
+/// Intended capture point: the first `xdg_toplevel.commit` after a window maps. By that
+/// point the client process has been alive long enough to have its cwd set; capturing
+/// later (e.g. on focus) risks the user's shell having `cd`'d, which would be
+/// unexpected for "restore my window".
+pub fn cwd_for_surface(surface: &WlSurface) -> Option<PathBuf> {
+    let creds = get_credentials_for_surface(surface)?;
+    read_cwd_for_pid(creds.pid)
 }
 
 #[cfg(test)]
