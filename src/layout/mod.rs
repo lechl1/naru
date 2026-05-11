@@ -2196,19 +2196,31 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let direction = StackingMoveDirection::Left;
-        let Some((focused_id, _focused_stack_len)) = self.active_focused_tile_info() else {
+        let Some((focused_id, focused_stack_len, column_tile_count)) =
+            self.active_focused_tile_info()
+        else {
             self.stacking_move_state = None;
             return;
         };
-        // Horizontal stacking moves never overlap into a neighbor's stack: each press
-        // pulls the window into its own new column. Stack overlap is reserved for
-        // vertical (up/down) moves, where the alternation rule still applies.
-        let want_overlap = false;
+        // Horizontal stacking-move routing:
+        //   - Source is a single-window tile AND its column has only that tile → the source
+        //     IS its own column entirely. Pulling it into a "new column" at the same slot
+        //     would be a visual no-op (remove-then-insert at the same position), so stack it
+        //     onto the neighbor's tile instead — matching the user's mental model of "merge
+        //     into the neighbor column" in a one-window-per-column layout.
+        //   - Anything else (multi-tile column, or multi-window stack) → pull the window
+        //     into its own new column. The new-column path safely handles single-window
+        //     sources in multi-tile columns by removing the now-empty source tile.
+        let want_overlap = focused_stack_len == 1 && column_tile_count == 1;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
-        let success = workspace.move_active_window_to_new_column_left();
+        let success = if want_overlap {
+            workspace.move_active_window_to_left_neighbor_overlap()
+        } else {
+            workspace.move_active_window_to_new_column_left()
+        };
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
         } else {
@@ -2224,17 +2236,25 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let direction = StackingMoveDirection::Right;
-        let Some((focused_id, _focused_stack_len)) = self.active_focused_tile_info() else {
+        let Some((focused_id, focused_stack_len, column_tile_count)) =
+            self.active_focused_tile_info()
+        else {
             self.stacking_move_state = None;
             return;
         };
-        // Horizontal stacking moves never overlap (see move_window_left_stacked).
-        let want_overlap = false;
+        // See `move_window_left_stacked` for the routing rationale. Single-window tile that
+        // IS its whole column → stack onto the right neighbor; everything else → new column
+        // to the right.
+        let want_overlap = focused_stack_len == 1 && column_tile_count == 1;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
-        let success = workspace.move_active_window_to_new_column_right();
+        let success = if want_overlap {
+            workspace.move_active_window_to_right_neighbor_overlap()
+        } else {
+            workspace.move_active_window_to_new_column_right()
+        };
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
         } else {
@@ -2249,7 +2269,9 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let direction = StackingMoveDirection::Up;
-        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+        let Some((focused_id, focused_stack_len, _column_tile_count)) =
+            self.active_focused_tile_info()
+        else {
             self.stacking_move_state = None;
             return;
         };
@@ -2282,7 +2304,9 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
         let direction = StackingMoveDirection::Down;
-        let Some((focused_id, focused_stack_len)) = self.active_focused_tile_info() else {
+        let Some((focused_id, focused_stack_len, _column_tile_count)) =
+            self.active_focused_tile_info()
+        else {
             self.stacking_move_state = None;
             return;
         };
@@ -2308,11 +2332,15 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
-    /// Returns (focused window id, focused tile's stack length) for the active scrolling tile.
-    fn active_focused_tile_info(&mut self) -> Option<(W::Id, usize)> {
+    /// Returns (focused window id, focused tile's stack length, source column's tile count)
+    /// for the active scrolling tile. The column tile count lets horizontal stacking-move
+    /// routing distinguish "tile inside a multi-tile column" (use new-column) from "tile that
+    /// IS its whole column" (use overlap into neighbor).
+    fn active_focused_tile_info(&mut self) -> Option<(W::Id, usize, usize)> {
         let workspace = self.active_workspace_mut()?;
+        let column_tile_count = workspace.active_scrolling_column_tile_count()?;
         let tile = workspace.active_scrolling_tile_mut()?;
-        Some((tile.window().id().clone(), tile.stack_len()))
+        Some((tile.window().id().clone(), tile.stack_len(), column_tile_count))
     }
 
     pub fn focus_down(&mut self) {

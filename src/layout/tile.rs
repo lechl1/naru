@@ -818,6 +818,17 @@ impl<W: LayoutElement> Tile<W> {
         self.window.cycle_active(forward);
     }
 
+    /// Make `window` the active window in this tile's stack, if present.
+    /// Returns true if the window was found and made active.
+    pub fn activate_stacked_window(&mut self, window: &W::Id) -> bool {
+        if let Some(idx) = self.window.windows().iter().position(|w| w.id() == window) {
+            self.window.set_active(idx);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Pushes a window onto this tile's stack and makes it the active window.
     pub fn push_window(&mut self, window: W) {
         self.window.push_active(window);

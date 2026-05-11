@@ -333,6 +333,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Apply always-center and such right away.
         if !self.columns.is_empty() && !self.view_offset.is_gesture() {
             self.animate_view_offset_to_column(None, self.active_column_idx, None);
+            // Working area / column widths just changed — re-run the cluster centering so
+            // multi-column layouts stay centered after a resize. animate_view_offset_to_column
+            // above only re-centers the active column; without this call the auto-fit-or-center
+            // target stays at the old (pre-resize) position until another layout change kicks it.
+            self.auto_fit_or_center_view_offset();
         }
     }
 
@@ -437,6 +442,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         let col = &mut self.columns[self.active_column_idx];
         Some(col.tiles[col.active_tile_idx].window_mut())
+    }
+
+    /// Number of tiles in the active column, or None if there's no active column.
+    pub fn active_column_tile_count(&self) -> Option<usize> {
+        let col = self.columns.get(self.active_column_idx)?;
+        Some(col.tiles.len())
     }
 
     pub fn active_tile_mut(&mut self) -> Option<&mut Tile<W>> {
@@ -1006,11 +1017,19 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         if activate {
             // If this is the first window on an empty workspace, remove the effect of whatever
-            // view_offset was left over and skip the animation.
+            // view_offset was left over and skip the animation. If auto_fit_or_center is
+            // enabled, jump straight to the centered target — otherwise the subsequent
+            // auto_fit_or_center_view_offset call would animate the view from this fit
+            // position to the centered position, making the column appear to slide in from
+            // the left.
             if was_empty {
                 self.view_offset = ViewOffset::Static(0.);
-                self.view_offset =
-                    ViewOffset::Static(self.compute_new_view_offset_for_column(None, idx, None));
+                let target = self
+                    .compute_auto_fit_or_center_view_offset()
+                    .unwrap_or_else(|| {
+                        self.compute_new_view_offset_for_column(None, idx, None)
+                    });
+                self.view_offset = ViewOffset::Static(target);
             }
 
             let prev_offset = (!was_empty && idx == self.active_column_idx + 1)
@@ -1807,23 +1826,42 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let snapshot = st.window_mut().take_animation_snapshot();
             snapshot.map(|s| (st.window_size(), st.tile_size(), s))
         };
-        // Pop the active window. Source tile remains valid (caller guarantees stack_len > 1).
-        let popped = self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
+        // If the source tile holds only the active window, popping would leave the tile
+        // with an empty WindowStack (and panic on the next Deref). Use remove_tile_by_idx
+        // to cleanly remove the tile — and the column too, if it was the only tile.
+        let source_is_single_window =
+            self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
+        let source_was_only_tile = self.columns[source_col_idx].tiles.len() == 1;
+        let source_column_removed = source_is_single_window && source_was_only_tile;
+        let popped = if source_is_single_window {
+            let mut removed = self.remove_tile_by_idx(
+                source_col_idx,
+                source_tile_idx,
+                Transaction::new(),
+                None,
+            );
+            removed.tile.pop_active_window()
+        } else {
+            self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window()
+        };
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         // Insert at source_col_idx so the new column appears immediately to the LEFT of the
-        // current source column. add_column with activate=true moves focus to the new column.
+        // (possibly removed) source column. add_column with activate=true moves focus to the
+        // new column.
         self.add_tile(Some(source_col_idx), new_tile, true, width, is_full_width, None);
         if let Some((window_size, tile_size, snapshot)) = resize_from {
             self.columns[source_col_idx].tiles[0]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
-        // After add_tile inserted the new column at source_col_idx, the original source
-        // column shifted to source_col_idx + 1. Its tile stack just shrunk, so refresh
-        // its cached column width before any downstream consumer (e.g. column_x or
-        // auto_fit_or_center_view_offset) reads it.
-        let old_source_idx = source_col_idx + 1;
-        if old_source_idx < self.columns.len() {
-            self.data[old_source_idx].update(&self.columns[old_source_idx]);
+        // If the source column survived, it shifted to source_col_idx + 1. Its tile stack
+        // just shrunk (or one of its tiles was removed), so refresh its cached column width
+        // before any downstream consumer (e.g. column_x or auto_fit_or_center_view_offset)
+        // reads it.
+        if !source_column_removed {
+            let old_source_idx = source_col_idx + 1;
+            if old_source_idx < self.columns.len() {
+                self.data[old_source_idx].update(&self.columns[old_source_idx]);
+            }
         }
         true
     }
@@ -1852,24 +1890,43 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let snapshot = st.window_mut().take_animation_snapshot();
             snapshot.map(|s| (st.window_size(), st.tile_size(), s))
         };
-        let popped = self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
+        // If the source tile holds only the active window, popping would leave the tile
+        // with an empty WindowStack (and panic on the next Deref). Use remove_tile_by_idx
+        // to cleanly remove the tile — and the column too, if it was the only tile.
+        let source_is_single_window =
+            self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
+        let source_was_only_tile = self.columns[source_col_idx].tiles.len() == 1;
+        let source_column_removed = source_is_single_window && source_was_only_tile;
+        let popped = if source_is_single_window {
+            let mut removed = self.remove_tile_by_idx(
+                source_col_idx,
+                source_tile_idx,
+                Transaction::new(),
+                None,
+            );
+            removed.tile.pop_active_window()
+        } else {
+            self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window()
+        };
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         // Insert at source_col_idx + 1 to place the new column immediately to the RIGHT.
-        self.add_tile(
-            Some(source_col_idx + 1),
-            new_tile,
-            true,
-            width,
-            is_full_width,
-            None,
-        );
+        // If the source column was removed, columns shifted left by one, so its prior right
+        // neighbor now sits at source_col_idx — insert at source_col_idx instead to keep the
+        // new column immediately to the right of where source was.
+        let insert_idx = if source_column_removed {
+            source_col_idx
+        } else {
+            source_col_idx + 1
+        };
+        self.add_tile(Some(insert_idx), new_tile, true, width, is_full_width, None);
         if let Some((window_size, tile_size, snapshot)) = resize_from {
-            self.columns[source_col_idx + 1].tiles[0]
+            self.columns[insert_idx].tiles[0]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
-        // The source column stays at source_col_idx (insertion was after it). Its tile
-        // stack just shrunk, so refresh its cached column width.
-        if source_col_idx < self.columns.len() {
+        // If the source column survived, it stays at source_col_idx (insertion was after it).
+        // Its tile stack just shrunk (or one of its tiles was removed), so refresh its cached
+        // column width.
+        if !source_column_removed && source_col_idx < self.columns.len() {
             self.data[source_col_idx].update(&self.columns[source_col_idx]);
         }
         true
@@ -1909,8 +1966,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Focus the target column.
         self.active_column_idx = target_col_idx;
 
-        // Pushed window changed the target tile's content; refresh the cached column
-        // width before auto_fit_or_center_view_offset reads it.
+        // Pushed window changed the target tile's content. Re-run per-tile sizing
+        // immediately so heights are correct on the next paint — without this the
+        // layout stays stale until the next input event triggers a redraw — then
+        // refresh the cached column width before auto_fit_or_center_view_offset
+        // reads it.
+        self.columns[target_col_idx].update_tile_sizes(false);
         self.data[target_col_idx].update(&self.columns[target_col_idx]);
         self.auto_fit_or_center_view_offset();
         true
@@ -1975,8 +2036,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         target_col.tiles[target_active_tile_idx].push_window(window);
         self.active_column_idx = target_col_idx;
 
-        // Pushed window changed the target tile's content; refresh the cached column
-        // width before auto_fit_or_center_view_offset reads it.
+        // Pushed window changed the target tile's content. Re-run per-tile sizing
+        // immediately so heights are correct on the next paint — without this the
+        // layout stays stale until the next input event triggers a redraw — then
+        // refresh the cached column width before auto_fit_or_center_view_offset
+        // reads it.
+        self.columns[target_col_idx].update_tile_sizes(false);
         self.data[target_col_idx].update(&self.columns[target_col_idx]);
         self.auto_fit_or_center_view_offset();
         true
@@ -2074,7 +2139,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             column.tiles[target_tile_idx]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
-        // Pushed window changed the target tile's content; refresh the cached column width.
+        // Pushed window changed the target tile's content (e.g. stack indicator now claims
+        // a strip of vertical space). Re-run per-tile sizing immediately so the inner
+        // window size is correct on the next paint — without this the layout stays stale
+        // until the next input event triggers a redraw — then refresh the cached column
+        // width.
+        self.columns[col_idx].update_tile_sizes(false);
         self.data[col_idx].update(&self.columns[col_idx]);
         true
     }
@@ -2119,7 +2189,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             column.tiles[target_tile_idx]
                 .animate_resize_from(window_size, tile_size, snapshot);
         }
-        // Pushed window changed the target tile's content; refresh the cached column width.
+        // Pushed window changed the target tile's content (e.g. stack indicator now claims
+        // a strip of vertical space). Re-run per-tile sizing immediately so the inner
+        // window size is correct on the next paint — without this the layout stays stale
+        // until the next input event triggers a redraw — then refresh the cached column
+        // width.
+        self.columns[col_idx].update_tile_sizes(false);
         self.data[col_idx].update(&self.columns[col_idx]);
         true
     }
@@ -2702,19 +2777,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         Some(best_idx)
     }
 
-    /// If `auto-fit-or-center` is enabled in config, recompute the view offset
-    /// so that all columns are centered as a group when they fit, or so that
-    /// neither edge has wasted empty space when they overflow.
-    ///
-    /// Should be called after any layout-changing operation (window add/remove,
-    /// stacking move, neighbor-overlap move). No-op if the flag is off, the
-    /// workspace is empty, or there's no active column.
-    pub fn auto_fit_or_center_view_offset(&mut self) {
+    /// Compute the view_offset that `auto_fit_or_center_view_offset` would target
+    /// for the current column set / active column / working area. Returns None if
+    /// the feature is disabled or the workspace is empty (caller should fall back
+    /// to its own default).
+    fn compute_auto_fit_or_center_view_offset(&self) -> Option<f64> {
         if !self.options.layout.auto_fit_or_center {
-            return;
+            return None;
         }
         if self.columns.is_empty() {
-            return;
+            return None;
         }
 
         let working_x = self.working_area.loc.x;
@@ -2736,7 +2808,20 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         };
 
         let active_col_x = self.column_x(self.active_column_idx);
-        let new_offset = new_view_x - active_col_x;
+        Some(new_view_x - active_col_x)
+    }
+
+    /// If `auto-fit-or-center` is enabled in config, recompute the view offset
+    /// so that all columns are centered as a group when they fit, or so that
+    /// neither edge has wasted empty space when they overflow.
+    ///
+    /// Should be called after any layout-changing operation (window add/remove,
+    /// stacking move, neighbor-overlap move). No-op if the flag is off, the
+    /// workspace is empty, or there's no active column.
+    pub fn auto_fit_or_center_view_offset(&mut self) {
+        let Some(new_offset) = self.compute_auto_fit_or_center_view_offset() else {
+            return;
+        };
         self.animate_view_offset(self.active_column_idx, new_offset);
     }
 
@@ -4744,17 +4829,20 @@ impl<W: LayoutElement> Column<W> {
     }
 
     pub fn contains(&self, window: &W::Id) -> bool {
+        // Scan the entire WindowStack of each tile, not just the active window —
+        // otherwise a stacked-but-currently-hidden window appears "not present" and
+        // activation silently fails (e.g. picking a stacked window from the MRU).
         self.tiles
             .iter()
-            .map(Tile::window)
-            .any(|win| win.id() == window)
+            .any(|tile| tile.stacked_windows().iter().any(|w| w.id() == window))
     }
 
     pub fn position(&self, window: &W::Id) -> Option<usize> {
-        self.tiles
-            .iter()
-            .map(Tile::window)
-            .position(|win| win.id() == window)
+        // See `contains`: search the full stack so stacked-but-hidden windows are
+        // located correctly.
+        self.tiles.iter().position(|tile| {
+            tile.stacked_windows().iter().any(|w| w.id() == window)
+        })
     }
 
     fn activate_idx(&mut self, idx: usize) -> bool {
@@ -4771,6 +4859,11 @@ impl<W: LayoutElement> Column<W> {
 
     fn activate_window(&mut self, window: &W::Id) {
         let idx = self.position(window).unwrap();
+        // If the target lives inside a multi-window stack but isn't its currently-active
+        // window, switch the stack to it first — otherwise activating the tile index
+        // would leave the wrong window visible/focused (e.g. MRU pick of a hidden
+        // stacked window).
+        self.tiles[idx].activate_stacked_window(window);
         self.activate_idx(idx);
     }
 

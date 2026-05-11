@@ -2115,6 +2115,13 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.active_tile_mut()
     }
 
+    /// Number of tiles in the active scrolling-layer column, or None if there's no active
+    /// column. Used by stacking-move routing to distinguish "tile inside a multi-tile column"
+    /// from "tile that IS its whole column".
+    pub fn active_scrolling_column_tile_count(&self) -> Option<usize> {
+        self.scrolling.active_column_tile_count()
+    }
+
     #[cfg(test)]
     pub fn floating(&self) -> &FloatingSpace<W> {
         &self.floating
