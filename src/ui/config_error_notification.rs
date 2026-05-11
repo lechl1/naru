@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use naru_config::Config;
+use naru_config::{Config, ConfigSource};
 use ordered_float::NotNan;
 use pangocairo::cairo::{self, ImageSurface};
 use pangocairo::pango::FontDescription;
@@ -32,6 +32,13 @@ pub struct ConfigErrorNotification {
     // notification.
     created_path: Option<PathBuf>,
 
+    // When the user config failed to load and naru fell back to a snapshot or built-in defaults,
+    // this records which tier won so the popup can describe what's actually running.
+    // `None` (or `Some(ConfigSource::User)`) means "no fallback context — render the plain
+    // 'failed to parse' message" (e.g. live watcher-reload failures, where the in-memory
+    // config is preserved and there is no fallback to announce).
+    fallback_source: Option<ConfigSource>,
+
     clock: Clock,
     config: Rc<RefCell<Config>>,
 }
@@ -49,6 +56,7 @@ impl ConfigErrorNotification {
             state: State::Hidden,
             buffers: RefCell::new(HashMap::new()),
             created_path: None,
+            fallback_source: None,
             clock,
             config,
         }
@@ -70,18 +78,45 @@ impl ConfigErrorNotification {
             self.created_path = Some(created_path.to_owned());
             self.buffers.borrow_mut().clear();
         }
+        if self.fallback_source.is_some() {
+            self.fallback_source = None;
+            self.buffers.borrow_mut().clear();
+        }
 
         self.state = State::Showing(self.animation(0., 1.));
     }
 
     pub fn show(&mut self) {
+        self.show_internal(None);
+    }
+
+    /// Shows the notification with context about which fallback tier is in effect.
+    ///
+    /// Pass [`ConfigSource::User`] to display the plain "failed to parse" message; pass
+    /// [`ConfigSource::LastGood`] or [`ConfigSource::BuiltinDefaults`] to display a banner
+    /// telling the user what's actually running so they can fix the broken config without
+    /// being locked out.
+    pub fn show_with_source(&mut self, source: ConfigSource) {
+        let fallback = match source {
+            ConfigSource::User => None,
+            other => Some(other),
+        };
+        self.show_internal(fallback);
+    }
+
+    fn show_internal(&mut self, fallback: Option<ConfigSource>) {
         let c = self.config.borrow();
         if c.config_notification.disable_failed {
             return;
         }
+        drop(c);
 
         if self.created_path.is_some() {
             self.created_path = None;
+            self.buffers.borrow_mut().clear();
+        }
+        if self.fallback_source != fallback {
+            self.fallback_source = fallback;
             self.buffers.borrow_mut().clear();
         }
 
@@ -142,13 +177,14 @@ impl ConfigErrorNotification {
         let scale = output.current_scale().fractional_scale();
         let output_size = output_size(output);
         let path = self.created_path.as_deref();
+        let fallback = self.fallback_source;
 
         let font_size = self.config.borrow().appearance.font_size;
         let mut buffers = self.buffers.borrow_mut();
         let buffer = buffers
             .entry(NotNan::new(scale).unwrap())
             .or_insert_with(move || {
-                render(renderer.as_gles_renderer(), scale, path, font_size).ok()
+                render(renderer.as_gles_renderer(), scale, path, fallback, font_size).ok()
             });
         let buffer = buffer.clone()?;
 
@@ -181,6 +217,7 @@ fn render(
     renderer: &mut GlesRenderer,
     scale: f64,
     created_path: Option<&Path>,
+    fallback_source: Option<ConfigSource>,
     font_size: u16,
 ) -> anyhow::Result<TextureBuffer<GlesTexture>> {
     let _span = tracy_client::span!("config_error_notification::render");
@@ -195,6 +232,21 @@ fn render(
              <span face='monospace' bgcolor='#000000'>{path:?}</span>",
         );
         border_color = (0.5, 1., 0.5);
+    } else if let Some(source) =
+        fallback_source.filter(|s| !matches!(s, ConfigSource::User))
+    {
+        // Amber border distinguishes "running with a fallback" from a hard parse error;
+        // the user is still functional, just not on their config.
+        let detail = match source {
+            ConfigSource::LastGood => "the last-known-good snapshot",
+            ConfigSource::BuiltinDefaults => "built-in defaults",
+            ConfigSource::User => unreachable!("filtered above"),
+        };
+        text = format!(
+            "Failed to parse the config file. Running with {detail}. \
+             Run <span face='monospace' bgcolor='#000000'>naru validate</span> for details.",
+        );
+        border_color = (1., 0.7, 0.3);
     };
 
     let mut font = FontDescription::from_string(&format!("{FONT_FAMILY} {font_size}px"));

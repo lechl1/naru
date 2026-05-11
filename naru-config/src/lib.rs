@@ -124,6 +124,80 @@ pub enum ConfigPath {
     },
 }
 
+/// Which tier of the load chain produced the running config.
+///
+/// On startup naru tries the user/system config first, then a previously-saved last-known-good
+/// snapshot, and finally the compiled-in defaults. The compositor records which tier won so it
+/// can surface a notification telling the user that a fallback is in effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// The user (or system) config file loaded successfully.
+    User,
+    /// The user config failed to load; the last-known-good snapshot was used instead.
+    LastGood,
+    /// Both the user config and any snapshot failed; compiled-in defaults are in effect.
+    BuiltinDefaults,
+}
+
+/// Outcome of [`ConfigPath::load_with_fallback`].
+pub struct LoadOutcome {
+    /// The config that ended up loaded — never an error, since the fallback chain
+    /// always terminates at compiled-in defaults.
+    pub config: Config,
+    /// Which tier of the chain produced [`Self::config`].
+    pub source: ConfigSource,
+    /// The original error from loading the user config, if it failed. Useful for logging.
+    pub user_load_error: Option<miette::Report>,
+    /// Path of a freshly created user config (when no config existed before this run).
+    pub created_path: Option<PathBuf>,
+    /// Includes that the user config pulled in (empty when falling back to snapshot/defaults).
+    pub includes: Vec<PathBuf>,
+}
+
+/// Returns the path naru uses for the on-disk last-known-good snapshot of the user config.
+///
+/// The snapshot lives next to the user config, suffixed with `.last-good`, so it inherits
+/// the same XDG dir and is trivial for the user to inspect or delete.
+pub fn snapshot_path_for(user_path: &Path) -> PathBuf {
+    let mut s = user_path.as_os_str().to_owned();
+    s.push(".last-good");
+    PathBuf::from(s)
+}
+
+/// Persists `source` to its `.last-good` sibling so that a future startup can fall back to it
+/// if the user config becomes unparseable.
+///
+/// Best-effort: any error is logged, never propagated. Saving the snapshot must never block
+/// the compositor from booting.
+///
+/// Atomicity is provided by writing to a sibling temp file and then renaming — safe across
+/// crashes on POSIX, where rename within the same directory is atomic.
+pub fn save_last_good(source: &Path) {
+    if let Err(err) = save_last_good_inner(source) {
+        warn!("failed to save last-known-good config snapshot: {err}");
+    }
+}
+
+fn save_last_good_inner(source: &Path) -> std::io::Result<()> {
+    let snapshot = snapshot_path_for(source);
+    let parent = snapshot.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot has no parent dir")
+    })?;
+
+    let file_name = snapshot
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("config.kdl.last-good");
+    let tmp = parent.join(format!(".{file_name}.tmp"));
+
+    // Clean up any stale temp file from a prior crash mid-write.
+    let _ = fs::remove_file(&tmp);
+
+    fs::copy(source, &tmp)?;
+    fs::rename(&tmp, &snapshot)?;
+    Ok(())
+}
+
 // Newtypes for putting information into the knuffel context.
 struct BasePath(PathBuf);
 struct RootBase(PathBuf);
@@ -586,6 +660,88 @@ impl ConfigPath {
             .map_config_res(|res| res.context("error loading config"));
 
         (created_at, result)
+    }
+
+    /// Returns the user-facing config path, if one is associated with this `ConfigPath`.
+    ///
+    /// Both `Explicit` and `Regular` variants have one; only `Explicit` skips the system fallback.
+    /// This is the path used as the source for the last-known-good snapshot.
+    pub fn user_path(&self) -> Option<&Path> {
+        match self {
+            ConfigPath::Explicit(p) => Some(p.as_path()),
+            ConfigPath::Regular { user_path, .. } => Some(user_path.as_path()),
+        }
+    }
+
+    /// Returns the on-disk path naru would use for the last-known-good snapshot, if any.
+    pub fn last_good_path(&self) -> Option<PathBuf> {
+        self.user_path().map(snapshot_path_for)
+    }
+
+    /// Loads the config with a multi-tier fallback chain.
+    ///
+    /// 1. Try the user/system config (creating one from defaults if neither exists).
+    /// 2. If that fails to parse, try `<user>.last-good` — a snapshot saved by a previous
+    ///    successful startup.
+    /// 3. If that also fails or doesn't exist, return compiled-in defaults.
+    ///
+    /// The returned [`LoadOutcome`] always carries a usable [`Config`], so callers don't need
+    /// to handle the "everything is broken" case — keybindings will keep working even when
+    /// the user has saved a totally broken config.
+    pub fn load_with_fallback(&self) -> LoadOutcome {
+        let _span = tracy_client::span!("ConfigPath::load_with_fallback");
+
+        let (created_at, parse_result) = self.load_or_create();
+        let created_path = created_at.map(Path::to_path_buf);
+        let user_includes = parse_result.includes;
+
+        match parse_result.config {
+            Ok(config) => LoadOutcome {
+                config,
+                source: ConfigSource::User,
+                user_load_error: None,
+                created_path,
+                includes: user_includes,
+            },
+            Err(err) => {
+                // Try the last-known-good snapshot before falling back to compiled defaults.
+                if let Some(snapshot) = self.last_good_path() {
+                    if snapshot.exists() {
+                        let res = Config::load(&snapshot);
+                        match res.config {
+                            Ok(config) => {
+                                warn!(
+                                    "user config failed to load; using last-known-good \
+                                     snapshot at {snapshot:?}",
+                                );
+                                return LoadOutcome {
+                                    config,
+                                    source: ConfigSource::LastGood,
+                                    user_load_error: Some(err),
+                                    created_path,
+                                    includes: res.includes,
+                                };
+                            }
+                            Err(snap_err) => {
+                                warn!(
+                                    "last-known-good snapshot at {snapshot:?} also failed \
+                                     to parse: {snap_err:?}",
+                                );
+                            }
+                        }
+                    }
+                }
+
+                warn!("falling back to built-in defaults so the compositor can start");
+                LoadOutcome {
+                    config: Config::load_default(),
+                    source: ConfigSource::BuiltinDefaults,
+                    user_load_error: Some(err),
+                    created_path,
+                    includes: Vec::new(),
+                }
+            }
+        }
     }
 
     fn load_inner<'a>(

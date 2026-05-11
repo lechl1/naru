@@ -25,7 +25,7 @@ use naru::utils::spawning::{
     REMOVE_ENV_RUST_BACKTRACE, REMOVE_ENV_RUST_LIB_BACKTRACE,
 };
 use naru::utils::{cause_panic, version, watcher, xwayland, IS_SYSTEMD_SERVICE};
-use naru_config::{Config, ConfigPath};
+use naru_config::ConfigPath;
 use naru_ipc::socket::SOCKET_PATH_ENV;
 use sd_notify::NotifyState;
 use smithay::reexports::wayland_server::Display;
@@ -148,13 +148,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load the config.
     let config_path = config_path(cli.config);
     env::remove_var("NARU_CONFIG");
-    let (config_created_at, config_load_result) = config_path.load_or_create();
-    let config_errored = config_load_result.config.is_err();
-    let mut config = config_load_result.config.unwrap_or_else(|err| {
+    let outcome = config_path.load_with_fallback();
+    if let Some(err) = &outcome.user_load_error {
         warn!("{err:?}");
-        Config::load_default()
-    });
-    let config_includes = config_load_result.includes;
+    }
+    // Persist the just-parsed user config as the last-known-good snapshot, so a future
+    // startup with a broken edit still boots with working keybindings. Best-effort.
+    if matches!(outcome.source, naru_config::ConfigSource::User) {
+        if let Some(p) = config_path.user_path() {
+            naru_config::save_last_good(p);
+        }
+    }
+    let config_errored = outcome.user_load_error.is_some();
+    let config_source = outcome.source;
+    let config_created_at = outcome.created_path;
+    let config_includes = outcome.includes;
+    let mut config = outcome.config;
 
     let spawn_at_startup = mem::take(&mut config.spawn_at_startup);
     let spawn_sh_at_startup = mem::take(&mut config.spawn_sh_at_startup);
@@ -259,9 +268,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Show the config error notification right away if needed.
     if config_errored {
-        state.naru.config_error_notification.show();
+        state
+            .naru
+            .config_error_notification
+            .show_with_source(config_source);
         state.ipc_config_loaded(true);
-    } else if let Some(path) = config_created_at {
+    } else if let Some(path) = config_created_at.as_deref() {
         state.naru.config_error_notification.show_created(path);
     }
 
