@@ -183,6 +183,13 @@ struct Inner {
 
     /// Cached search-bar texture, regenerated when the query changes.
     search_texture: RefCell<SearchBarTexture>,
+
+    /// True once the user has pressed any non-Tab key while the MRU UI is open
+    /// (search char, backspace, Home/End, scope switch). Pure Tab/Shift+Tab
+    /// cycling leaves this false. On modifier release, the input layer uses
+    /// this to decide: false → confirm and close (legacy Niri Alt+Tab), true →
+    /// stay open in persistent search-mode.
+    interacted_beyond_tab: bool,
 }
 
 #[derive(Debug)]
@@ -985,6 +992,7 @@ impl WindowMruUi {
             persistent: false,
             search: String::new(),
             search_texture: Default::default(),
+            interacted_beyond_tab: false,
         };
         inner.view_pos = ViewPos::Static(inner.compute_view_pos());
 
@@ -1056,6 +1064,7 @@ impl WindowMruUi {
             return;
         };
         inner.freeze_view = false;
+        inner.interacted_beyond_tab = true;
         inner.set_scope(scope);
     }
 
@@ -1097,6 +1106,7 @@ impl WindowMruUi {
             return;
         };
         inner.freeze_view = false;
+        inner.interacted_beyond_tab = true;
         inner.wmru.first();
     }
 
@@ -1105,6 +1115,7 @@ impl WindowMruUi {
             return;
         };
         inner.freeze_view = false;
+        inner.interacted_beyond_tab = true;
         inner.wmru.last();
     }
 
@@ -1128,6 +1139,14 @@ impl WindowMruUi {
         matches!(&self.state, UiState::Open(inner) if inner.persistent)
     }
 
+    /// True if any non-Tab MRU key has been pressed while the UI is open.
+    /// Used by the input layer to gate persistent-mode entry on modifier release:
+    /// pure Tab cycling stays Niri-style (confirm + close on Alt release), any
+    /// other interaction switches to persistent search-mode.
+    pub fn interacted_beyond_tab(&self) -> bool {
+        matches!(&self.state, UiState::Open(inner) if inner.interacted_beyond_tab)
+    }
+
     /// Mark the UI as having transitioned into persistent search-mode.
     /// Idempotent. Called from the input handler when all modifiers are released.
     pub fn set_persistent(&mut self) {
@@ -1139,6 +1158,7 @@ impl WindowMruUi {
     /// Append `c` to the live search query and re-rank thumbnails.
     pub fn push_search_char(&mut self, c: char) {
         if let UiState::Open(inner) = &mut self.state {
+            inner.interacted_beyond_tab = true;
             inner.search.push(c);
             inner.on_search_changed();
         }
@@ -1148,6 +1168,7 @@ impl WindowMruUi {
     /// Returns true if a character was removed.
     pub fn pop_search_char(&mut self) -> bool {
         if let UiState::Open(inner) = &mut self.state {
+            inner.interacted_beyond_tab = true;
             if inner.search.pop().is_some() {
                 inner.on_search_changed();
                 return true;

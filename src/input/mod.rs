@@ -505,15 +505,22 @@ impl State {
                     return FilterResult::Intercept(None);
                 }
 
-                // When all modifiers are released while the MRU UI is open, keep the UI open
-                // and flip it into "persistent" search mode. The user must explicitly confirm
-                // with Enter, cancel with Escape, or click outside to dismiss.
+                // All modifiers released while the MRU UI is open. Two regimes:
+                //   - If only Tab/Shift+Tab cycling happened during the chord, behave like
+                //     legacy Niri Alt+Tab: commit the current selection and close the UI.
+                //   - If the user pressed any other MRU key (search char, Home/End, scope
+                //     switch, etc.), flip into persistent search-mode and keep the UI open.
+                //     Confirmation is then explicit: Enter, Escape, or click outside.
                 //
-                // Just consume the key release if it was suppressed during the chord, otherwise
-                // forward it. Don't fall through into binding lookup — there are no binds for a
-                // bare modifier release, and downstream handlers shouldn't see this as input.
+                // Just consume the key release if it was suppressed during the chord,
+                // otherwise forward it. Don't fall through into binding lookup — there are
+                // no binds for a bare modifier release.
                 if this.naru.window_mru_ui.is_open() && !pressed && modifiers.is_empty() {
-                    this.naru.window_mru_ui.set_persistent();
+                    if this.naru.window_mru_ui.interacted_beyond_tab() {
+                        this.naru.window_mru_ui.set_persistent();
+                    } else {
+                        this.confirm_mru();
+                    }
 
                     if this.naru.suppressed_keys.remove(&key_code) {
                         return FilterResult::Intercept(None);
