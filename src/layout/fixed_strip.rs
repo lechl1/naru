@@ -236,6 +236,23 @@ impl<W: LayoutElement> FixedStrip<W> {
         success
     }
 
+    /// Within-strip equivalent of
+    /// [`ScrollingSpace::move_active_window_to_neighbor_column_as_new_row`].
+    /// Mirrors the carousel's default cross-column stack-move semantic:
+    /// extract the active tile and insert it as a new row in the neighbour
+    /// column. Returns false at the strip's outer edge (for `to_left` on
+    /// `fixed_left` or `!to_left` on `fixed_right`) so the caller can decide
+    /// whether to keep the keypress as a no-op or cross to the next
+    /// workspace.
+    pub fn move_active_neighbor_as_new_row(&mut self, to_left: bool) -> bool {
+        let result = self
+            .inner
+            .move_active_window_to_neighbor_column_as_new_row(to_left);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+        result
+    }
+
     /// Whether the currently focused column inside this strip is the one
     /// closest to the carousel ("inner edge"). When true, a stack-move toward
     /// the carousel should hand the column back to it instead of moving

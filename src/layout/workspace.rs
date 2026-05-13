@@ -1391,11 +1391,14 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Reverses [`move_active_carousel_column_into_left_strip`]: extracts the
     /// strip's innermost (carousel-facing) column and inserts it back into
-    /// the carousel at the new leftmost slot. Returns false unless the layout
-    /// is currently signalling that `fixed_left` is the active layer (i.e. a
-    /// recent IN move has not been countered by other focus changes).
+    /// the carousel at the new leftmost slot. Only fires when the focused
+    /// column inside the strip IS the innermost — otherwise the OUT semantic
+    /// is wrong (the caller wants a within-strip move).
     pub fn move_active_strip_column_back_to_carousel_left(&mut self) -> bool {
         if self.active_fixed_side != Some(FixedSide::Left) {
+            return false;
+        }
+        if !self.fixed_left.focused_column_is_at_inner_edge() {
             return false;
         }
         let Some(column) = self.fixed_left.remove_innermost_column() else {
@@ -1436,9 +1439,14 @@ impl<W: LayoutElement> Workspace<W> {
 
     /// Reverse of [`move_active_carousel_column_into_right_strip`]: extracts
     /// `fixed_right`'s innermost column and re-inserts it as the carousel's
-    /// new rightmost. Returns false unless `fixed_right` is the active layer.
+    /// new rightmost. Only fires when the focused column inside the strip IS
+    /// the innermost — otherwise the caller wants a within-strip move
+    /// instead.
     pub fn move_active_strip_column_back_to_carousel_right(&mut self) -> bool {
         if self.active_fixed_side != Some(FixedSide::Right) {
+            return false;
+        }
+        if !self.fixed_right.focused_column_is_at_inner_edge() {
             return false;
         }
         let Some(column) = self.fixed_right.remove_innermost_column() else {
@@ -1450,6 +1458,36 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.add_column(Some(idx), column, true, None);
         self.active_fixed_side = None;
         true
+    }
+
+    /// Read-only accessor for the strip-active signal. Used by Layout's
+    /// stack-move handlers to dispatch a within-strip move instead of
+    /// falling through to carousel handling when focus is inside a strip.
+    pub fn active_fixed_side(&self) -> Option<FixedSide> {
+        self.active_fixed_side
+    }
+
+    /// Within-strip stack-move on the left fixed panel. `to_left=true` moves
+    /// the active column one slot toward the strip's outer edge; `false`
+    /// moves it toward the inner (carousel-facing) edge. Returns `false` if
+    /// the strip's active column is at the matching edge — the caller can
+    /// then decide whether to OUT to the carousel or treat as a no-op.
+    /// Returns `false` (without side effects) when `fixed_left` is not the
+    /// active layer at all.
+    pub fn move_active_window_within_left_strip(&mut self, to_left: bool) -> bool {
+        if self.active_fixed_side != Some(FixedSide::Left) {
+            return false;
+        }
+        self.fixed_left.move_active_neighbor_as_new_row(to_left)
+    }
+
+    /// Mirror of [`move_active_window_within_left_strip`] for the right
+    /// panel.
+    pub fn move_active_window_within_right_strip(&mut self, to_left: bool) -> bool {
+        if self.active_fixed_side != Some(FixedSide::Right) {
+            return false;
+        }
+        self.fixed_right.move_active_neighbor_as_new_row(to_left)
     }
 
     pub fn move_active_window_to_new_column_right(&mut self) -> bool {

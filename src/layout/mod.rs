@@ -57,6 +57,7 @@ use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
+use crate::layout::fixed_strip::FixedSide;
 use crate::layout::scrolling::ScrollDirection;
 use crate::naru_render_elements;
 use crate::render_helpers::background_effect::BackgroundEffectElement;
@@ -2203,13 +2204,28 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
-        // OUT path: a window currently inside the right fixed panel rides
-        // back into the carousel on this hotkey. Symmetric with the left-OUT
-        // check at the top of `move_window_right_stacked`.
+        // Strip-aware dispatch. When focus is inside a fixed-side strip we
+        // consume the keypress here and never fall through to the carousel
+        // path — otherwise `active_focused_tile_info()` would route the
+        // operation to the carousel's stale active column.
         if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.move_active_strip_column_back_to_carousel_right() {
-                self.stacking_move_state = None;
-                return;
+            match workspace.active_fixed_side() {
+                Some(FixedSide::Right) => {
+                    // Toward inner edge of right strip. At inner edge OUT to
+                    // the carousel; otherwise move one column within strip.
+                    let _ = workspace.move_active_strip_column_back_to_carousel_right()
+                        || workspace.move_active_window_within_right_strip(true);
+                    self.stacking_move_state = None;
+                    return;
+                }
+                Some(FixedSide::Left) => {
+                    // Toward outer edge of left strip. At outer edge no-op
+                    // (TODO Phase 6 workspace cross).
+                    let _ = workspace.move_active_window_within_left_strip(true);
+                    self.stacking_move_state = None;
+                    return;
+                }
+                None => {}
             }
         }
 
@@ -2262,14 +2278,23 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
-        // OUT path: a window currently inside the left fixed panel rides
-        // back into the carousel on this hotkey, before the regular
-        // active-tile lookup (whose `focused_id` is otherwise the carousel's
-        // post-extraction leftmost — i.e. a different window).
+        // Strip-aware dispatch — see [`move_window_left_stacked`] for the
+        // rationale. Symmetric: left strip OUT-or-within, right strip just
+        // within (no OUT toward right).
         if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.move_active_strip_column_back_to_carousel_left() {
-                self.stacking_move_state = None;
-                return;
+            match workspace.active_fixed_side() {
+                Some(FixedSide::Left) => {
+                    let _ = workspace.move_active_strip_column_back_to_carousel_left()
+                        || workspace.move_active_window_within_left_strip(false);
+                    self.stacking_move_state = None;
+                    return;
+                }
+                Some(FixedSide::Right) => {
+                    let _ = workspace.move_active_window_within_right_strip(false);
+                    self.stacking_move_state = None;
+                    return;
+                }
+                None => {}
             }
         }
 
