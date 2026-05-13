@@ -75,17 +75,13 @@ impl<W: LayoutElement> FixedStrip<W> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.tiles().next().is_none()
+        self.inner.is_empty()
     }
 
     /// Total logical width this strip occupies inside the workspace working
-    /// area. Zero while empty; populated by a follow-up phase once
-    /// `ScrollingSpace` exposes total content width.
+    /// area: sum of column widths plus inter-column gaps. Zero while empty.
     pub fn width(&self) -> f64 {
-        if self.is_empty() {
-            return 0.0;
-        }
-        0.0
+        self.inner.content_width()
     }
 
     pub fn tiles(&self) -> impl Iterator<Item = &Tile<W>> + '_ {

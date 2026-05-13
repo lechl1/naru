@@ -426,6 +426,19 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.columns.is_empty()
     }
 
+    /// Total logical width of all columns plus inter-column gaps.
+    /// Returns zero when empty. Used by [`super::fixed_strip::FixedStrip`] to
+    /// report how much horizontal space a panel occupies inside the workspace
+    /// working area.
+    pub fn content_width(&self) -> f64 {
+        if self.columns.is_empty() {
+            return 0.0;
+        }
+        let gaps = self.options.layout.gaps;
+        let total_col_width: f64 = self.data.iter().map(|d| d.width).sum();
+        total_col_width + (self.columns.len().saturating_sub(1)) as f64 * gaps
+    }
+
     pub fn active_window(&self) -> Option<&W> {
         if self.columns.is_empty() {
             return None;
