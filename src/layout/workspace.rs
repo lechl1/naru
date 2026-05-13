@@ -2330,9 +2330,19 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn activate_window(&mut self, window: &W::Id) -> bool {
         if self.floating.activate_window(window) {
             self.floating_is_active = FloatingActive::Yes;
+            self.active_fixed_side = None;
+            true
+        } else if self.fixed_left.activate_window(window) {
+            self.floating_is_active = FloatingActive::No;
+            self.active_fixed_side = Some(FixedSide::Left);
+            true
+        } else if self.fixed_right.activate_window(window) {
+            self.floating_is_active = FloatingActive::No;
+            self.active_fixed_side = Some(FixedSide::Right);
             true
         } else if self.scrolling.activate_window(window) {
             self.floating_is_active = FloatingActive::No;
+            self.active_fixed_side = None;
             true
         } else {
             false
@@ -2342,6 +2352,15 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn activate_window_without_raising(&mut self, window: &W::Id) -> bool {
         if self.floating.activate_window_without_raising(window) {
             self.floating_is_active = FloatingActive::Yes;
+            self.active_fixed_side = None;
+            true
+        } else if self.fixed_left.activate_window(window) {
+            self.floating_is_active = FloatingActive::No;
+            self.active_fixed_side = Some(FixedSide::Left);
+            true
+        } else if self.fixed_right.activate_window(window) {
+            self.floating_is_active = FloatingActive::No;
+            self.active_fixed_side = Some(FixedSide::Right);
             true
         } else if self.scrolling.activate_window(window) {
             self.floating_is_active = match self.floating_is_active {
@@ -2349,6 +2368,7 @@ impl<W: LayoutElement> Workspace<W> {
                 FloatingActive::NoButRaised => FloatingActive::NoButRaised,
                 FloatingActive::Yes => FloatingActive::NoButRaised,
             };
+            self.active_fixed_side = None;
             true
         } else {
             false

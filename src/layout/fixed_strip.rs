@@ -224,6 +224,18 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner.active_window_mut()
     }
 
+    /// Activate the column containing `window` (if any), making it the
+    /// strip's focused column. Returns true on success. Keeps the inner
+    /// `view_offset` clamped to zero so carousel-style scrolling never
+    /// kicks in.
+    pub fn activate_window(&mut self, window: &W::Id) -> bool {
+        let success = self.inner.activate_window(window);
+        if success {
+            self.inner.force_view_offset_zero();
+        }
+        success
+    }
+
     /// Whether the currently focused column inside this strip is the one
     /// closest to the carousel ("inner edge"). When true, a stack-move toward
     /// the carousel should hand the column back to it instead of moving
