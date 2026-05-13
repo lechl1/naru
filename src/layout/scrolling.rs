@@ -426,6 +426,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.columns.is_empty()
     }
 
+    pub fn column_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    pub fn active_column_index(&self) -> usize {
+        self.active_column_idx
+    }
+
     /// Total logical width of all columns plus inter-column gaps.
     /// Returns zero when empty. Used by [`super::fixed_strip::FixedStrip`] to
     /// report how much horizontal space a panel occupies inside the workspace
@@ -437,6 +445,26 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let gaps = self.options.layout.gaps;
         let total_col_width: f64 = self.data.iter().map(|d| d.width).sum();
         total_col_width + (self.columns.len().saturating_sub(1)) as f64 * gaps
+    }
+
+    /// Resets the view offset to a static zero. Used by
+    /// [`super::fixed_strip::FixedStrip`] after column insertion to neutralise
+    /// any carousel-style scroll target that [`add_column`](Self::add_column)
+    /// may have computed — strips never scroll, regardless of how many
+    /// columns they hold.
+    pub fn force_view_offset_zero(&mut self) {
+        self.view_offset = ViewOffset::Static(0.0);
+    }
+
+    /// Sets the active column index without scroll animation. Used by
+    /// [`super::fixed_strip::FixedStrip`] to keep "focused column inside the
+    /// strip" bookkeeping consistent after column insertion / removal while
+    /// avoiding the carousel's centre-on-column behaviour.
+    pub fn set_active_column_idx_static(&mut self, idx: usize) {
+        if idx < self.columns.len() {
+            self.active_column_idx = idx;
+            self.view_offset = ViewOffset::Static(0.0);
+        }
     }
 
     pub fn active_window(&self) -> Option<&W> {

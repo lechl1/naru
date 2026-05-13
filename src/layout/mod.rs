@@ -2225,9 +2225,15 @@ impl<W: LayoutElement> Layout<W> {
             workspace.move_active_window_to_left_neighbor_overlap()
         } else if workspace.move_active_window_to_neighbor_column_as_new_row(true) {
             true
+        } else if workspace.move_active_carousel_column_into_left_strip() {
+            // Carousel's leftmost edge: extract the active column and insert
+            // it into the left fixed panel at the strip's inner (carousel-
+            // facing) edge. The OUT path (panel inner edge back into the
+            // carousel) plus the right side are follow-ups.
+            true
         } else {
-            // Workspace edge with no left neighbour: fall back to creating a new column
-            // on the left so the leftmost window can still escape further left.
+            // Defensive fallback (e.g. floating layer active): preserve the
+            // legacy behaviour of creating a new leftmost column.
             workspace.move_active_window_to_new_column_left()
         };
         if success {

@@ -1746,6 +1746,12 @@ impl<W: LayoutElement> Monitor<W> {
             }
 
             ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
+
+            // Fixed-side panels render on top of the carousel so the
+            // carousel's position relative to the screen stays pinned as
+            // panels grow / shrink.
+            ws.render_fixed_left(ctx.r(), xray_pos, focus_ring, push!());
+            ws.render_fixed_right(ctx.r(), xray_pos, focus_ring, push!());
         }
     }
 

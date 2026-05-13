@@ -15,10 +15,13 @@ use std::rc::Rc;
 
 use smithay::utils::{Logical, Rectangle, Size};
 
-use super::scrolling::ScrollingSpace;
+use super::scrolling::{Column, ScrollingSpace, ScrollingSpaceRenderElement};
 use super::tile::Tile;
 use super::{LayoutElement, Options};
 use crate::animation::Clock;
+use crate::render_helpers::renderer::NaruRenderer;
+use crate::render_helpers::xray::XrayPos;
+use crate::render_helpers::RenderCtx;
 
 /// Which edge of the workspace working area this strip is anchored to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +42,9 @@ pub struct FixedStrip<W: LayoutElement> {
     side: FixedSide,
 
     /// Underlying scrolling layout, used as a column container only.
-    /// `view_offset` is never animated for this instance — callers must avoid
-    /// invoking scroll/center methods on it.
+    /// `view_offset` is held at static zero — callers route column adds /
+    /// removes through this wrapper so the strip never falls into the
+    /// carousel's scroll/center code paths.
     inner: ScrollingSpace<W>,
 }
 
@@ -68,6 +72,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     ) {
         self.inner
             .update_config(view_size, parent_area, scale, options);
+        self.inner.force_view_offset_zero();
     }
 
     pub fn side(&self) -> FixedSide {
@@ -84,6 +89,63 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner.content_width()
     }
 
+    /// Whether the currently focused column inside this strip is the one
+    /// closest to the carousel ("inner edge"). When true, a stack-move toward
+    /// the carousel should hand the column back to it instead of moving
+    /// within the strip.
+    pub fn focused_column_is_at_inner_edge(&self) -> bool {
+        let n = self.inner_column_count();
+        if n == 0 {
+            return false;
+        }
+        match self.side {
+            FixedSide::Left => self.inner_active_column_idx() == Some(n - 1),
+            FixedSide::Right => self.inner_active_column_idx() == Some(0),
+        }
+    }
+
+    fn inner_column_count(&self) -> usize {
+        self.inner.column_count()
+    }
+
+    fn inner_active_column_idx(&self) -> Option<usize> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.inner.active_column_index())
+        }
+    }
+
+    /// Insert a column extracted from the carousel at this strip's inner
+    /// (carousel-facing) edge. The new column becomes the focused column
+    /// inside the strip.
+    pub fn add_column_at_inner_edge(&mut self, column: Column<W>) {
+        let insert_idx = match self.side {
+            FixedSide::Left => self.inner_column_count(),
+            FixedSide::Right => 0,
+        };
+        self.inner.add_column(Some(insert_idx), column, false, None);
+        self.inner.set_active_column_idx_static(insert_idx);
+        self.inner.force_view_offset_zero();
+    }
+
+    /// Remove the column at this strip's inner (carousel-facing) edge, ready
+    /// to be inserted back into the carousel. Returns `None` if the strip is
+    /// empty.
+    pub fn remove_innermost_column(&mut self) -> Option<Column<W>> {
+        let n = self.inner_column_count();
+        if n == 0 {
+            return None;
+        }
+        let idx = match self.side {
+            FixedSide::Left => n - 1,
+            FixedSide::Right => 0,
+        };
+        let column = self.inner.remove_column_by_idx(idx, None);
+        self.inner.force_view_offset_zero();
+        Some(column)
+    }
+
     pub fn tiles(&self) -> impl Iterator<Item = &Tile<W>> + '_ {
         self.inner.tiles()
     }
@@ -98,5 +160,27 @@ impl<W: LayoutElement> FixedStrip<W> {
 
     pub fn are_animations_ongoing(&self) -> bool {
         self.inner.are_animations_ongoing()
+    }
+
+    pub fn update_render_elements(&mut self, is_active: bool) {
+        self.inner.update_render_elements(is_active);
+    }
+
+    pub fn render<R: NaruRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
+    ) {
+        if self.is_empty() {
+            return;
+        }
+        // Fixed-left panels render with the carousel's natural column-layout
+        // origin at the workspace's left edge — same place the carousel's
+        // leftmost column would be at view_offset 0. Right-side anchoring
+        // (translating render output by working_area.width - content_width)
+        // is a follow-up.
+        self.inner.render(ctx, xray_pos, focus_ring, push);
     }
 }

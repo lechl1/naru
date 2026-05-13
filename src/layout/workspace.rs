@@ -472,6 +472,15 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating
             .update_render_elements(is_active && self.floating_is_active.get(), view_rect);
 
+        // Fixed-side panels render passively whenever they contain windows
+        // (focus is independent of which layer hosts those windows). Phase 4
+        // of the fixed-panels work refines the active/inactive state once a
+        // proper "panel is focused" notion exists in Workspace.
+        self.fixed_left
+            .update_render_elements(is_active && !self.floating_is_active.get());
+        self.fixed_right
+            .update_render_elements(is_active && !self.floating_is_active.get());
+
         self.shadow.update_render_elements(
             self.view_size,
             true,
@@ -1240,6 +1249,29 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.move_active_window_to_new_column_left()
     }
 
+    /// Extracts the active carousel column and inserts it into `fixed_left`
+    /// at the strip's inner (carousel-facing) edge. Returns false if the
+    /// floating layer is active, the carousel is empty, or the active column
+    /// is not the leftmost — the caller should fall back to its existing
+    /// edge handling in those cases.
+    ///
+    /// Used to implement stack-move overflow from the carousel's left edge
+    /// into the left fixed panel. The OUT-of-strip path (panel inner edge
+    /// back into the carousel) is a follow-up.
+    pub fn move_active_carousel_column_into_left_strip(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        if self.scrolling.is_empty() || self.scrolling.active_column_index() != 0 {
+            return false;
+        }
+        let Some(column) = self.scrolling.remove_active_column() else {
+            return false;
+        };
+        self.fixed_left.add_column_at_inner_edge(column);
+        true
+    }
+
     pub fn move_active_window_to_new_column_right(&mut self) -> bool {
         if self.floating_is_active.get() {
             return false;
@@ -1845,6 +1877,41 @@ impl<W: LayoutElement> Workspace<W> {
         let scrolling_focus_ring = focus_ring && !self.floating_is_active();
         self.scrolling
             .render(ctx, xray_pos, scrolling_focus_ring, &mut |elem| {
+                push(elem.into())
+            });
+    }
+
+    /// Renders the left fixed-side panel on top of the carousel. Empty strip
+    /// produces no elements.
+    pub fn render_fixed_left<R: NaruRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
+    ) {
+        let strip_focus_ring = focus_ring && !self.floating_is_active();
+        self.fixed_left
+            .render(ctx, xray_pos, strip_focus_ring, &mut |elem| {
+                push(elem.into())
+            });
+    }
+
+    /// Renders the right fixed-side panel on top of the carousel. Empty
+    /// strip produces no elements. The right-side anchor (translating
+    /// output to the workspace's right edge) is a follow-up — for now this
+    /// renders at the left-anchored origin same as the left strip, so it is
+    /// only visually correct once that anchor work lands.
+    pub fn render_fixed_right<R: NaruRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
+    ) {
+        let strip_focus_ring = focus_ring && !self.floating_is_active();
+        self.fixed_right
+            .render(ctx, xray_pos, strip_focus_ring, &mut |elem| {
                 push(elem.into())
             });
     }
