@@ -9,11 +9,12 @@
 //! Windows enter a strip only via stack-move overflow at the carousel's
 //! left/right edges. Cross-strip moves route through the carousel multi-step.
 //! The strip's screen position is anchored to one workspace edge (left or
-//! right); panel width is `sum(column.width) + gaps` and is zero while empty.
+//! right). For the right side the anchor offset is rebuilt after every
+//! content change so columns always pack against the workspace's right edge.
 
 use std::rc::Rc;
 
-use smithay::utils::{Logical, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::scrolling::{Column, ScrollingSpace, ScrollingSpaceRenderElement};
 use super::tile::Tile;
@@ -33,9 +34,10 @@ pub enum FixedSide {
 /// A vertical strip of columns pinned to one edge of the workspace.
 ///
 /// Wraps a `ScrollingSpace<W>` running with the carousel disabled. The wrapper
-/// exposes only the operations that make sense for a panel — there is no
-/// public surface for `view_offset` manipulation, scroll animation, or other
-/// carousel-specific behaviour.
+/// caches the workspace's outer working area so it can rebuild the inner
+/// ScrollingSpace's `parent_area` whenever the strip's content width changes
+/// — which is how the right-side strip stays anchored to the workspace's
+/// right edge while still using the carousel's column-width math.
 #[derive(Debug)]
 pub struct FixedStrip<W: LayoutElement> {
     /// Which workspace edge this strip is anchored to.
@@ -46,32 +48,115 @@ pub struct FixedStrip<W: LayoutElement> {
     /// removes through this wrapper so the strip never falls into the
     /// carousel's scroll/center code paths.
     inner: ScrollingSpace<W>,
+
+    /// Cached workspace view size.
+    view_size: Size<f64, Logical>,
+
+    /// Cached outer working area (the workspace's `working_area`, already
+    /// adjusted for layer-shell exclusive zones). Used as the base from
+    /// which the side-specific `parent_area` is derived.
+    outer_working_area: Rectangle<f64, Logical>,
+
+    /// Cached output scale.
+    scale: f64,
+
+    /// Cached layout options.
+    options: Rc<Options>,
 }
 
 impl<W: LayoutElement> FixedStrip<W> {
     pub fn new(
         side: FixedSide,
         view_size: Size<f64, Logical>,
-        parent_area: Rectangle<f64, Logical>,
+        outer_working_area: Rectangle<f64, Logical>,
         scale: f64,
         clock: Clock,
         options: Rc<Options>,
     ) -> Self {
+        let inner_parent_area =
+            Self::compute_inner_parent_area(side, outer_working_area, 0.0);
+        let inner =
+            ScrollingSpace::new(view_size, inner_parent_area, scale, clock, options.clone());
         Self {
             side,
-            inner: ScrollingSpace::new(view_size, parent_area, scale, clock, options),
+            inner,
+            view_size,
+            outer_working_area,
+            scale,
+            options,
         }
+    }
+
+    /// Derives the inner ScrollingSpace's `parent_area` from the outer
+    /// workspace working area and this strip's current content width.
+    ///
+    /// For [`FixedSide::Left`] the parent area is unchanged from the outer
+    /// working area — columns naturally lay out starting at the workspace's
+    /// left edge.
+    ///
+    /// For [`FixedSide::Right`] the parent area is shifted right by
+    /// `outer.width - content_width` so columns lay out flush against the
+    /// workspace's right edge while still being sized against the full outer
+    /// width (matching the carousel's column-width semantics).
+    fn compute_inner_parent_area(
+        side: FixedSide,
+        outer: Rectangle<f64, Logical>,
+        content_width: f64,
+    ) -> Rectangle<f64, Logical> {
+        match side {
+            FixedSide::Left => outer,
+            FixedSide::Right => {
+                let offset = (outer.size.w - content_width).max(0.0);
+                Rectangle::new(
+                    Point::from((outer.loc.x + offset, outer.loc.y)),
+                    outer.size,
+                )
+            }
+        }
+    }
+
+    /// Rebuilds the inner ScrollingSpace's `parent_area` so a right-side
+    /// strip stays anchored to the workspace's right edge after any change
+    /// to content width. No-op for left-side strips. Resets the inner
+    /// `view_offset` to zero afterwards so the carousel's
+    /// `animate_view_offset_to_column` side effect inside `update_config`
+    /// never bleeds into the strip.
+    fn refresh_anchor(&mut self) {
+        if self.side == FixedSide::Left {
+            return;
+        }
+        let new_parent_area = Self::compute_inner_parent_area(
+            self.side,
+            self.outer_working_area,
+            self.inner.content_width(),
+        );
+        self.inner.update_config(
+            self.view_size,
+            new_parent_area,
+            self.scale,
+            self.options.clone(),
+        );
+        self.inner.force_view_offset_zero();
     }
 
     pub fn update_config(
         &mut self,
         view_size: Size<f64, Logical>,
-        parent_area: Rectangle<f64, Logical>,
+        outer_working_area: Rectangle<f64, Logical>,
         scale: f64,
         options: Rc<Options>,
     ) {
+        self.view_size = view_size;
+        self.outer_working_area = outer_working_area;
+        self.scale = scale;
+        self.options = options.clone();
+        let inner_parent_area = Self::compute_inner_parent_area(
+            self.side,
+            outer_working_area,
+            self.inner.content_width(),
+        );
         self.inner
-            .update_config(view_size, parent_area, scale, options);
+            .update_config(view_size, inner_parent_area, scale, options);
         self.inner.force_view_offset_zero();
     }
 
@@ -94,25 +179,14 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// the carousel should hand the column back to it instead of moving
     /// within the strip.
     pub fn focused_column_is_at_inner_edge(&self) -> bool {
-        let n = self.inner_column_count();
+        let n = self.inner.column_count();
         if n == 0 {
             return false;
         }
+        let active = self.inner.active_column_index();
         match self.side {
-            FixedSide::Left => self.inner_active_column_idx() == Some(n - 1),
-            FixedSide::Right => self.inner_active_column_idx() == Some(0),
-        }
-    }
-
-    fn inner_column_count(&self) -> usize {
-        self.inner.column_count()
-    }
-
-    fn inner_active_column_idx(&self) -> Option<usize> {
-        if self.is_empty() {
-            None
-        } else {
-            Some(self.inner.active_column_index())
+            FixedSide::Left => active == n - 1,
+            FixedSide::Right => active == 0,
         }
     }
 
@@ -121,19 +195,20 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// inside the strip.
     pub fn add_column_at_inner_edge(&mut self, column: Column<W>) {
         let insert_idx = match self.side {
-            FixedSide::Left => self.inner_column_count(),
+            FixedSide::Left => self.inner.column_count(),
             FixedSide::Right => 0,
         };
         self.inner.add_column(Some(insert_idx), column, false, None);
         self.inner.set_active_column_idx_static(insert_idx);
         self.inner.force_view_offset_zero();
+        self.refresh_anchor();
     }
 
     /// Remove the column at this strip's inner (carousel-facing) edge, ready
     /// to be inserted back into the carousel. Returns `None` if the strip is
     /// empty.
     pub fn remove_innermost_column(&mut self) -> Option<Column<W>> {
-        let n = self.inner_column_count();
+        let n = self.inner.column_count();
         if n == 0 {
             return None;
         }
@@ -143,6 +218,7 @@ impl<W: LayoutElement> FixedStrip<W> {
         };
         let column = self.inner.remove_column_by_idx(idx, None);
         self.inner.force_view_offset_zero();
+        self.refresh_anchor();
         Some(column)
     }
 
@@ -176,11 +252,8 @@ impl<W: LayoutElement> FixedStrip<W> {
         if self.is_empty() {
             return;
         }
-        // Fixed-left panels render with the carousel's natural column-layout
-        // origin at the workspace's left edge — same place the carousel's
-        // leftmost column would be at view_offset 0. Right-side anchoring
-        // (translating render output by working_area.width - content_width)
-        // is a follow-up.
+        // Position is encoded in the inner ScrollingSpace's `parent_area`,
+        // which `refresh_anchor` keeps up to date on the right side.
         self.inner.render(ctx, xray_pos, focus_ring, push);
     }
 }
