@@ -76,6 +76,7 @@ use crate::utils::{
 use crate::window::ResolvedWindowRules;
 
 pub mod closing_window;
+pub mod fixed_strip;
 pub mod floating;
 pub mod focus_ring;
 pub mod insert_hint_element;

@@ -17,6 +17,7 @@ use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
+use super::fixed_strip::{FixedSide, FixedStrip};
 use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
@@ -81,6 +82,17 @@ pub struct Workspace<W: LayoutElement> {
 
     /// The floating layout.
     floating: FloatingSpace<W>,
+
+    /// Fixed panel pinned to the left edge of the working area.
+    ///
+    /// Windows only enter via stack-move overflow at the carousel's left edge.
+    /// While empty, occupies zero width and renders nothing.
+    fixed_left: FixedStrip<W>,
+
+    /// Fixed panel pinned to the right edge of the working area.
+    ///
+    /// Symmetric counterpart to [`fixed_left`](Self::fixed_left).
+    fixed_right: FixedStrip<W>,
 
     /// Whether the floating layout is active instead of the scrolling layout.
     floating_is_active: FloatingActive,
@@ -282,12 +294,32 @@ impl<W: LayoutElement> Workspace<W> {
             options.clone(),
         );
 
+        let fixed_left = FixedStrip::new(
+            FixedSide::Left,
+            view_size,
+            working_area,
+            scale.fractional_scale(),
+            clock.clone(),
+            options.clone(),
+        );
+
+        let fixed_right = FixedStrip::new(
+            FixedSide::Right,
+            view_size,
+            working_area,
+            scale.fractional_scale(),
+            clock.clone(),
+            options.clone(),
+        );
+
         let shadow_config =
             compute_workspace_shadow_config(options.overview.workspace_shadow, view_size);
 
         Self {
             scrolling,
             floating,
+            fixed_left,
+            fixed_right,
             floating_is_active: FloatingActive::No,
             original_output,
             scale,
@@ -346,12 +378,32 @@ impl<W: LayoutElement> Workspace<W> {
             options.clone(),
         );
 
+        let fixed_left = FixedStrip::new(
+            FixedSide::Left,
+            view_size,
+            working_area,
+            scale.fractional_scale(),
+            clock.clone(),
+            options.clone(),
+        );
+
+        let fixed_right = FixedStrip::new(
+            FixedSide::Right,
+            view_size,
+            working_area,
+            scale.fractional_scale(),
+            clock.clone(),
+            options.clone(),
+        );
+
         let shadow_config =
             compute_workspace_shadow_config(options.overview.workspace_shadow, view_size);
 
         Self {
             scrolling,
             floating,
+            fixed_left,
+            fixed_right,
             floating_is_active: FloatingActive::No,
             output: None,
             scale,
@@ -397,10 +449,15 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn advance_animations(&mut self) {
         self.scrolling.advance_animations();
         self.floating.advance_animations();
+        self.fixed_left.advance_animations();
+        self.fixed_right.advance_animations();
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.scrolling.are_animations_ongoing() || self.floating.are_animations_ongoing()
+        self.scrolling.are_animations_ongoing()
+            || self.floating.are_animations_ongoing()
+            || self.fixed_left.are_animations_ongoing()
+            || self.fixed_right.are_animations_ongoing()
     }
 
     pub fn are_transitions_ongoing(&self) -> bool {
@@ -446,6 +503,20 @@ impl<W: LayoutElement> Workspace<W> {
             options.clone(),
         );
 
+        self.fixed_left.update_config(
+            self.view_size,
+            self.working_area,
+            self.scale.fractional_scale(),
+            options.clone(),
+        );
+
+        self.fixed_right.update_config(
+            self.view_size,
+            self.working_area,
+            self.scale.fractional_scale(),
+            options.clone(),
+        );
+
         let shadow_config =
             compute_workspace_shadow_config(options.overview.workspace_shadow, self.view_size);
         self.shadow.update_config(shadow_config);
@@ -483,13 +554,17 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn tiles(&self) -> impl Iterator<Item = &Tile<W>> + '_ {
         let scrolling = self.scrolling.tiles();
         let floating = self.floating.tiles();
-        scrolling.chain(floating)
+        let fixed_left = self.fixed_left.tiles();
+        let fixed_right = self.fixed_right.tiles();
+        scrolling.chain(floating).chain(fixed_left).chain(fixed_right)
     }
 
     pub fn tiles_mut(&mut self) -> impl Iterator<Item = &mut Tile<W>> + '_ {
         let scrolling = self.scrolling.tiles_mut();
         let floating = self.floating.tiles_mut();
-        scrolling.chain(floating)
+        let fixed_left = self.fixed_left.tiles_mut();
+        let fixed_right = self.fixed_right.tiles_mut();
+        scrolling.chain(floating).chain(fixed_left).chain(fixed_right)
     }
 
     pub fn is_floating(&self, id: &W::Id) -> bool {
@@ -1212,6 +1287,14 @@ impl<W: LayoutElement> Workspace<W> {
             return false;
         }
         self.scrolling.move_active_window_to_below_neighbor_overlap()
+    }
+
+    pub fn move_active_window_to_neighbor_column_as_new_row(&mut self, to_left: bool) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        self.scrolling
+            .move_active_window_to_neighbor_column_as_new_row(to_left)
     }
 
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
