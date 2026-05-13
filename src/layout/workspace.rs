@@ -43,6 +43,16 @@ use crate::utils::{
 };
 use crate::window::ResolvedWindowRules;
 
+/// Logical-pixel width of the drop-shadow bar drawn on the carousel-facing
+/// inner edge of each populated fixed-side panel.
+const FIXED_PANEL_SHADOW_WIDTH: f64 = 8.0;
+
+/// Alpha multiplier applied to the (otherwise opaque black) shadow bar.
+const FIXED_PANEL_SHADOW_ALPHA: f32 = 0.45;
+
+/// Color of the fixed-panel drop shadow before alpha multiplication.
+const FIXED_PANEL_SHADOW_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
 /// True when the view's aspect ratio is ≥ 21:9 (covers 21:9 ≈ 2.333 and 32:10 = 3.2).
 fn is_ultrawide_view(view_size: Size<f64, Logical>) -> bool {
     let h = view_size.h.max(1.0);
@@ -146,6 +156,12 @@ pub struct Workspace<W: LayoutElement> {
     /// This workspace's background.
     background_buffer: SolidColorBuffer,
 
+    /// Shared black buffer used to draw a thin drop-shadow bar on the
+    /// carousel-facing inner edge of each populated fixed-side panel. Sized
+    /// to `(FIXED_PANEL_SHADOW_WIDTH, view_size.h)` and reused for both
+    /// strips at render time.
+    fixed_panel_shadow_buffer: SolidColorBuffer,
+
     /// Clock for driving animations.
     pub(super) clock: Clock,
 
@@ -198,6 +214,7 @@ naru_render_elements! {
     WorkspaceRenderElement<R> => {
         Scrolling = ScrollingSpaceRenderElement<R>,
         Floating = FloatingSpaceRenderElement<R>,
+        SolidColor = SolidColorRenderElement,
     }
 }
 
@@ -337,6 +354,10 @@ impl<W: LayoutElement> Workspace<W> {
             working_area,
             shadow: Shadow::new(shadow_config),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
+            fixed_panel_shadow_buffer: SolidColorBuffer::new(
+                Size::from((FIXED_PANEL_SHADOW_WIDTH, view_size.h)),
+                FIXED_PANEL_SHADOW_COLOR,
+            ),
             output: Some(output),
             clock,
             base_options,
@@ -423,6 +444,10 @@ impl<W: LayoutElement> Workspace<W> {
             working_area,
             shadow: Shadow::new(shadow_config),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
+            fixed_panel_shadow_buffer: SolidColorBuffer::new(
+                Size::from((FIXED_PANEL_SHADOW_WIDTH, view_size.h)),
+                FIXED_PANEL_SHADOW_COLOR,
+            ),
             clock,
             base_options,
             options,
@@ -702,6 +727,8 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.background_buffer.resize(size);
+        self.fixed_panel_shadow_buffer
+            .resize(Size::from((FIXED_PANEL_SHADOW_WIDTH, size.h)));
 
         if scale_transform_changed {
             for window in self.windows() {
@@ -1953,6 +1980,47 @@ impl<W: LayoutElement> Workspace<W> {
             .render(ctx, xray_pos, scrolling_focus_ring, &mut |elem| {
                 push(elem.into())
             });
+    }
+
+    /// Emits a thin black drop-shadow bar on the carousel-facing inner edge
+    /// of each populated fixed-side panel. Drawn between
+    /// [`render_scrolling`](Self::render_scrolling) and the per-strip render
+    /// methods so the shadow sits on top of the carousel but beneath the
+    /// strip's own windows. Empty strips contribute nothing.
+    pub fn render_fixed_strip_shadows<R: NaruRenderer>(
+        &self,
+        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
+    ) {
+        let working_area = self.working_area;
+        let shadow_width = FIXED_PANEL_SHADOW_WIDTH;
+        let alpha = FIXED_PANEL_SHADOW_ALPHA;
+
+        if !self.fixed_left.is_empty() {
+            // Drop shadow sits just to the right of the left strip's inner
+            // edge, extending into the carousel.
+            let x = working_area.loc.x + self.fixed_left.width();
+            let elem = SolidColorRenderElement::from_buffer(
+                &self.fixed_panel_shadow_buffer,
+                Point::from((x, working_area.loc.y)),
+                alpha,
+                Kind::Unspecified,
+            );
+            push(elem.into());
+        }
+
+        if !self.fixed_right.is_empty() {
+            // Drop shadow sits just to the left of the right strip's inner
+            // edge, extending into the carousel.
+            let strip_left_x = working_area.loc.x + working_area.size.w - self.fixed_right.width();
+            let x = strip_left_x - shadow_width;
+            let elem = SolidColorRenderElement::from_buffer(
+                &self.fixed_panel_shadow_buffer,
+                Point::from((x, working_area.loc.y)),
+                alpha,
+                Kind::Unspecified,
+            );
+            push(elem.into());
+        }
     }
 
     /// Renders the left fixed-side panel on top of the carousel. Empty strip

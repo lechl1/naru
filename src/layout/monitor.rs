@@ -1749,7 +1749,10 @@ impl<W: LayoutElement> Monitor<W> {
 
             // Fixed-side panels render on top of the carousel so the
             // carousel's position relative to the screen stays pinned as
-            // panels grow / shrink.
+            // panels grow / shrink. The drop-shadow bars draw between
+            // carousel and strips so each populated panel reads as a
+            // raised surface over the carousel beneath.
+            ws.render_fixed_strip_shadows(push!());
             ws.render_fixed_left(ctx.r(), xray_pos, focus_ring, push!());
             ws.render_fixed_right(ctx.r(), xray_pos, focus_ring, push!());
         }
