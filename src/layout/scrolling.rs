@@ -2199,6 +2199,126 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         true
     }
 
+    /// Cross-column stack-move primitive: lift the active window out of its
+    /// column and insert it as a NEW row (tile) in the neighbor column on the
+    /// requested side. The new row's index is chosen to match the source
+    /// tile's vertical center against the target column's existing tile
+    /// centers — so a window that was high in its column lands high in the
+    /// neighbor, and one near the bottom lands near the bottom.
+    ///
+    /// Unlike `move_active_window_to_left_neighbor_overlap`, the moved window
+    /// never joins an existing stacked tab; overlapping is reserved for
+    /// within-column stack-move alternation. Returns `false` when there is no
+    /// neighbor on the requested side.
+    pub fn move_active_window_to_neighbor_column_as_new_row(&mut self, to_left: bool) -> bool {
+        let source_col_idx = self.active_column_idx;
+        let raw_target_idx = if to_left {
+            if source_col_idx == 0 {
+                return false;
+            }
+            source_col_idx - 1
+        } else {
+            if source_col_idx + 1 >= self.columns.len() {
+                return false;
+            }
+            source_col_idx + 1
+        };
+        let source_tile_idx = self.columns[source_col_idx].active_tile_idx;
+
+        // Positional awareness: walk the target column tiles top-to-bottom and stop at
+        // the first whose vertical center sits BELOW the source tile's center. That
+        // index becomes the insertion slot. If the source is below every target row,
+        // append at the end. Both columns share the same working-area y origin, so the
+        // column-local offsets compare directly.
+        let source_center_y = {
+            let col = &self.columns[source_col_idx];
+            col.tile_offset(source_tile_idx).y
+                + col.tiles[source_tile_idx].tile_size().h / 2.
+        };
+        let target_insert_idx = {
+            let col = &self.columns[raw_target_idx];
+            col.tiles
+                .iter()
+                .enumerate()
+                .find_map(|(i, tile)| {
+                    let center = col.tile_offset(i).y + tile.tile_size().h / 2.;
+                    (source_center_y < center).then_some(i)
+                })
+                .unwrap_or(col.tiles.len())
+        };
+
+        let source_is_single_window =
+            self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
+        let source_was_only_tile = self.columns[source_col_idx].tiles.len() == 1;
+        let source_column_removed = source_is_single_window && source_was_only_tile;
+
+        // Snapshot the source tile's pre-move geometry so the new tile can fly from
+        // the source's old screen position instead of popping into existence at the
+        // target.
+        let source_prev_off = self.columns[source_col_idx].tile_offset(source_tile_idx);
+        let source_render_x = self.columns[source_col_idx].render_offset().x;
+        let source_col_x_before = self.column_x(source_col_idx);
+
+        let tile = if source_is_single_window {
+            let removed = self.remove_tile_by_idx(
+                source_col_idx,
+                source_tile_idx,
+                Transaction::new(),
+                Some(self.options.animations.window_movement.0),
+            );
+            removed.tile
+        } else {
+            // Multi-window tile: pop one window, host it in a fresh tile clone.
+            let (view_size, scale, clock, options) = {
+                let st = &self.columns[source_col_idx].tiles[source_tile_idx];
+                (
+                    st.view_size(),
+                    st.scale(),
+                    st.clock.clone(),
+                    st.options.clone(),
+                )
+            };
+            let popped =
+                self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
+            Tile::new(popped, view_size, scale, clock, options)
+        };
+
+        // When a single-tile source column is removed, columns to its right shift left
+        // by one — so the original right neighbor at source_col_idx + 1 now sits at
+        // source_col_idx. Left-neighbor targets are unaffected by that shift.
+        let target_col_idx = if !to_left && source_column_removed {
+            source_col_idx
+        } else {
+            raw_target_idx
+        };
+
+        self.add_tile_to_column(target_col_idx, Some(target_insert_idx), tile, true);
+
+        // Slide the new tile from the source tile's old screen position to its
+        // destination slot. animate_move_from(from) makes the tile render at
+        // `tile_pos + from` at t=0 and decay to `tile_pos` at t=1.
+        let target_col_x_after = self.column_x(target_col_idx);
+        let new_tile_off = self.columns[target_col_idx].tile_offset(target_insert_idx);
+        let target_render_x = self.columns[target_col_idx].render_offset().x;
+
+        // Source's old screen position - target's new screen position.
+        let source_screen_x = source_col_x_before + source_render_x + source_prev_off.x;
+        let target_screen_x = target_col_x_after + target_render_x + new_tile_off.x;
+        let from_x = source_screen_x - target_screen_x;
+        let from_y = source_prev_off.y - new_tile_off.y;
+        self.columns[target_col_idx].tiles[target_insert_idx]
+            .animate_move_from(Point::from((from_x, from_y)));
+
+        // Multi-window source: the source tile's window stack lost one entry. Refresh
+        // its sizing/cache so the next column_x pass sees consistent state.
+        if !source_is_single_window {
+            self.columns[source_col_idx].update_tile_sizes(false);
+            self.data[source_col_idx].update(&self.columns[source_col_idx]);
+        }
+
+        true
+    }
+
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
         if self.columns.is_empty() {
             return;
@@ -2825,6 +2945,26 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.animate_view_offset(self.active_column_idx, new_offset);
     }
 
+    /// After updating `self.data[col_idx].width` to a new value, slide every
+    /// column to the right of `col_idx` from its pre-resize x toward its new x.
+    /// Without this, neighbors snap to the new layout the instant the cached
+    /// width refreshes, even though the resized tile itself animates its size —
+    /// so the neighbor visibly jumps instead of riding the same animation.
+    ///
+    /// `column_x(i)` for `i > col_idx` only depends on `data[col_idx].width`,
+    /// so the per-column position delta is uniformly `(new_width - old_width)`
+    /// and we don't need to recompute `column_x` for each neighbor.
+    fn animate_neighbors_after_width_change(&mut self, col_idx: usize, old_width: f64) {
+        let new_width = self.data[col_idx].width;
+        let delta = old_width - new_width;
+        if delta == 0. {
+            return;
+        }
+        for col in self.columns.iter_mut().skip(col_idx + 1) {
+            col.animate_move_from(delta);
+        }
+    }
+
     // HACK: pass a self.data iterator in manually as a workaround for the lack of method partial
     // borrowing. Note that this method's return value does not borrow the entire &Self!
     fn column_xs(&self, data: impl Iterator<Item = ColumnData>) -> impl Iterator<Item = f64> {
@@ -3114,13 +3254,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let col_idx = self.active_column_idx;
+        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.toggle_width(None, forwards);
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
-        // Refresh cached column width so the workspace wrapper's auto_fit/center call
-        // sees the post-toggle width and recentres correctly when columns now fit.
-        self.data[col_idx].update(&self.columns[col_idx]);
+        // Use the *expected* (pending-configure) width rather than the committed
+        // `tile.tile_size()`, which still reports the pre-resize size until the
+        // client ack's. Otherwise auto_fit_or_center positions the view based on
+        // the stale width, producing a visible shift before the client commits.
+        self.data[col_idx].width = self.columns[col_idx].expected_width();
+        self.animate_neighbors_after_width_change(col_idx, old_width);
     }
 
     pub fn toggle_full_width(&mut self) {
@@ -3129,11 +3273,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let col_idx = self.active_column_idx;
+        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.toggle_full_width();
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
-        self.data[col_idx].update(&self.columns[col_idx]);
+        self.data[col_idx].width = self.columns[col_idx].expected_width();
+        self.animate_neighbors_after_width_change(col_idx, old_width);
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
@@ -3156,20 +3302,19 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             (self.active_column_idx, None)
         };
 
+        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.set_column_width(change, tile_idx, true);
         cancel_resize_for_column(&mut self.interactive_resize, col);
 
         // Refresh the cached column width so `column_x` (and downstream consumers like
         // `auto_fit_or_center_view_offset`, which workspace.rs calls right after this)
-        // see the post-resize width.
-        //
-        // Without this, the cached `self.data[col_idx].width` stays at the pre-resize
-        // value, `total_content` is stale, and the centering math positions the view
-        // as though the columns were still the old size. The visible result: zoom in
-        // shifts windows right (centering target underestimates new total → view too
-        // far left), zoom out shifts windows left (symmetric).
-        self.data[col_idx].update(&self.columns[col_idx]);
+        // see the post-resize width. Use `expected_width()` (pending configure) rather
+        // than the committed `tile.tile_size()` so the very first auto_fit pass doesn't
+        // run with the stale pre-resize size — otherwise the view visibly shifts to one
+        // side before settling once the client commits the new size.
+        self.data[col_idx].width = self.columns[col_idx].expected_width();
+        self.animate_neighbors_after_width_change(col_idx, old_width);
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
@@ -3240,13 +3385,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             (self.active_column_idx, None)
         };
 
+        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.toggle_width(tile_idx, forwards);
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
-        // Refresh cached column width so the workspace wrapper's auto_fit/center call
-        // sees the post-toggle width.
-        self.data[col_idx].update(&self.columns[col_idx]);
+        // Use `expected_width()` to avoid the pre-ack-shift; see `set_window_width`
+        // for the full rationale.
+        self.data[col_idx].width = self.columns[col_idx].expected_width();
+        self.animate_neighbors_after_width_change(col_idx, old_width);
     }
 
     pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
@@ -4184,12 +4331,20 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // `self.data[col_idx].width`. Refresh it now so subsequent layout math sees the
         // post-resize width, then re-run auto-fit/center so the view recentres if the
         // total content shrunk to fit the workspace.
+        //
+        // Use `expected_width` here rather than `data.update(column)` (which reads the
+        // committed `tile_size`). The Wayland client typically hasn't ack'd the resize
+        // yet at this point, so the committed size still reports the PRE-resize width —
+        // centering on that math shifts the view by ~half the resize delta and leaves
+        // the cluster visibly off after the resize ends.
         if let Some(col_idx) = self
             .columns
             .iter()
             .position(|col| col.contains(&resized_window))
         {
-            self.data[col_idx].update(&self.columns[col_idx]);
+            let old_width = self.data[col_idx].width;
+            self.data[col_idx].width = self.columns[col_idx].expected_width();
+            self.animate_neighbors_after_width_change(col_idx, old_width);
         }
         self.auto_fit_or_center_view_offset();
     }
@@ -5287,6 +5442,28 @@ impl<W: LayoutElement> Column<W> {
             .data
             .iter()
             .map(|data| NotNan::new(data.size.w).unwrap())
+            .max()
+            .map(NotNan::into_inner)
+            .unwrap();
+
+        if self.display_mode == ColumnDisplay::Tabbed && self.sizing_mode().is_normal() {
+            let extra_size = self.tab_indicator.extra_size(self.tiles.len(), self.scale);
+            tiles_width += extra_size.w;
+        }
+
+        tiles_width
+    }
+
+    /// Column width based on each tile's EXPECTED (pending-configure) size rather than its
+    /// last-committed size. Used by layout math that needs to position columns at their
+    /// post-resize widths before the Wayland client has acknowledged the configure (e.g.
+    /// re-centering after an interactive column resize ends — otherwise the view-offset
+    /// gets locked to the pre-resize width and lands ~half the resize delta off-center).
+    fn expected_width(&self) -> f64 {
+        let mut tiles_width = self
+            .tiles
+            .iter()
+            .map(|tile| NotNan::new(tile.tile_expected_or_current_size().w).unwrap())
             .max()
             .map(NotNan::into_inner)
             .unwrap();

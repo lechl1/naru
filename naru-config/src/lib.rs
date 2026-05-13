@@ -83,6 +83,13 @@ pub struct Config {
     /// (default), those actions parse and dispatch but become no-ops, so the bound keys are
     /// inert until the user opts in by adding `enable-stacking` to their config.
     pub enable_stacking: bool,
+    /// Toggles the first-step routing of horizontal cross-column stack moves
+    /// (`MoveWindow{Left,Right}Stacked`). When false (default), the moved window is always
+    /// inserted as a NEW row in the neighbour column. When true, a single-window source
+    /// that IS its whole column instead overlaps onto the neighbour's active tile (the
+    /// legacy "merge into neighbour column" behaviour). Vertical within-column moves are
+    /// unaffected.
+    pub stacking_move_overlap_first: bool,
     pub cursor: Cursor,
     pub screenshot_path: ScreenshotPath,
     pub clipboard: Clipboard,
@@ -327,6 +334,11 @@ where
 
                 "enable-stacking" => {
                     config.borrow_mut().enable_stacking = Flag::decode_node(node, ctx)?.0
+                }
+
+                "stacking-move-overlap-first" => {
+                    config.borrow_mut().stacking_move_overlap_first =
+                        Flag::decode_node(node, ctx)?.0
                 }
 
                 "screenshot-path" => {
@@ -1649,6 +1661,7 @@ mod tests {
             },
             prefer_no_csd: true,
             enable_stacking: false,
+            stacking_move_overlap_first: false,
             cursor: Cursor {
                 xcursor_theme: "breeze_cursors",
                 xcursor_size: 16,

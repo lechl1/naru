@@ -433,6 +433,11 @@ pub struct Options {
     /// User opt-in for the alternating stacking move actions (mirror of
     /// `naru_config::Config::enable_stacking`).
     pub enable_stacking: bool,
+    /// Mirror of `naru_config::Config::stacking_move_overlap_first`. When true, the
+    /// first horizontal cross-column stack-move on a single-window source that IS its
+    /// whole column overlaps onto the neighbour's tile (legacy behaviour). When false
+    /// (default), it always inserts as a new row in the neighbour column.
+    pub stacking_move_overlap_first: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -694,6 +699,7 @@ impl Options {
             disable_transactions: config.debug.disable_transactions,
             deactivate_unfocused_windows: config.debug.deactivate_unfocused_windows,
             enable_stacking: config.enable_stacking,
+            stacking_move_overlap_first: config.stacking_move_overlap_first,
         }
     }
 
@@ -2202,23 +2208,25 @@ impl<W: LayoutElement> Layout<W> {
             self.stacking_move_state = None;
             return;
         };
-        // Horizontal stacking-move routing:
-        //   - Source is a single-window tile AND its column has only that tile → the source
-        //     IS its own column entirely. Pulling it into a "new column" at the same slot
-        //     would be a visual no-op (remove-then-insert at the same position), so stack it
-        //     onto the neighbor's tile instead — matching the user's mental model of "merge
-        //     into the neighbor column" in a one-window-per-column layout.
-        //   - Anything else (multi-tile column, or multi-window stack) → pull the window
-        //     into its own new column. The new-column path safely handles single-window
-        //     sources in multi-tile columns by removing the now-empty source tile.
-        let want_overlap = focused_stack_len == 1 && column_tile_count == 1;
+        // Default routing inserts the window as a NEW row in the left-neighbor column
+        // (positionally aware on the y-axis). When the user opts into
+        // `stacking-move-overlap-first`, restore the legacy first-step semantics: a
+        // single-window source that IS its whole column overlaps onto the neighbour's
+        // tile instead (avoids a visual no-op of remove-then-insert at the same slot).
+        let want_overlap = self.options.stacking_move_overlap_first
+            && focused_stack_len == 1
+            && column_tile_count == 1;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
         let success = if want_overlap {
             workspace.move_active_window_to_left_neighbor_overlap()
+        } else if workspace.move_active_window_to_neighbor_column_as_new_row(true) {
+            true
         } else {
+            // Workspace edge with no left neighbour: fall back to creating a new column
+            // on the left so the leftmost window can still escape further left.
             workspace.move_active_window_to_new_column_left()
         };
         if success {
@@ -2242,16 +2250,18 @@ impl<W: LayoutElement> Layout<W> {
             self.stacking_move_state = None;
             return;
         };
-        // See `move_window_left_stacked` for the routing rationale. Single-window tile that
-        // IS its whole column → stack onto the right neighbor; everything else → new column
-        // to the right.
-        let want_overlap = focused_stack_len == 1 && column_tile_count == 1;
+        // See `move_window_left_stacked` for the routing rationale (mirrored).
+        let want_overlap = self.options.stacking_move_overlap_first
+            && focused_stack_len == 1
+            && column_tile_count == 1;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
         let success = if want_overlap {
             workspace.move_active_window_to_right_neighbor_overlap()
+        } else if workspace.move_active_window_to_neighbor_column_as_new_row(false) {
+            true
         } else {
             workspace.move_active_window_to_new_column_right()
         };
