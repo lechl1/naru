@@ -97,6 +97,14 @@ pub struct Workspace<W: LayoutElement> {
     /// Whether the floating layout is active instead of the scrolling layout.
     floating_is_active: FloatingActive,
 
+    /// Lightweight active-layer signal for fixed-side panels. Set to
+    /// `Some(side)` immediately after a stack-move IN succeeds on the matching
+    /// side and cleared on the matching stack-move OUT. Lets the layout's
+    /// stack-move handlers route a subsequent move on the opposite-direction
+    /// hotkey back to the carousel without depending on the full
+    /// active-layer refactor (which would replace `FloatingActive`).
+    active_fixed_side: Option<FixedSide>,
+
     /// The original output of this workspace.
     ///
     /// Most of the time this will be the workspace's current output, however, after an output
@@ -321,6 +329,7 @@ impl<W: LayoutElement> Workspace<W> {
             fixed_left,
             fixed_right,
             floating_is_active: FloatingActive::No,
+            active_fixed_side: None,
             original_output,
             scale,
             transform: output.current_transform(),
@@ -405,6 +414,7 @@ impl<W: LayoutElement> Workspace<W> {
             fixed_left,
             fixed_right,
             floating_is_active: FloatingActive::No,
+            active_fixed_side: None,
             output: None,
             scale,
             transform: Transform::Normal,
@@ -1256,8 +1266,8 @@ impl<W: LayoutElement> Workspace<W> {
     /// edge handling in those cases.
     ///
     /// Used to implement stack-move overflow from the carousel's left edge
-    /// into the left fixed panel. The OUT-of-strip path (panel inner edge
-    /// back into the carousel) is a follow-up.
+    /// into the left fixed panel. Sets `active_fixed_side = Some(Left)` so
+    /// the next stack-move on the opposite hotkey routes back out.
     pub fn move_active_carousel_column_into_left_strip(&mut self) -> bool {
         if self.floating_is_active.get() {
             return false;
@@ -1269,6 +1279,29 @@ impl<W: LayoutElement> Workspace<W> {
             return false;
         };
         self.fixed_left.add_column_at_inner_edge(column);
+        self.active_fixed_side = Some(FixedSide::Left);
+        true
+    }
+
+    /// Reverses [`move_active_carousel_column_into_left_strip`]: extracts the
+    /// strip's innermost (carousel-facing) column and inserts it back into
+    /// the carousel at the new leftmost slot. Returns false unless the layout
+    /// is currently signalling that `fixed_left` is the active layer (i.e. a
+    /// recent IN move has not been countered by other focus changes).
+    pub fn move_active_strip_column_back_to_carousel_left(&mut self) -> bool {
+        if self.active_fixed_side != Some(FixedSide::Left) {
+            return false;
+        }
+        let Some(column) = self.fixed_left.remove_innermost_column() else {
+            self.active_fixed_side = None;
+            return false;
+        };
+        // Insert at carousel index 0 so the returned column becomes the new
+        // leftmost. `activate=true` makes the carousel focus the inserted
+        // column, mirroring naru's existing "focus follows the moved window"
+        // behaviour.
+        self.scrolling.add_column(Some(0), column, true, None);
+        self.active_fixed_side = None;
         true
     }
 

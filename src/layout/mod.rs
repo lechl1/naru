@@ -2250,6 +2250,18 @@ impl<W: LayoutElement> Layout<W> {
             self.move_right();
             return;
         }
+
+        // OUT path: a window currently inside the left fixed panel rides
+        // back into the carousel on this hotkey, before the regular
+        // active-tile lookup (whose `focused_id` is otherwise the carousel's
+        // post-extraction leftmost — i.e. a different window).
+        if let Some(workspace) = self.active_workspace_mut() {
+            if workspace.move_active_strip_column_back_to_carousel_left() {
+                self.stacking_move_state = None;
+                return;
+            }
+        }
+
         let direction = StackingMoveDirection::Right;
         let Some((focused_id, focused_stack_len, column_tile_count)) =
             self.active_focused_tile_info()
