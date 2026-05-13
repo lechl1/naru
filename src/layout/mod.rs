@@ -2202,6 +2202,17 @@ impl<W: LayoutElement> Layout<W> {
             self.move_left();
             return;
         }
+
+        // OUT path: a window currently inside the right fixed panel rides
+        // back into the carousel on this hotkey. Symmetric with the left-OUT
+        // check at the top of `move_window_right_stacked`.
+        if let Some(workspace) = self.active_workspace_mut() {
+            if workspace.move_active_strip_column_back_to_carousel_right() {
+                self.stacking_move_state = None;
+                return;
+            }
+        }
+
         let direction = StackingMoveDirection::Left;
         let Some((focused_id, focused_stack_len, column_tile_count)) =
             self.active_focused_tile_info()
@@ -2280,6 +2291,10 @@ impl<W: LayoutElement> Layout<W> {
         let success = if want_overlap {
             workspace.move_active_window_to_right_neighbor_overlap()
         } else if workspace.move_active_window_to_neighbor_column_as_new_row(false) {
+            true
+        } else if workspace.move_active_carousel_column_into_right_strip() {
+            // Carousel's rightmost edge: mirror of left-IN — extract the
+            // active column into `fixed_right` at its inner edge.
             true
         } else {
             workspace.move_active_window_to_new_column_right()

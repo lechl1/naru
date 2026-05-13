@@ -1305,6 +1305,47 @@ impl<W: LayoutElement> Workspace<W> {
         true
     }
 
+    /// Mirror of [`move_active_carousel_column_into_left_strip`] for the
+    /// right edge: extracts the active carousel column and inserts it into
+    /// `fixed_right` at the strip's inner (carousel-facing) edge. Returns
+    /// false unless the active carousel column is the rightmost.
+    pub fn move_active_carousel_column_into_right_strip(&mut self) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        let last_idx = match self.scrolling.column_count().checked_sub(1) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        if self.scrolling.active_column_index() != last_idx {
+            return false;
+        }
+        let Some(column) = self.scrolling.remove_active_column() else {
+            return false;
+        };
+        self.fixed_right.add_column_at_inner_edge(column);
+        self.active_fixed_side = Some(FixedSide::Right);
+        true
+    }
+
+    /// Reverse of [`move_active_carousel_column_into_right_strip`]: extracts
+    /// `fixed_right`'s innermost column and re-inserts it as the carousel's
+    /// new rightmost. Returns false unless `fixed_right` is the active layer.
+    pub fn move_active_strip_column_back_to_carousel_right(&mut self) -> bool {
+        if self.active_fixed_side != Some(FixedSide::Right) {
+            return false;
+        }
+        let Some(column) = self.fixed_right.remove_innermost_column() else {
+            self.active_fixed_side = None;
+            return false;
+        };
+        // Append after the current carousel columns (i.e. new rightmost).
+        let idx = self.scrolling.column_count();
+        self.scrolling.add_column(Some(idx), column, true, None);
+        self.active_fixed_side = None;
+        true
+    }
+
     pub fn move_active_window_to_new_column_right(&mut self) -> bool {
         if self.floating_is_active.get() {
             return false;
