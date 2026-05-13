@@ -621,17 +621,41 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn active_window(&self) -> Option<&W> {
         if self.floating_is_active.get() {
-            self.floating.active_window()
-        } else {
-            self.scrolling.active_window()
+            return self.floating.active_window();
+        }
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => self
+                .fixed_left
+                .active_window()
+                .or_else(|| self.scrolling.active_window()),
+            Some(FixedSide::Right) => self
+                .fixed_right
+                .active_window()
+                .or_else(|| self.scrolling.active_window()),
+            None => self.scrolling.active_window(),
         }
     }
 
     pub fn active_window_mut(&mut self) -> Option<&mut W> {
         if self.floating_is_active.get() {
-            self.floating.active_window_mut()
-        } else {
-            self.scrolling.active_window_mut()
+            return self.floating.active_window_mut();
+        }
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => {
+                if self.fixed_left.is_empty() {
+                    self.scrolling.active_window_mut()
+                } else {
+                    self.fixed_left.active_window_mut()
+                }
+            }
+            Some(FixedSide::Right) => {
+                if self.fixed_right.is_empty() {
+                    self.scrolling.active_window_mut()
+                } else {
+                    self.fixed_right.active_window_mut()
+                }
+            }
+            None => self.scrolling.active_window_mut(),
         }
     }
 
@@ -1069,17 +1093,72 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn focus_left(&mut self) -> bool {
         if self.floating_is_active.get() {
-            self.floating.focus_left()
-        } else {
-            self.scrolling.focus_left()
+            return self.floating.focus_left();
+        }
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => {
+                // Move further left inside the left strip. At the outer edge
+                // (TODO Phase 6 workspace cross) stop.
+                self.fixed_left.focus_left()
+            }
+            Some(FixedSide::Right) => {
+                // Move left inside the right strip. At its inner edge (the
+                // carousel-facing leftmost column) fall back into the
+                // carousel's rightmost column.
+                if self.fixed_right.focus_left() {
+                    true
+                } else {
+                    self.scrolling.focus_column_last();
+                    self.active_fixed_side = None;
+                    true
+                }
+            }
+            None => {
+                // Focus is in the carousel. Try to move left there; if we're
+                // already at the leftmost carousel column, hop into the left
+                // strip's innermost (carousel-facing) column.
+                if self.scrolling.focus_left() {
+                    true
+                } else if self.fixed_left.focus_innermost() {
+                    self.active_fixed_side = Some(FixedSide::Left);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
     pub fn focus_right(&mut self) -> bool {
         if self.floating_is_active.get() {
-            self.floating.focus_right()
-        } else {
-            self.scrolling.focus_right()
+            return self.floating.focus_right();
+        }
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => {
+                // Move right inside the left strip; at its inner edge
+                // (rightmost column) fall back into carousel's leftmost.
+                if self.fixed_left.focus_right() {
+                    true
+                } else {
+                    self.scrolling.focus_column_first();
+                    self.active_fixed_side = None;
+                    true
+                }
+            }
+            Some(FixedSide::Right) => {
+                // Move right inside the right strip. At the outer edge stop.
+                self.fixed_right.focus_right()
+            }
+            None => {
+                if self.scrolling.focus_right() {
+                    true
+                } else if self.fixed_right.focus_innermost() {
+                    self.active_fixed_side = Some(FixedSide::Right);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 

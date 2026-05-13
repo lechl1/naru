@@ -174,6 +174,56 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner.content_width()
     }
 
+    /// Move focus one column to the left inside the strip, returning true on
+    /// success. Skips ScrollingSpace's `activate_column` (which would trigger
+    /// carousel scroll animation) by setting the active index statically.
+    pub fn focus_left(&mut self) -> bool {
+        let idx = self.inner.active_column_index();
+        if idx == 0 {
+            return false;
+        }
+        self.inner.set_active_column_idx_static(idx - 1);
+        true
+    }
+
+    /// Mirror of [`focus_left`](Self::focus_left): move focus one column to
+    /// the right inside the strip.
+    pub fn focus_right(&mut self) -> bool {
+        let idx = self.inner.active_column_index();
+        if idx + 1 >= self.inner.column_count() {
+            return false;
+        }
+        self.inner.set_active_column_idx_static(idx + 1);
+        true
+    }
+
+    /// Focus the strip's innermost (carousel-facing) column. No-op if the
+    /// strip is empty. Used when keyboard focus traverses INTO the strip from
+    /// the carousel.
+    pub fn focus_innermost(&mut self) -> bool {
+        let n = self.inner.column_count();
+        if n == 0 {
+            return false;
+        }
+        let idx = match self.side {
+            FixedSide::Left => n - 1,
+            FixedSide::Right => 0,
+        };
+        self.inner.set_active_column_idx_static(idx);
+        true
+    }
+
+    /// Returns the strip's active window, if any. Used by Workspace's
+    /// active-window lookup once `active_fixed_side` indicates this strip is
+    /// the focused layer.
+    pub fn active_window(&self) -> Option<&W> {
+        self.inner.active_window()
+    }
+
+    pub fn active_window_mut(&mut self) -> Option<&mut W> {
+        self.inner.active_window_mut()
+    }
+
     /// Whether the currently focused column inside this strip is the one
     /// closest to the carousel ("inner edge"). When true, a stack-move toward
     /// the carousel should hand the column back to it instead of moving
