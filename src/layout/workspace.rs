@@ -255,6 +255,22 @@ enum FloatingActive {
     Yes,
 }
 
+/// Which sub-layout of a workspace owns a particular window.
+///
+/// Per-window operations (`set_window_width`, `set_fullscreen`, interactive
+/// resize, …) must be dispatched to the layer that actually holds the window
+/// — the carousel's by-id methods `unwrap()` on a window they don't own.
+///
+/// Also surfaced through [`Workspace::window_slot`] so the test harness (and
+/// any future introspection) can assert which layer a window landed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowLayer {
+    Floating,
+    Scrolling,
+    FixedLeft,
+    FixedRight,
+}
+
 /// Where to put a newly added window.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceAddWindowTarget<'a, W: LayoutElement> {
@@ -621,6 +637,57 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.has_window(id)
     }
 
+    /// Which sub-layout currently holds `id`, or `None` if this workspace does
+    /// not contain it. Unlike [`Self::layer_for`] this never guesses — it is a
+    /// pure membership query, used by the test harness to assert routing.
+    #[cfg(test)]
+    pub(crate) fn window_slot(&self, id: &W::Id) -> Option<WindowLayer> {
+        if self.floating.has_window(id) {
+            Some(WindowLayer::Floating)
+        } else if self.fixed_left.has_window(id) {
+            Some(WindowLayer::FixedLeft)
+        } else if self.fixed_right.has_window(id) {
+            Some(WindowLayer::FixedRight)
+        } else if self.scrolling.columns().any(|col| col.contains(id)) {
+            Some(WindowLayer::Scrolling)
+        } else {
+            None
+        }
+    }
+
+    /// Which sub-layout a per-window operation should target.
+    ///
+    /// `Some(id)` is resolved by membership; `None` (meaning "the active
+    /// window") follows the active-layer signals. The carousel is the
+    /// fallback so an unknown id behaves exactly as before this routing
+    /// existed.
+    fn layer_for(&self, window: Option<&W::Id>) -> WindowLayer {
+        match window {
+            Some(id) => {
+                if self.floating.has_window(id) {
+                    WindowLayer::Floating
+                } else if self.fixed_left.has_window(id) {
+                    WindowLayer::FixedLeft
+                } else if self.fixed_right.has_window(id) {
+                    WindowLayer::FixedRight
+                } else {
+                    WindowLayer::Scrolling
+                }
+            }
+            None => {
+                if self.floating_is_active.get() {
+                    WindowLayer::Floating
+                } else {
+                    match self.active_fixed_side {
+                        Some(FixedSide::Left) => WindowLayer::FixedLeft,
+                        Some(FixedSide::Right) => WindowLayer::FixedRight,
+                        None => WindowLayer::Scrolling,
+                    }
+                }
+            }
+        }
+    }
+
     pub fn current_output(&self) -> Option<&Output> {
         self.output.as_ref()
     }
@@ -834,8 +901,10 @@ impl<W: LayoutElement> Workspace<W> {
                         self.floating.add_tile_above(next_to, tile, activate);
                     } else {
                         // FIXME: use static pos
+                        // `next_to` may be a carousel *or* fixed-strip window,
+                        // so search the workspace-wide iterator rather than
+                        // just the carousel's (which would `unwrap()`-panic).
                         let (next_to_tile, render_pos, _visible) = self
-                            .scrolling
                             .tiles_with_render_positions()
                             .find(|(tile, _, _)| tile.window().id() == next_to)
                             .unwrap();
@@ -862,6 +931,23 @@ impl<W: LayoutElement> Workspace<W> {
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
+                    }
+                } else if self.fixed_left.has_window(next_to) {
+                    // `next_to` lives in a fixed strip — insert there so the
+                    // carousel's `add_tile_right_of` doesn't `unwrap()`-panic
+                    // on a window it doesn't own.
+                    self.fixed_left
+                        .add_tile_right_of(next_to, tile, activate, width, is_full_width);
+                    if activate {
+                        self.floating_is_active = FloatingActive::No;
+                        self.active_fixed_side = Some(FixedSide::Left);
+                    }
+                } else if self.fixed_right.has_window(next_to) {
+                    self.fixed_right
+                        .add_tile_right_of(next_to, tile, activate, width, is_full_width);
+                    if activate {
+                        self.floating_is_active = FloatingActive::No;
+                        self.active_fixed_side = Some(FixedSide::Right);
                     }
                 } else {
                     self.scrolling
@@ -916,13 +1002,37 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// Removes a tiled (carousel or fixed-strip) window's tile, routing the
+    /// removal to whichever layer actually owns it. The carousel's
+    /// `remove_tile` `unwrap()`-panics on a window it doesn't hold, so the
+    /// fixed strips must be checked first. Drops the strip-active signal when
+    /// a strip empties. Does NOT touch the floating layer, run output-leave,
+    /// or update focus — callers layer that on as needed.
+    fn remove_tiled_tile(&mut self, id: &W::Id, transaction: Transaction) -> RemovedTile<W> {
+        if self.fixed_left.has_window(id) {
+            let removed = self.fixed_left.remove_tile(id, transaction);
+            if self.fixed_left.is_empty() && self.active_fixed_side == Some(FixedSide::Left) {
+                self.active_fixed_side = None;
+            }
+            removed
+        } else if self.fixed_right.has_window(id) {
+            let removed = self.fixed_right.remove_tile(id, transaction);
+            if self.fixed_right.is_empty() && self.active_fixed_side == Some(FixedSide::Right) {
+                self.active_fixed_side = None;
+            }
+            removed
+        } else {
+            self.scrolling.remove_tile(id, transaction)
+        }
+    }
+
     pub fn remove_tile(&mut self, id: &W::Id, transaction: Transaction) -> RemovedTile<W> {
         let mut from_floating = false;
         let removed = if self.floating.has_window(id) {
             from_floating = true;
             self.floating.remove_tile(id)
         } else {
-            self.scrolling.remove_tile(id, transaction)
+            self.remove_tiled_tile(id, transaction)
         };
 
         if let Some(output) = &self.output {
@@ -936,10 +1046,26 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn remove_active_tile(&mut self, transaction: Transaction) -> Option<RemovedTile<W>> {
         let from_floating = self.floating_is_active.get();
-        let removed = if from_floating {
-            self.floating.remove_active_tile()?
-        } else {
-            self.scrolling.remove_active_tile(transaction)?
+        let removed = match self.active_fixed_side {
+            // Focus is inside a fixed strip — the "active tile" lives there,
+            // not in the carousel or floating layer. Drop the strip-active
+            // signal once the strip empties.
+            Some(FixedSide::Left) => {
+                let removed = self.fixed_left.remove_active_tile(transaction)?;
+                if self.fixed_left.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                removed
+            }
+            Some(FixedSide::Right) => {
+                let removed = self.fixed_right.remove_active_tile(transaction)?;
+                if self.fixed_right.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                removed
+            }
+            None if from_floating => self.floating.remove_active_tile()?,
+            None => self.scrolling.remove_active_tile(transaction)?,
         };
 
         if let Some(output) = &self.output {
@@ -957,7 +1083,23 @@ impl<W: LayoutElement> Workspace<W> {
             return None;
         }
 
-        let column = self.scrolling.remove_active_column()?;
+        let column = match self.active_fixed_side {
+            Some(FixedSide::Left) => {
+                let column = self.fixed_left.remove_active_column()?;
+                if self.fixed_left.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                column
+            }
+            Some(FixedSide::Right) => {
+                let column = self.fixed_right.remove_active_column()?;
+                if self.fixed_right.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                column
+            }
+            None => self.scrolling.remove_active_column()?,
+        };
 
         if let Some(output) = &self.output {
             for (tile, _) in column.tiles() {
@@ -1110,13 +1252,17 @@ impl<W: LayoutElement> Workspace<W> {
             Some(FixedSide::Right) => {
                 // Move left inside the right strip. At its inner edge (the
                 // carousel-facing leftmost column) fall back into the
-                // carousel's rightmost column.
+                // carousel's rightmost column — but only if the carousel
+                // actually has a column. With an empty carousel, hopping out
+                // would clear `active_fixed_side` and leave focus nowhere.
                 if self.fixed_right.focus_left() {
                     true
-                } else {
+                } else if !self.scrolling.is_empty() {
                     self.scrolling.focus_column_last();
                     self.active_fixed_side = None;
                     true
+                } else {
+                    false
                 }
             }
             None => {
@@ -1142,13 +1288,18 @@ impl<W: LayoutElement> Workspace<W> {
         match self.active_fixed_side {
             Some(FixedSide::Left) => {
                 // Move right inside the left strip; at its inner edge
-                // (rightmost column) fall back into carousel's leftmost.
+                // (rightmost column) fall back into the carousel's leftmost —
+                // but only if the carousel has a column. With an empty
+                // carousel, hopping out would clear `active_fixed_side` and
+                // leave focus nowhere.
                 if self.fixed_left.focus_right() {
                     true
-                } else {
+                } else if !self.scrolling.is_empty() {
                     self.scrolling.focus_column_first();
                     self.active_fixed_side = None;
                     true
+                } else {
+                    false
                 }
             }
             Some(FixedSide::Right) => {
@@ -1554,42 +1705,49 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
-        if window.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            return;
+        match self.layer_for(window) {
+            // Floating windows have no columns to consume into / expel from.
+            WindowLayer::Floating => {}
+            WindowLayer::FixedLeft => self.fixed_left.consume_or_expel_window_left(window),
+            WindowLayer::FixedRight => self.fixed_right.consume_or_expel_window_left(window),
+            WindowLayer::Scrolling => self.scrolling.consume_or_expel_window_left(window),
         }
-        self.scrolling.consume_or_expel_window_left(window);
     }
 
     pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
-        if window.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            return;
+        match self.layer_for(window) {
+            WindowLayer::Floating => {}
+            WindowLayer::FixedLeft => self.fixed_left.consume_or_expel_window_right(window),
+            WindowLayer::FixedRight => self.fixed_right.consume_or_expel_window_right(window),
+            WindowLayer::Scrolling => self.scrolling.consume_or_expel_window_right(window),
         }
-        self.scrolling.consume_or_expel_window_right(window);
     }
 
     pub fn consume_into_column(&mut self) {
-        if self.floating_is_active.get() {
-            return;
+        match self.layer_for(None) {
+            WindowLayer::Floating => {}
+            WindowLayer::FixedLeft => self.fixed_left.consume_into_column(),
+            WindowLayer::FixedRight => self.fixed_right.consume_into_column(),
+            WindowLayer::Scrolling => self.scrolling.consume_into_column(),
         }
-        self.scrolling.consume_into_column();
     }
 
     pub fn expel_from_column(&mut self) {
-        if self.floating_is_active.get() {
-            return;
+        match self.layer_for(None) {
+            WindowLayer::Floating => {}
+            WindowLayer::FixedLeft => self.fixed_left.expel_from_column(),
+            WindowLayer::FixedRight => self.fixed_right.expel_from_column(),
+            WindowLayer::Scrolling => self.scrolling.expel_from_column(),
         }
-        self.scrolling.expel_from_column();
     }
 
     pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
-        if self.floating_is_active.get() {
-            return;
+        match self.layer_for(None) {
+            WindowLayer::Floating => {}
+            WindowLayer::FixedLeft => self.fixed_left.swap_window_in_direction(direction),
+            WindowLayer::FixedRight => self.fixed_right.swap_window_in_direction(direction),
+            WindowLayer::Scrolling => self.scrolling.swap_window_in_direction(direction),
         }
-        self.scrolling.swap_window_in_direction(direction);
     }
 
     pub fn toggle_column_tabbed_display(&mut self) {
@@ -1615,12 +1773,12 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn center_window(&mut self, id: Option<&W::Id>) {
-        if id.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            self.floating.center_window(id);
-        } else {
-            self.scrolling.center_window(id);
+        match self.layer_for(id) {
+            WindowLayer::Floating => self.floating.center_window(id),
+            WindowLayer::Scrolling => self.scrolling.center_window(id),
+            // Fixed-side strips are pinned (no view scrolling), so there is
+            // nothing to center — leave the strip untouched.
+            WindowLayer::FixedLeft | WindowLayer::FixedRight => {}
         }
     }
 
@@ -1660,56 +1818,62 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
-        if window.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            self.floating.set_window_width(window, change, true);
-        } else {
-            self.scrolling.set_window_width(window, change);
-            self.scrolling.auto_fit_or_center_view_offset();
+        match self.layer_for(window) {
+            WindowLayer::Floating => self.floating.set_window_width(window, change, true),
+            WindowLayer::FixedLeft => self.fixed_left.set_window_width(window, change),
+            WindowLayer::FixedRight => self.fixed_right.set_window_width(window, change),
+            WindowLayer::Scrolling => {
+                self.scrolling.set_window_width(window, change);
+                self.scrolling.auto_fit_or_center_view_offset();
+            }
         }
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
-        if window.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            self.floating.set_window_height(window, change, true);
-        } else {
-            self.scrolling.set_window_height(window, change);
-            self.scrolling.auto_fit_or_center_view_offset();
+        match self.layer_for(window) {
+            WindowLayer::Floating => self.floating.set_window_height(window, change, true),
+            WindowLayer::FixedLeft => self.fixed_left.set_window_height(window, change),
+            WindowLayer::FixedRight => self.fixed_right.set_window_height(window, change),
+            WindowLayer::Scrolling => {
+                self.scrolling.set_window_height(window, change);
+                self.scrolling.auto_fit_or_center_view_offset();
+            }
         }
     }
 
     pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
-        if window.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            return;
+        match self.layer_for(window) {
+            WindowLayer::Floating => {}
+            WindowLayer::FixedLeft => self.fixed_left.reset_window_height(window),
+            WindowLayer::FixedRight => self.fixed_right.reset_window_height(window),
+            WindowLayer::Scrolling => {
+                self.scrolling.reset_window_height(window);
+                self.scrolling.auto_fit_or_center_view_offset();
+            }
         }
-        self.scrolling.reset_window_height(window);
-        self.scrolling.auto_fit_or_center_view_offset();
     }
 
     pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
-        if window.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            self.floating.toggle_window_width(window, forwards);
-        } else {
-            self.scrolling.toggle_window_width(window, forwards);
-            self.scrolling.auto_fit_or_center_view_offset();
+        match self.layer_for(window) {
+            WindowLayer::Floating => self.floating.toggle_window_width(window, forwards),
+            WindowLayer::FixedLeft => self.fixed_left.toggle_window_width(window, forwards),
+            WindowLayer::FixedRight => self.fixed_right.toggle_window_width(window, forwards),
+            WindowLayer::Scrolling => {
+                self.scrolling.toggle_window_width(window, forwards);
+                self.scrolling.auto_fit_or_center_view_offset();
+            }
         }
     }
 
     pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
-        if window.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
-            self.floating.toggle_window_height(window, forwards);
-        } else {
-            self.scrolling.toggle_window_height(window, forwards);
-            self.scrolling.auto_fit_or_center_view_offset();
+        match self.layer_for(window) {
+            WindowLayer::Floating => self.floating.toggle_window_height(window, forwards),
+            WindowLayer::FixedLeft => self.fixed_left.toggle_window_height(window, forwards),
+            WindowLayer::FixedRight => self.fixed_right.toggle_window_height(window, forwards),
+            WindowLayer::Scrolling => {
+                self.scrolling.toggle_window_height(window, forwards);
+                self.scrolling.auto_fit_or_center_view_offset();
+            }
         }
     }
 
@@ -1722,6 +1886,19 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) {
+        // Fixed-strip windows are handled up front: the carousel-specific
+        // `restore_to_floating` bookkeeping below doesn't apply to them, and
+        // routing keeps the carousel's by-id lookups from `unwrap()`-panicking
+        // on a window they don't own.
+        if self.fixed_left.has_window(window) {
+            self.fixed_left.set_fullscreen(window, is_fullscreen);
+            return;
+        }
+        if self.fixed_right.has_window(window) {
+            self.fixed_right.set_fullscreen(window, is_fullscreen);
+            return;
+        }
+
         let mut restore_to_floating = false;
         if self.floating.has_window(window) {
             if is_fullscreen {
@@ -1787,6 +1964,17 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn set_maximized(&mut self, window: &W::Id, maximize: bool) {
+        // See `set_fullscreen`: strip windows are routed before the
+        // carousel-specific path.
+        if self.fixed_left.has_window(window) {
+            self.fixed_left.set_maximized(window, maximize);
+            return;
+        }
+        if self.fixed_right.has_window(window) {
+            self.fixed_right.set_maximized(window, maximize);
+            return;
+        }
+
         let mut restore_to_floating = false;
         if self.floating.has_window(window) {
             if maximize {
@@ -1844,7 +2032,13 @@ impl<W: LayoutElement> Workspace<W> {
         // maximized.
         //
         // In the floating layout, windows cannot be maximized.
-        if let Some(col) = self.scrolling.columns().find(|col| col.contains(window)) {
+        let col = self
+            .scrolling
+            .columns()
+            .chain(self.fixed_left.columns())
+            .chain(self.fixed_right.columns())
+            .find(|col| col.contains(window));
+        if let Some(col) = col {
             current = col.is_pending_maximized();
         }
 
@@ -1878,7 +2072,7 @@ impl<W: LayoutElement> Workspace<W> {
                 self.floating_is_active = FloatingActive::No;
             }
         } else {
-            let mut removed = self.scrolling.remove_tile(&id, Transaction::new());
+            let mut removed = self.remove_tiled_tile(&id, Transaction::new());
             removed.tile.stop_move_animations();
 
             // Come up with a default floating position close to the tile position.
@@ -1957,20 +2151,39 @@ impl<W: LayoutElement> Workspace<W> {
         y: PositionChange,
         animate: bool,
     ) {
-        if id.map_or(self.floating_is_active.get(), |id| {
-            self.floating.has_window(id)
-        }) {
+        let layer = self.layer_for(id);
+        if layer == WindowLayer::Floating {
             self.floating.move_window(id, x, y, animate);
         } else {
-            // If the target tile isn't floating, set its stored floating position.
-            let tile = if let Some(id) = id {
-                self.scrolling
-                    .tiles_mut()
-                    .find(|tile| tile.window().id() == id)
-                    .unwrap()
-            } else if let Some(tile) = self.scrolling.active_tile_mut() {
-                tile
-            } else {
+            // The target tile is in the carousel or a fixed strip — set its
+            // stored floating position so a later float remembers it. Search
+            // the owning layer; the carousel's `tiles_mut().find().unwrap()`
+            // would panic on a strip window.
+            let tile = match layer {
+                WindowLayer::Scrolling => match id {
+                    Some(id) => self
+                        .scrolling
+                        .tiles_mut()
+                        .find(|tile| tile.window().id() == id),
+                    None => self.scrolling.active_tile_mut(),
+                },
+                WindowLayer::FixedLeft => match id {
+                    Some(id) => self
+                        .fixed_left
+                        .tiles_mut()
+                        .find(|tile| tile.window().id() == id),
+                    None => self.fixed_left.active_tile_mut(),
+                },
+                WindowLayer::FixedRight => match id {
+                    Some(id) => self
+                        .fixed_right
+                        .tiles_mut()
+                        .find(|tile| tile.window().id() == id),
+                    None => self.fixed_right.active_tile_mut(),
+                },
+                WindowLayer::Floating => unreachable!(),
+            };
+            let Some(tile) = tile else {
                 return;
             };
 
@@ -2057,7 +2270,13 @@ impl<W: LayoutElement> Workspace<W> {
         let visible = self.is_floating_visible();
         let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
 
-        floating.chain(scrolling)
+        let fixed_left = self.fixed_left.tiles_with_render_positions();
+        let fixed_right = self.fixed_right.tiles_with_render_positions();
+
+        floating
+            .chain(scrolling)
+            .chain(fixed_left)
+            .chain(fixed_right)
     }
 
     pub fn tiles_with_render_positions_mut(
@@ -2066,7 +2285,12 @@ impl<W: LayoutElement> Workspace<W> {
     ) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> {
         let scrolling = self.scrolling.tiles_with_render_positions_mut(round);
         let floating = self.floating.tiles_with_render_positions_mut(round);
-        floating.chain(scrolling)
+        let fixed_left = self.fixed_left.tiles_with_render_positions_mut(round);
+        let fixed_right = self.fixed_right.tiles_with_render_positions_mut(round);
+        floating
+            .chain(scrolling)
+            .chain(fixed_left)
+            .chain(fixed_right)
     }
 
     pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> {
@@ -2281,6 +2505,12 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating.has_window(window) {
             self.floating
                 .start_close_animation_for_window(renderer, window, blocker);
+        } else if self.fixed_left.has_window(window) {
+            self.fixed_left
+                .start_close_animation_for_window(renderer, window, blocker);
+        } else if self.fixed_right.has_window(window) {
+            self.fixed_right
+                .start_close_animation_for_window(renderer, window, blocker);
         } else {
             self.scrolling
                 .start_close_animation_for_window(renderer, window, blocker);
@@ -2300,7 +2530,10 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn start_open_animation(&mut self, id: &W::Id) -> bool {
-        self.scrolling.start_open_animation(id) || self.floating.start_open_animation(id)
+        self.scrolling.start_open_animation(id)
+            || self.floating.start_open_animation(id)
+            || self.fixed_left.start_open_animation(id)
+            || self.fixed_right.start_open_animation(id)
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
@@ -2355,9 +2588,16 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn update_window(&mut self, window: &W::Id, serial: Option<Serial>) {
-        if !self.floating.update_window(window, serial) {
-            self.scrolling.update_window(window, serial);
+        // Route the configure-ack to whichever layer owns the window. The
+        // carousel's `update_window` `unwrap()`-panics on a window it doesn't
+        // hold, so the fixed strips must be tried before falling through.
+        if self.floating.update_window(window, serial)
+            || self.fixed_left.update_window(window, serial)
+            || self.fixed_right.update_window(window, serial)
+        {
+            return;
         }
+        self.scrolling.update_window(window, serial);
     }
 
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
@@ -2368,7 +2608,12 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn scroll_amount_to_activate(&self, window: &W::Id) -> f64 {
-        if self.floating.has_window(window) {
+        // Floating windows and fixed-strip windows are always on screen — no
+        // carousel scrolling is needed to reveal them.
+        if self.floating.has_window(window)
+            || self.fixed_left.has_window(window)
+            || self.fixed_right.has_window(window)
+        {
             return 0.;
         }
 
@@ -2496,10 +2741,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
-        if self.floating.has_window(&window) {
-            self.floating.interactive_resize_begin(window, edges)
-        } else {
-            self.scrolling.interactive_resize_begin(window, edges)
+        match self.layer_for(Some(&window)) {
+            WindowLayer::Floating => self.floating.interactive_resize_begin(window, edges),
+            WindowLayer::FixedLeft => self.fixed_left.interactive_resize_begin(window, edges),
+            WindowLayer::FixedRight => self.fixed_right.interactive_resize_begin(window, edges),
+            WindowLayer::Scrolling => self.scrolling.interactive_resize_begin(window, edges),
         }
     }
 
@@ -2508,23 +2754,27 @@ impl<W: LayoutElement> Workspace<W> {
         window: &W::Id,
         delta: Point<f64, Logical>,
     ) -> bool {
-        if self.floating.has_window(window) {
-            self.floating.interactive_resize_update(window, delta)
-        } else {
-            self.scrolling.interactive_resize_update(window, delta)
+        match self.layer_for(Some(window)) {
+            WindowLayer::Floating => self.floating.interactive_resize_update(window, delta),
+            WindowLayer::FixedLeft => self.fixed_left.interactive_resize_update(window, delta),
+            WindowLayer::FixedRight => self.fixed_right.interactive_resize_update(window, delta),
+            WindowLayer::Scrolling => self.scrolling.interactive_resize_update(window, delta),
         }
     }
 
     pub fn interactive_resize_end(&mut self, window: Option<&W::Id>) {
         if let Some(window) = window {
-            if self.floating.has_window(window) {
-                self.floating.interactive_resize_end(Some(window));
-            } else {
-                self.scrolling.interactive_resize_end(Some(window));
+            match self.layer_for(Some(window)) {
+                WindowLayer::Floating => self.floating.interactive_resize_end(Some(window)),
+                WindowLayer::FixedLeft => self.fixed_left.interactive_resize_end(Some(window)),
+                WindowLayer::FixedRight => self.fixed_right.interactive_resize_end(Some(window)),
+                WindowLayer::Scrolling => self.scrolling.interactive_resize_end(Some(window)),
             }
         } else {
             self.floating.interactive_resize_end(None);
             self.scrolling.interactive_resize_end(None);
+            self.fixed_left.interactive_resize_end(None);
+            self.fixed_right.interactive_resize_end(None);
         }
     }
 
@@ -2607,12 +2857,34 @@ impl<W: LayoutElement> Workspace<W> {
         assert!(Rc::ptr_eq(&self.options, self.floating.options()));
         self.floating.verify_invariants();
 
+        self.fixed_left.verify_invariants();
+        self.fixed_right.verify_invariants();
+
+        // `active_fixed_side` must always point at a strip that actually has
+        // a window — otherwise stack-move / focus dispatch routes keypresses
+        // to an empty (or stale) strip.
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => assert!(
+                !self.fixed_left.is_empty(),
+                "active_fixed_side is Left but fixed_left is empty"
+            ),
+            Some(FixedSide::Right) => assert!(
+                !self.fixed_right.is_empty(),
+                "active_fixed_side is Right but fixed_right is empty"
+            ),
+            None => {}
+        }
+
         if self.floating.is_empty() {
             assert!(
                 !self.floating_is_active.get(),
                 "when floating is empty it must never be active"
             );
-        } else if self.scrolling.is_empty() {
+        } else if self.scrolling.is_empty() && self.active_fixed_side.is_none() {
+            // With an empty carousel and a non-empty floating layer, focus
+            // must sit in floating — unless it has moved into a fixed-side
+            // strip, which is a valid resting place that the carousel/floating
+            // active-layer logic predates.
             assert!(
                 self.floating_is_active.get(),
                 "when scrolling is empty but floating isn't, floating should be active"

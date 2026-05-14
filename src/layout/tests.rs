@@ -15,6 +15,7 @@ use super::*;
 
 mod animations;
 mod fullscreen;
+mod sim;
 
 impl<W: LayoutElement> Default for Layout<W> {
     fn default() -> Self {
@@ -498,6 +499,10 @@ enum Op {
     MoveWindowUp,
     MoveWindowDownOrToWorkspaceDown,
     MoveWindowUpOrToWorkspaceUp,
+    MoveWindowLeftStacked,
+    MoveWindowRightStacked,
+    MoveWindowUpStacked,
+    MoveWindowDownStacked,
     ConsumeOrExpelWindowLeft {
         #[proptest(strategy = "proptest::option::of(1..=5usize)")]
         id: Option<usize>,
@@ -1160,6 +1165,10 @@ impl Op {
             Op::MoveWindowUp => layout.move_up(),
             Op::MoveWindowDownOrToWorkspaceDown => layout.move_down_or_to_workspace_down(),
             Op::MoveWindowUpOrToWorkspaceUp => layout.move_up_or_to_workspace_up(),
+            Op::MoveWindowLeftStacked => layout.move_window_left_stacked(),
+            Op::MoveWindowRightStacked => layout.move_window_right_stacked(),
+            Op::MoveWindowUpStacked => layout.move_window_up_stacked(),
+            Op::MoveWindowDownStacked => layout.move_window_down_stacked(),
             Op::ConsumeOrExpelWindowLeft { id } => {
                 let id = id.filter(|id| layout.has_window(id));
                 layout.consume_or_expel_window_left(id.as_ref());
@@ -3698,6 +3707,240 @@ fn expel_pending_left_from_fullscreen_tabbed_column() {
 }
 
 #[test]
+fn stack_move_into_and_out_of_fixed_strips() {
+    let options = Options {
+        enable_stacking: true,
+        ..Default::default()
+    };
+
+    // Scenario A: single carousel window, right-stack into fixed_right, then
+    // right-stack again (within-strip), then left-stack back out.
+    {
+        let mut layout = check_ops_with_options(
+            options.clone(),
+            [
+                Op::AddOutput(1),
+                Op::AddWindow {
+                    params: TestWindowParams::new(0),
+                },
+            ],
+        );
+        layout.move_window_right_stacked();
+        layout.verify_invariants();
+        layout.move_window_right_stacked();
+        layout.verify_invariants();
+        layout.move_window_left_stacked();
+        layout.verify_invariants();
+    }
+
+    // Scenario B: single carousel window, left-stack into fixed_left, then
+    // left-stack again (within-strip), then right-stack back out.
+    {
+        let mut layout = check_ops_with_options(
+            options.clone(),
+            [
+                Op::AddOutput(1),
+                Op::AddWindow {
+                    params: TestWindowParams::new(0),
+                },
+            ],
+        );
+        layout.move_window_left_stacked();
+        layout.verify_invariants();
+        layout.move_window_left_stacked();
+        layout.verify_invariants();
+        layout.move_window_right_stacked();
+        layout.verify_invariants();
+    }
+
+    // Scenario C: multiple windows, push the rightmost into fixed_right then
+    // ride it back out into the carousel.
+    {
+        let mut layout = check_ops_with_options(
+            options.clone(),
+            [
+                Op::AddOutput(1),
+                Op::AddWindow {
+                    params: TestWindowParams::new(0),
+                },
+                Op::AddWindow {
+                    params: TestWindowParams::new(1),
+                },
+                Op::AddWindow {
+                    params: TestWindowParams::new(2),
+                },
+            ],
+        );
+        // Active is the last-added (rightmost) column.
+        layout.move_window_right_stacked();
+        layout.verify_invariants();
+        layout.move_window_left_stacked();
+        layout.verify_invariants();
+    }
+
+    // Scenario D: build a two-column fixed_right strip by hopping focus back
+    // into the carousel between stack-moves, then ride columns back out.
+    {
+        let mut layout = check_ops_with_options(
+            options.clone(),
+            [
+                Op::AddOutput(1),
+                Op::AddWindow {
+                    params: TestWindowParams::new(0),
+                },
+                Op::AddWindow {
+                    params: TestWindowParams::new(1),
+                },
+                Op::AddWindow {
+                    params: TestWindowParams::new(2),
+                },
+            ],
+        );
+        // W2 -> fixed_right.
+        layout.move_window_right_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        // Hop focus back into the carousel (W1 becomes active).
+        layout.focus_left();
+        layout.verify_invariants();
+        // W1 -> fixed_right (now two columns in the strip).
+        layout.move_window_right_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        // Within-strip move, then ride back out into the carousel.
+        layout.move_window_right_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        layout.move_window_left_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        layout.move_window_left_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+    }
+
+    // Scenario E: symmetric two-column fixed_left strip.
+    {
+        let mut layout = check_ops_with_options(
+            options.clone(),
+            [
+                Op::AddOutput(1),
+                Op::AddWindow {
+                    params: TestWindowParams::new(0),
+                },
+                Op::AddWindow {
+                    params: TestWindowParams::new(1),
+                },
+                Op::AddWindow {
+                    params: TestWindowParams::new(2),
+                },
+            ],
+        );
+        // Focus the leftmost carousel column, push it into fixed_left.
+        layout.focus_column_first();
+        layout.move_window_left_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        // Hop focus back into the carousel and push the next column in.
+        layout.focus_right();
+        layout.move_window_left_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        // Within-strip move, then ride back out into the carousel.
+        layout.move_window_left_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        layout.move_window_right_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+        layout.move_window_right_stacked();
+        layout.update_render_elements(None);
+        layout.verify_invariants();
+    }
+}
+
+#[test]
+fn stacking_toggle_floating_then_switch_preset_width() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams {
+                id: 1,
+                is_floating: true,
+                bbox: Rectangle::from_size(Size::from((1, 1))),
+                ..TestWindowParams::new(1)
+            },
+        },
+        Op::ToggleWindowFloating { id: None },
+        Op::SwitchPresetColumnWidth,
+    ];
+
+    // Reproduces with stacking enabled.
+    let options = Options {
+        enable_stacking: true,
+        ..Default::default()
+    };
+    check_ops_with_options(options, ops.clone());
+
+    // And it must hold with stacking disabled too.
+    check_ops(ops);
+}
+
+#[test]
+fn preset_width_then_expand_on_named_workspace_centered() {
+    let ws_layout = naru_config::LayoutPart {
+        center_focused_column: Some(CenterFocusedColumn::Always),
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddNamedWorkspace {
+            ws_name: 1,
+            output_name: None,
+            layout_config: Some(Box::new(ws_layout)),
+        },
+        Op::AddWindow {
+            params: TestWindowParams {
+                id: 1,
+                bbox: Rectangle::from_size(Size::from((1, 1))),
+                ..TestWindowParams::new(1)
+            },
+        },
+        Op::AddOutput(1),
+        Op::SwitchPresetColumnWidth,
+        Op::ExpandColumnToAvailableWidth,
+    ];
+
+    check_ops(ops);
+}
+
+#[test]
+fn stack_move_left_into_strip_keeps_floating_invariant() {
+    let options = Options {
+        enable_stacking: true,
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams {
+                id: 4,
+                bbox: Rectangle::from_size(Size::from((1, 1))),
+                ..TestWindowParams::new(4)
+            },
+        },
+        Op::AddWindow {
+            params: TestWindowParams {
+                id: 1,
+                bbox: Rectangle::from_size(Size::from((1, 1))),
+                ..TestWindowParams::new(1)
+            },
+        },
+        Op::MoveWindowLeftStacked,
+    ];
+    check_ops_with_options(options, ops);
+}
+
+#[test]
 fn workspace_render_geo_at_fractional_scale() {
     let ops = [
         Op::AddScaledOutput {
@@ -3904,14 +4147,24 @@ prop_compose! {
     }
 }
 
+/// Number of randomized cases the property tests run.
+///
+/// They run *fast by default* — a small batch every `cargo test` — and only go
+/// deep under the `RUN_SLOW_TESTS` environment flag. The intended workflow:
+/// `cargo test` catches the easy regressions in seconds; the slow run is a
+/// periodic backstop, and anything it surfaces should be distilled into a
+/// deterministic `sim::tests` scenario so it becomes fast-detectable.
+fn proptest_cases() -> u32 {
+    if std::env::var_os("RUN_SLOW_TESTS").is_some() {
+        8192
+    } else {
+        256
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: if std::env::var_os("RUN_SLOW_TESTS").is_none() {
-            eprintln!("ignoring slow test");
-            0
-        } else {
-            ProptestConfig::default().cases
-        },
+        cases: proptest_cases(),
         ..ProptestConfig::default()
     })]
 
@@ -3927,5 +4180,24 @@ proptest! {
         };
 
         check_ops_with_options(options, ops);
+    }
+
+    #[test]
+    fn random_operations_dont_panic_with_stacking(
+        ops: Vec<Op>,
+        layout_config in arbitrary_layout_part(),
+    ) {
+        // eprintln!("{ops:?}");
+        let options = Options {
+            layout: naru_config::Layout::from_part(&layout_config),
+            enable_stacking: true,
+            ..Default::default()
+        };
+
+        // Drive the fuzzed op sequence through the LayoutSim harness — the same
+        // choke point (`apply` → invariant check after every op) the
+        // deterministic scenario tests in `sim::tests` use.
+        let mut sim = sim::LayoutSim::with_options(options);
+        sim.run(ops);
     }
 }

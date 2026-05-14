@@ -10,6 +10,7 @@ fn create_thumbnail() -> Thumbnail {
         on_current_output: false,
         on_current_workspace: false,
         app_id: None,
+        title: String::new(),
         size: Size::new(100, 100),
         clock: Clock::with_time(Duration::ZERO),
         config: naru_config::MruPreviews::default(),

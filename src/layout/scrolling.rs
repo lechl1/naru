@@ -1883,7 +1883,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             );
             removed.tile.pop_active_window()
         } else {
-            self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window()
+            self.columns[source_col_idx].pop_window_from_tile(source_tile_idx)
         };
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         // Insert at source_col_idx so the new column appears immediately to the LEFT of the
@@ -1947,7 +1947,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             );
             removed.tile.pop_active_window()
         } else {
-            self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window()
+            self.columns[source_col_idx].pop_window_from_tile(source_tile_idx)
         };
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         // Insert at source_col_idx + 1 to place the new column immediately to the RIGHT.
@@ -1996,13 +1996,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             removed.tile.pop_active_window()
         } else {
             // Multi-window source: just pop one window, source tile stays.
-            self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window()
+            self.columns[source_col_idx].pop_window_from_tile(source_tile_idx)
         };
 
         // Push onto target column's active tile.
         let target_col = &mut self.columns[target_col_idx];
         let target_active_tile_idx = target_col.active_tile_idx;
         target_col.tiles[target_active_tile_idx].push_window(window);
+        // `push_window` swapped the tile's active window — resync its cached
+        // per-tile data so `Column::verify_invariants` stays satisfied.
+        target_col.refresh_tile_data(target_active_tile_idx);
 
         // Focus the target column.
         self.active_column_idx = target_col_idx;
@@ -2067,7 +2070,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             (removed.tile.pop_active_window(), target)
         } else {
             (
-                self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window(),
+                self.columns[source_col_idx].pop_window_from_tile(source_tile_idx),
                 original_target,
             )
         };
@@ -2075,6 +2078,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let target_col = &mut self.columns[target_col_idx];
         let target_active_tile_idx = target_col.active_tile_idx;
         target_col.tiles[target_active_tile_idx].push_window(window);
+        // `push_window` swapped the tile's active window — resync its cached
+        // per-tile data so `Column::verify_invariants` stays satisfied.
+        target_col.refresh_tile_data(target_active_tile_idx);
         self.active_column_idx = target_col_idx;
 
         // Pushed window changed the target tile's content. Re-run per-tile sizing
@@ -2109,7 +2115,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 source_tile.options.clone(),
             )
         };
-        let popped = self.columns[col_idx].tiles[source_tile_idx].pop_active_window();
+        let popped = self.columns[col_idx].pop_window_from_tile(source_tile_idx);
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         // Insert above the current tile.
         self.add_tile_to_column(col_idx, Some(source_tile_idx), new_tile, true);
@@ -2134,7 +2140,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 source_tile.options.clone(),
             )
         };
-        let popped = self.columns[col_idx].tiles[source_tile_idx].pop_active_window();
+        let popped = self.columns[col_idx].pop_window_from_tile(source_tile_idx);
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         self.add_tile_to_column(col_idx, Some(source_tile_idx + 1), new_tile, true);
         true
@@ -2166,7 +2172,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 self.remove_tile_by_idx(col_idx, source_tile_idx, Transaction::new(), None);
             removed.tile.pop_active_window()
         } else {
-            self.columns[col_idx].tiles[source_tile_idx].pop_active_window()
+            self.columns[col_idx].pop_window_from_tile(source_tile_idx)
         };
 
         // After removal of source tile (if applicable), target_tile_idx is unchanged (it was
@@ -2175,6 +2181,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // returned false earlier. Multi-tile column means column survives.
         let column = &mut self.columns[col_idx];
         column.tiles[target_tile_idx].push_window(window);
+        // `push_window` swapped the tile's active window — resync its cached
+        // per-tile data so `Column::verify_invariants` stays satisfied.
+        column.refresh_tile_data(target_tile_idx);
         column.active_tile_idx = target_tile_idx;
         if let Some((window_size, tile_size, snapshot)) = target_resize_from {
             column.tiles[target_tile_idx]
@@ -2218,13 +2227,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             (removed.tile.pop_active_window(), original_target - 1)
         } else {
             (
-                self.columns[col_idx].tiles[source_tile_idx].pop_active_window(),
+                self.columns[col_idx].pop_window_from_tile(source_tile_idx),
                 original_target,
             )
         };
 
         let column = &mut self.columns[col_idx];
         column.tiles[target_tile_idx].push_window(window);
+        // `push_window` swapped the tile's active window — resync its cached
+        // per-tile data so `Column::verify_invariants` stays satisfied.
+        column.refresh_tile_data(target_tile_idx);
         column.active_tile_idx = target_tile_idx;
         if let Some((window_size, tile_size, snapshot)) = target_resize_from {
             column.tiles[target_tile_idx]
@@ -2320,7 +2332,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 )
             };
             let popped =
-                self.columns[source_col_idx].tiles[source_tile_idx].pop_active_window();
+                self.columns[source_col_idx].pop_window_from_tile(source_tile_idx);
             Tile::new(popped, view_size, scale, clock, options)
         };
 
@@ -2986,26 +2998,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.animate_view_offset(self.active_column_idx, new_offset);
     }
 
-    /// After updating `self.data[col_idx].width` to a new value, slide every
-    /// column to the right of `col_idx` from its pre-resize x toward its new x.
-    /// Without this, neighbors snap to the new layout the instant the cached
-    /// width refreshes, even though the resized tile itself animates its size —
-    /// so the neighbor visibly jumps instead of riding the same animation.
-    ///
-    /// `column_x(i)` for `i > col_idx` only depends on `data[col_idx].width`,
-    /// so the per-column position delta is uniformly `(new_width - old_width)`
-    /// and we don't need to recompute `column_x` for each neighbor.
-    fn animate_neighbors_after_width_change(&mut self, col_idx: usize, old_width: f64) {
-        let new_width = self.data[col_idx].width;
-        let delta = old_width - new_width;
-        if delta == 0. {
-            return;
-        }
-        for col in self.columns.iter_mut().skip(col_idx + 1) {
-            col.animate_move_from(delta);
-        }
-    }
-
     // HACK: pass a self.data iterator in manually as a workaround for the lack of method partial
     // borrowing. Note that this method's return value does not borrow the entire &Self!
     fn column_xs(&self, data: impl Iterator<Item = ColumnData>) -> impl Iterator<Item = f64> {
@@ -3295,17 +3287,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let col_idx = self.active_column_idx;
-        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.toggle_width(None, forwards);
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
-        // Use the *expected* (pending-configure) width rather than the committed
-        // `tile.tile_size()`, which still reports the pre-resize size until the
-        // client ack's. Otherwise auto_fit_or_center positions the view based on
-        // the stale width, producing a visible shift before the client commits.
-        self.data[col_idx].width = self.columns[col_idx].expected_width();
-        self.animate_neighbors_after_width_change(col_idx, old_width);
+        // Refresh the cached column width so `column_x` and the
+        // `auto_fit_or_center_view_offset` call that follows see the new size.
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn toggle_full_width(&mut self) {
@@ -3314,13 +3302,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let col_idx = self.active_column_idx;
-        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.toggle_full_width();
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
-        self.data[col_idx].width = self.columns[col_idx].expected_width();
-        self.animate_neighbors_after_width_change(col_idx, old_width);
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
@@ -3343,19 +3329,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             (self.active_column_idx, None)
         };
 
-        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.set_column_width(change, tile_idx, true);
         cancel_resize_for_column(&mut self.interactive_resize, col);
 
         // Refresh the cached column width so `column_x` (and downstream consumers like
         // `auto_fit_or_center_view_offset`, which workspace.rs calls right after this)
-        // see the post-resize width. Use `expected_width()` (pending configure) rather
-        // than the committed `tile.tile_size()` so the very first auto_fit pass doesn't
-        // run with the stale pre-resize size — otherwise the view visibly shifts to one
-        // side before settling once the client commits the new size.
-        self.data[col_idx].width = self.columns[col_idx].expected_width();
-        self.animate_neighbors_after_width_change(col_idx, old_width);
+        // see the post-resize width.
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
@@ -3426,15 +3407,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             (self.active_column_idx, None)
         };
 
-        let old_width = self.data[col_idx].width;
         let col = &mut self.columns[col_idx];
         col.toggle_width(tile_idx, forwards);
 
         cancel_resize_for_column(&mut self.interactive_resize, col);
-        // Use `expected_width()` to avoid the pre-ack-shift; see `set_window_width`
-        // for the full rationale.
-        self.data[col_idx].width = self.columns[col_idx].expected_width();
-        self.animate_neighbors_after_width_change(col_idx, old_width);
+        self.data[col_idx].update(&self.columns[col_idx]);
     }
 
     pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
@@ -3480,6 +3457,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let col = &mut self.columns[self.active_column_idx];
             col.toggle_full_width();
             cancel_resize_for_column(&mut self.interactive_resize, col);
+            // Refresh the cached column width — `col.toggle_full_width()` mutates
+            // the column directly and would otherwise leave `self.data` stale.
+            self.data[self.active_column_idx].update(&self.columns[self.active_column_idx]);
             return;
         }
 
@@ -3542,6 +3522,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // about to set its width to 100% of the working area. Let's do it via
             // toggle_full_width() as it lets you back out of it more intuitively.
             col.toggle_full_width();
+            // Refresh the cached column width — `col.toggle_full_width()` mutates
+            // the column directly and would otherwise leave `self.data` stale.
+            self.data[self.active_column_idx].update(&self.columns[self.active_column_idx]);
             return;
         }
 
@@ -3550,6 +3533,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         col.preset_width_idx = None;
         col.is_full_width = false;
         col.update_tile_sizes(true);
+        // Same as above: keep `self.data` in sync with the post-resize column width.
+        self.data[self.active_column_idx].update(&self.columns[self.active_column_idx]);
 
         // Put the leftmost window into the view.
         let new_view_x = leftmost_col_x.unwrap() - gap - working_x;
@@ -4372,20 +4357,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // `self.data[col_idx].width`. Refresh it now so subsequent layout math sees the
         // post-resize width, then re-run auto-fit/center so the view recentres if the
         // total content shrunk to fit the workspace.
-        //
-        // Use `expected_width` here rather than `data.update(column)` (which reads the
-        // committed `tile_size`). The Wayland client typically hasn't ack'd the resize
-        // yet at this point, so the committed size still reports the PRE-resize width —
-        // centering on that math shifts the view by ~half the resize delta and leaves
-        // the cluster visibly off after the resize ends.
         if let Some(col_idx) = self
             .columns
             .iter()
             .position(|col| col.contains(&resized_window))
         {
-            let old_width = self.data[col_idx].width;
-            self.data[col_idx].width = self.columns[col_idx].expected_width();
-            self.animate_neighbors_after_width_change(col_idx, old_width);
+            self.data[col_idx].update(&self.columns[col_idx]);
         }
         self.auto_fit_or_center_view_offset();
     }
@@ -5148,6 +5125,30 @@ impl<W: LayoutElement> Column<W> {
         }
     }
 
+    /// Resync the cached per-tile [`TileData`] at `tile_idx` with the tile's
+    /// current state.
+    ///
+    /// `TileData` normally tracks the committed tile size and is refreshed
+    /// through the configure-ack path ([`Column::update_window`]). But
+    /// `Tile::push_window` / `Tile::pop_active_window` swap the tile's active
+    /// window synchronously, which changes its reported `tile_size()`
+    /// immediately — without this resync the stack-move helpers would leave
+    /// `data` stale and trip `Column::verify_invariants`.
+    fn refresh_tile_data(&mut self, tile_idx: usize) {
+        self.data[tile_idx].update(&self.tiles[tile_idx]);
+    }
+
+    /// Pop the active window out of the tile at `tile_idx` (which keeps living
+    /// in this column), keeping that tile's cached [`TileData`] in sync — see
+    /// [`Column::refresh_tile_data`]. Use this rather than poking
+    /// `tiles[idx].pop_active_window()` directly whenever the tile stays in the
+    /// column afterwards.
+    fn pop_window_from_tile(&mut self, tile_idx: usize) -> W {
+        let window = self.tiles[tile_idx].pop_active_window();
+        self.refresh_tile_data(tile_idx);
+        window
+    }
+
     /// Extra size taken up by elements in the column such as the tab indicator.
     fn extra_size(&self) -> Size<f64, Logical> {
         if self.display_mode == ColumnDisplay::Tabbed {
@@ -5483,28 +5484,6 @@ impl<W: LayoutElement> Column<W> {
             .data
             .iter()
             .map(|data| NotNan::new(data.size.w).unwrap())
-            .max()
-            .map(NotNan::into_inner)
-            .unwrap();
-
-        if self.display_mode == ColumnDisplay::Tabbed && self.sizing_mode().is_normal() {
-            let extra_size = self.tab_indicator.extra_size(self.tiles.len(), self.scale);
-            tiles_width += extra_size.w;
-        }
-
-        tiles_width
-    }
-
-    /// Column width based on each tile's EXPECTED (pending-configure) size rather than its
-    /// last-committed size. Used by layout math that needs to position columns at their
-    /// post-resize widths before the Wayland client has acknowledged the configure (e.g.
-    /// re-centering after an interactive column resize ends — otherwise the view-offset
-    /// gets locked to the pre-resize width and lands ~half the resize delta off-center).
-    fn expected_width(&self) -> f64 {
-        let mut tiles_width = self
-            .tiles
-            .iter()
-            .map(|tile| NotNan::new(tile.tile_expected_or_current_size().w).unwrap())
             .max()
             .map(NotNan::into_inner)
             .unwrap();

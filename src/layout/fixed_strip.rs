@@ -14,15 +14,21 @@
 
 use std::rc::Rc;
 
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use naru_ipc::SizeChange;
+use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::utils::{Logical, Point, Rectangle, Serial, Size};
 
-use super::scrolling::{Column, ScrollingSpace, ScrollingSpaceRenderElement};
+use super::scrolling::{
+    Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
+};
 use super::tile::Tile;
-use super::{LayoutElement, Options};
+use super::{LayoutElement, Options, RemovedTile};
 use crate::animation::Clock;
 use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::RenderCtx;
+use crate::utils::transaction::{Transaction, TransactionBlocker};
+use crate::utils::ResizeEdge;
 
 /// Which edge of the workspace working area this strip is anchored to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +230,10 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner.active_window_mut()
     }
 
+    pub fn active_tile_mut(&mut self) -> Option<&mut Tile<W>> {
+        self.inner.active_tile_mut()
+    }
+
     /// Activate the column containing `window` (if any), making it the
     /// strip's focused column. Returns true on success. Keeps the inner
     /// `view_offset` clamped to zero so carousel-style scrolling never
@@ -234,6 +244,194 @@ impl<W: LayoutElement> FixedStrip<W> {
             self.inner.force_view_offset_zero();
         }
         success
+    }
+
+    /// Whether `window` lives in this strip — scans the full window stack of
+    /// every tile, so a stacked-but-hidden window still counts as present.
+    pub fn has_window(&self, window: &W::Id) -> bool {
+        self.inner.columns().any(|col| col.contains(window))
+    }
+
+    /// Remove `window`'s tile from the strip. The caller is responsible for
+    /// clearing `active_fixed_side` when the strip ends up empty. Keeps the
+    /// strip pinned (view offset zeroed, right-side anchor refreshed) after
+    /// the underlying column/tile bookkeeping runs.
+    pub fn remove_tile(&mut self, window: &W::Id, transaction: Transaction) -> RemovedTile<W> {
+        let removed = self.inner.remove_tile(window, transaction);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+        removed
+    }
+
+    /// Remove the strip's focused tile. `None` when the strip is empty. The
+    /// caller clears `active_fixed_side` once the strip empties.
+    pub fn remove_active_tile(&mut self, transaction: Transaction) -> Option<RemovedTile<W>> {
+        let removed = self.inner.remove_active_tile(transaction)?;
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+        Some(removed)
+    }
+
+    /// Remove the strip's focused column. `None` when the strip is empty. The
+    /// caller clears `active_fixed_side` once the strip empties.
+    pub fn remove_active_column(&mut self) -> Option<Column<W>> {
+        let column = self.inner.remove_active_column()?;
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+        Some(column)
+    }
+
+    /// Apply a committed window update (configure-ack) to a strip window.
+    /// Returns `false` (without side effects) when `window` is not in this
+    /// strip, so the caller can fall through to the next layer — mirroring
+    /// [`FloatingSpace::update_window`]'s contract. A configure-ack can
+    /// change the window's size, so the strip is re-pinned afterwards.
+    pub fn update_window(&mut self, window: &W::Id, serial: Option<Serial>) -> bool {
+        if !self.has_window(window) {
+            return false;
+        }
+        self.inner.update_window(window, serial);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+        true
+    }
+
+    // --- Per-window operations routed from the workspace ---------------------
+    //
+    // The carousel's by-window-id methods `unwrap()` on a window they don't
+    // own, so the workspace must dispatch these to whichever strip holds the
+    // window. Each mutating call re-pins the strip afterwards (view offset
+    // zeroed, right-side anchor rebuilt) since column widths may have changed.
+
+    pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        self.inner.set_window_width(window, change);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        self.inner.set_window_height(window, change);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
+        self.inner.reset_window_height(window);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
+        self.inner.toggle_window_width(window, forwards);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
+        self.inner.toggle_window_height(window, forwards);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) -> bool {
+        let rv = self.inner.set_fullscreen(window, is_fullscreen);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+        rv
+    }
+
+    pub fn set_maximized(&mut self, window: &W::Id, maximize: bool) -> bool {
+        let rv = self.inner.set_maximized(window, maximize);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+        rv
+    }
+
+    pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
+        self.inner.interactive_resize_begin(window, edges)
+    }
+
+    pub fn interactive_resize_update(
+        &mut self,
+        window: &W::Id,
+        delta: Point<f64, Logical>,
+    ) -> bool {
+        let rv = self.inner.interactive_resize_update(window, delta);
+        if rv {
+            self.inner.force_view_offset_zero();
+            self.refresh_anchor();
+        }
+        rv
+    }
+
+    pub fn interactive_resize_end(&mut self, window: Option<&W::Id>) {
+        self.inner.interactive_resize_end(window);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn start_close_animation_for_window(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window: &W::Id,
+        blocker: TransactionBlocker,
+    ) {
+        self.inner
+            .start_close_animation_for_window(renderer, window, blocker);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    /// Starts `window`'s open animation if it lives in this strip. Returns
+    /// `false` (no side effects) otherwise, so the caller can fall through.
+    pub fn start_open_animation(&mut self, window: &W::Id) -> bool {
+        self.inner.start_open_animation(window)
+    }
+
+    /// Inserts `tile` as a new column immediately to the right of the column
+    /// holding `right_of` (which must be a window in this strip).
+    pub fn add_tile_right_of(
+        &mut self,
+        right_of: &W::Id,
+        tile: Tile<W>,
+        activate: bool,
+        width: ColumnWidth,
+        is_full_width: bool,
+    ) {
+        self.inner
+            .add_tile_right_of(right_of, tile, activate, width, is_full_width);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
+        self.inner.consume_or_expel_window_left(window);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
+        self.inner.consume_or_expel_window_right(window);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn consume_into_column(&mut self) {
+        self.inner.consume_into_column();
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn expel_from_column(&mut self) {
+        self.inner.expel_from_column();
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
+    }
+
+    pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
+        self.inner.swap_window_in_direction(direction);
+        self.inner.force_view_offset_zero();
+        self.refresh_anchor();
     }
 
     /// Within-strip equivalent of
@@ -301,12 +499,33 @@ impl<W: LayoutElement> FixedStrip<W> {
         Some(column)
     }
 
+    pub fn columns(&self) -> impl Iterator<Item = &Column<W>> + '_ {
+        self.inner.columns()
+    }
+
     pub fn tiles(&self) -> impl Iterator<Item = &Tile<W>> + '_ {
         self.inner.tiles()
     }
 
     pub fn tiles_mut(&mut self) -> impl Iterator<Item = &mut Tile<W>> + '_ {
         self.inner.tiles_mut()
+    }
+
+    /// Tiles paired with their workspace-local render positions. The position
+    /// is encoded by the inner ScrollingSpace's pinned view; callers (focus
+    /// lookup, float-position seeding, invariant checks) need the strip's
+    /// windows enumerated here just like the carousel's.
+    pub fn tiles_with_render_positions(
+        &self,
+    ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
+        self.inner.tiles_with_render_positions()
+    }
+
+    pub fn tiles_with_render_positions_mut(
+        &mut self,
+        round: bool,
+    ) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> {
+        self.inner.tiles_with_render_positions_mut(round)
     }
 
     pub fn advance_animations(&mut self) {
@@ -334,5 +553,20 @@ impl<W: LayoutElement> FixedStrip<W> {
         // Position is encoded in the inner ScrollingSpace's `parent_area`,
         // which `refresh_anchor` keeps up to date on the right side.
         self.inner.render(ctx, xray_pos, focus_ring, push);
+    }
+
+    #[cfg(test)]
+    pub fn verify_invariants(&self) {
+        self.inner.verify_invariants();
+
+        // A strip is a no-scroll container: its view offset is pinned at a
+        // static zero (carousel scroll/center code is never invoked).
+        assert!(
+            matches!(
+                self.inner.view_offset(),
+                super::scrolling::ViewOffset::Static(_)
+            ),
+            "fixed strip view offset must stay static",
+        );
     }
 }

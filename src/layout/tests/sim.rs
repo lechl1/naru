@@ -1,0 +1,643 @@
+//! A deterministic, assertion-friendly test harness for the layout subsystem.
+//!
+//! # Why this exists
+//!
+//! The layout (`Layout` / `Workspace` / `ScrollingSpace` / `FloatingSpace` /
+//! `FixedStrip`) is generic over [`LayoutElement`]: the real compositor runs
+//! `Layout<Mapped>`, driven by the input handler calling inherent `Layout`
+//! methods (`move_window_right_stacked`, `focus_left`, …). The test build runs
+//! `Layout<TestWindow>` driven by the *same* inherent methods. That generic
+//! `Layout<W>` is therefore already the single interface shared between the
+//! fake and the real implementation.
+//!
+//! What was missing — and what this module adds — is:
+//!
+//! 1. **One class holding all the simulated screen/workspace state.**
+//!    [`LayoutSim`] owns a `Layout<TestWindow>` plus the fake environment
+//!    (outputs, the clock, the window-id counter) and exposes the native-ish
+//!    calls — adding outputs/windows, committing configures, advancing time —
+//!    as plain methods. The production layout code runs unchanged underneath;
+//!    only [`LayoutElement`] (the window) and the environment are faked.
+//!
+//! 2. **A shared introspection interface.** [`LayoutModel`] is implemented
+//!    generically for `Layout<W>`, so the *exact same* state queries
+//!    (`window_slot`, `window_geometry`, `active_window_id`, …) work against
+//!    `Layout<TestWindow>` here and against a real `Layout<Mapped>` in an
+//!    end-to-end harness. A scenario written against [`LayoutModel`] + the
+//!    inherent `Layout` actions exercises the production code path regardless
+//!    of the backing window type.
+//!
+//! 3. **Position/state assertions.** Because [`LayoutSim`] re-checks layout
+//!    invariants after every action and exposes [`LayoutModel`], tests assert
+//!    concrete facts ("window 2 is in `FixedRight` at x≈1820") instead of only
+//!    "nothing panicked".
+//!
+//! 4. **Real animation simulation.** The fake drives a fake [`Clock`]:
+//!    [`LayoutSim::advance_time`] / [`LayoutSim::advance_frame`] step the clock
+//!    and run the exact `Layout::advance_animations` the compositor runs each
+//!    frame, so `window_geometry` reports genuine mid-flight positions.
+//!    [`LayoutSim::run_until_settled`] frames forward to the rest state, and
+//!    [`LayoutSim::complete_animations`] jumps straight to it.
+//!
+//! The randomized fuzz test still exists; it now drives a [`LayoutSim`] through
+//! the same [`LayoutSim::apply`] choke point as the deterministic tests.
+
+// This is a test harness: it deliberately exposes a broad API surface that not
+// every individual test exercises.
+#![allow(dead_code)]
+
+use std::time::Duration;
+
+use smithay::utils::{Logical, Rectangle, Size};
+
+use super::{Op, TestWindow, TestWindowParams};
+use crate::animation::Clock;
+use crate::layout::fixed_strip::FixedSide;
+use crate::layout::workspace::WindowLayer;
+use crate::layout::{Layout, LayoutElement, Options};
+
+/// Read-only introspection shared by the fake [`LayoutSim`] and the real
+/// `Layout<Mapped>`. Implemented generically for every `Layout<W>`, so a
+/// scenario phrased against this trait sees identical answers whichever window
+/// type backs the layout.
+///
+/// Actions are intentionally *not* on this trait: the inherent `Layout<W>`
+/// methods (`move_window_right_stacked`, `focus_left`, `remove_window`, …) are
+/// already the shared action surface — the input handler and the tests both
+/// call them directly.
+pub(crate) trait LayoutModel {
+    type WindowId: Clone + PartialEq + std::fmt::Debug;
+
+    /// Every window currently in the layout, across all monitors/workspaces.
+    fn window_ids(&self) -> Vec<Self::WindowId>;
+
+    /// The active (focused) window of the active workspace, if any.
+    fn active_window_id(&self) -> Option<Self::WindowId>;
+
+    /// Which sub-layout holds `id` — carousel, floating, or a fixed-side
+    /// strip. `None` if the layout does not contain the window.
+    fn window_slot(&self, id: &Self::WindowId) -> Option<WindowLayer>;
+
+    /// Workspace-local render rectangle (position + tile size) of `id`.
+    /// `None` if the window is not present (or is on no output).
+    fn window_geometry(&self, id: &Self::WindowId) -> Option<Rectangle<f64, Logical>>;
+
+    /// Which fixed-side strip, if any, currently owns focus on the active
+    /// workspace.
+    fn active_fixed_side(&self) -> Option<FixedSide>;
+}
+
+impl<W: LayoutElement> LayoutModel for Layout<W> {
+    type WindowId = W::Id;
+
+    fn window_ids(&self) -> Vec<W::Id> {
+        self.windows().map(|(_, win)| win.id().clone()).collect()
+    }
+
+    fn active_window_id(&self) -> Option<W::Id> {
+        self.active_workspace()
+            .and_then(|ws| ws.active_window())
+            .map(|win| win.id().clone())
+    }
+
+    fn window_slot(&self, id: &W::Id) -> Option<WindowLayer> {
+        self.workspaces().find_map(|(_, _, ws)| ws.window_slot(id))
+    }
+
+    fn window_geometry(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        for (_, _, ws) in self.workspaces() {
+            for (tile, pos, _visible) in ws.tiles_with_render_positions() {
+                if tile.window().id() == id {
+                    return Some(Rectangle::new(pos, tile.tile_size()));
+                }
+            }
+        }
+        None
+    }
+
+    fn active_fixed_side(&self) -> Option<FixedSide> {
+        self.active_workspace().and_then(|ws| ws.active_fixed_side())
+    }
+}
+
+/// A single test-double class bundling the faked screen/workspace state.
+///
+/// Owns a real `Layout<TestWindow>` — the production layout code runs
+/// unmodified — plus the simulated environment (the clock, the window-id
+/// counter; outputs live inside the layout). Every mutating method funnels
+/// through [`LayoutSim::apply`], which re-checks layout invariants, so a test
+/// that performs an illegal sequence fails on the offending step rather than
+/// much later.
+pub(crate) struct LayoutSim {
+    layout: Layout<TestWindow>,
+    next_window_id: usize,
+}
+
+impl LayoutSim {
+    /// A fresh simulator with default options. Note: stacking is *off* by
+    /// default, matching `naru_config`'s default — use [`Self::new_stacking`]
+    /// for fixed-strip / stack-move scenarios.
+    pub fn new() -> Self {
+        Self::with_options(Options::default())
+    }
+
+    /// A fresh simulator with `enable_stacking: true` — the configuration
+    /// fixed-side panels and stack-moves require.
+    pub fn new_stacking() -> Self {
+        Self::with_options(Options {
+            enable_stacking: true,
+            ..Default::default()
+        })
+    }
+
+    /// A fresh simulator with stacking enabled *and* deterministic 1000 ms
+    /// linear window-move / resize animations. Use this when a scenario needs
+    /// to observe genuine mid-flight geometry — frame-stepping the default
+    /// (spring) animations works too, but linear easing makes assertions
+    /// about progress trivial to reason about.
+    pub fn new_animated() -> Self {
+        use naru_config::animations::{Curve, EasingParams, Kind};
+
+        const LINEAR: Kind = Kind::Easing(EasingParams {
+            duration_ms: 1000,
+            curve: Curve::Linear,
+        });
+
+        let mut options = Options {
+            enable_stacking: true,
+            ..Default::default()
+        };
+        options.animations.window_resize.anim.kind = LINEAR;
+        options.animations.window_movement.0.kind = LINEAR;
+        Self::with_options(options)
+    }
+
+    pub fn with_options(options: Options) -> Self {
+        Self {
+            layout: Layout::with_options(Clock::with_time(Duration::ZERO), options),
+            next_window_id: 0,
+        }
+    }
+
+    // --- the choke point -----------------------------------------------------
+
+    /// Apply one raw [`Op`] and re-check layout invariants. Every ergonomic
+    /// action below, and the randomized fuzz test, route through here so the
+    /// invariant check is impossible to forget.
+    pub fn apply(&mut self, op: Op) {
+        op.apply(&mut self.layout);
+        self.layout.verify_invariants();
+    }
+
+    /// Re-check invariants without performing an action. Handy after poking
+    /// the layout through [`Self::layout_mut`].
+    pub fn verify(&self) {
+        self.layout.verify_invariants();
+    }
+
+    /// Drive a whole [`Op`] sequence through [`Self::apply`]. This is the entry
+    /// point the randomized fuzz test uses, so the fuzzer and the deterministic
+    /// scenario tests share the exact same per-op invariant checking.
+    pub fn run(&mut self, ops: impl IntoIterator<Item = Op>) {
+        for op in ops {
+            self.apply(op);
+        }
+    }
+
+    // --- simulated environment / native calls --------------------------------
+
+    /// Plug in a fake output (1280×720 @ scale 1). `id` becomes part of its
+    /// connector name (`output{id}`).
+    pub fn add_output(&mut self, id: usize) {
+        self.apply(Op::AddOutput(id));
+    }
+
+    /// Open a new tiled window in the carousel; returns its id.
+    pub fn add_window(&mut self) -> usize {
+        let id = self.fresh_id();
+        self.apply(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+        id
+    }
+
+    /// Open a new window, letting the caller tweak its params (size, floating,
+    /// parent, rules) first; returns its id.
+    pub fn add_window_with(&mut self, configure: impl FnOnce(&mut TestWindowParams)) -> usize {
+        let id = self.fresh_id();
+        let mut params = TestWindowParams::new(id);
+        configure(&mut params);
+        self.apply(Op::AddWindow { params });
+        id
+    }
+
+    /// Open a new floating window; returns its id.
+    pub fn add_floating_window(&mut self) -> usize {
+        self.add_window_with(|params| params.is_floating = true)
+    }
+
+    /// Close the window with the given id.
+    pub fn close_window(&mut self, id: usize) {
+        self.apply(Op::CloseWindow(id));
+    }
+
+    /// Deliver `id`'s pending configure-ack (the fake equivalent of a Wayland
+    /// client committing the size we asked it for).
+    pub fn communicate(&mut self, id: usize) {
+        self.apply(Op::Communicate(id));
+    }
+
+    /// Commit pending configures for every window currently in the layout.
+    pub fn communicate_all(&mut self) {
+        for id in self.window_ids() {
+            self.communicate(id);
+        }
+    }
+
+    /// Advance the simulated clock by `ms` milliseconds and step every
+    /// animation forward by that much. This is real animation simulation: the
+    /// fake clock drives the exact same `Layout::advance_animations` the
+    /// compositor runs each frame, so `window_geometry` reports genuine
+    /// mid-flight positions between calls.
+    pub fn advance_time(&mut self, ms: i32) {
+        self.apply(Op::AdvanceAnimations { msec_delta: ms });
+    }
+
+    /// Advance the clock by one ~60 fps frame (16 ms) and step animations —
+    /// the granularity a real compositor renders at.
+    pub fn advance_frame(&mut self) {
+        self.advance_time(16);
+    }
+
+    /// Step ~60 fps frames until no animation is in flight (or `max_frames` is
+    /// reached, which fails the test — an animation that never settles is a
+    /// bug). Returns the number of frames it took.
+    pub fn run_until_settled(&mut self) -> usize {
+        const MAX_FRAMES: usize = 600; // 10 s of simulated time — generous.
+        for frame in 0..MAX_FRAMES {
+            if !self.are_animations_ongoing() {
+                return frame;
+            }
+            self.advance_frame();
+        }
+        panic!("animations did not settle within {MAX_FRAMES} frames");
+    }
+
+    /// Whether any animation (window movement, view scroll, resize, open/close)
+    /// is still in flight on any output.
+    pub fn are_animations_ongoing(&self) -> bool {
+        self.layout.are_animations_ongoing(None)
+    }
+
+    /// Run all in-flight animations to completion instantly (jump to their
+    /// end state without stepping frames).
+    pub fn complete_animations(&mut self) {
+        self.apply(Op::CompleteAnimations);
+    }
+
+    /// Run a render-element update pass over every output. Some layout bugs
+    /// only surface once render elements are recomputed, so scenario tests
+    /// that care about geometry should call this before asserting.
+    pub fn update_render_elements(&mut self) {
+        self.layout.update_render_elements(None);
+        self.layout.verify_invariants();
+    }
+
+    // --- shared actions (verified) -------------------------------------------
+    //
+    // These delegate to the inherent `Layout` methods — the exact entry points
+    // the real input handler uses — and then re-check invariants.
+
+    pub fn move_window_left_stacked(&mut self) {
+        self.layout.move_window_left_stacked();
+        self.verify();
+    }
+
+    pub fn move_window_right_stacked(&mut self) {
+        self.layout.move_window_right_stacked();
+        self.verify();
+    }
+
+    pub fn move_window_up_stacked(&mut self) {
+        self.layout.move_window_up_stacked();
+        self.verify();
+    }
+
+    pub fn move_window_down_stacked(&mut self) {
+        self.layout.move_window_down_stacked();
+        self.verify();
+    }
+
+    pub fn focus_left(&mut self) {
+        self.layout.focus_left();
+        self.verify();
+    }
+
+    pub fn focus_right(&mut self) {
+        self.layout.focus_right();
+        self.verify();
+    }
+
+    pub fn focus_up(&mut self) {
+        self.layout.focus_up();
+        self.verify();
+    }
+
+    pub fn focus_down(&mut self) {
+        self.layout.focus_down();
+        self.verify();
+    }
+
+    pub fn move_left(&mut self) {
+        self.layout.move_left();
+        self.verify();
+    }
+
+    pub fn move_right(&mut self) {
+        self.layout.move_right();
+        self.verify();
+    }
+
+    pub fn focus_column_first(&mut self) {
+        self.layout.focus_column_first();
+        self.verify();
+    }
+
+    pub fn focus_column_last(&mut self) {
+        self.layout.focus_column_last();
+        self.verify();
+    }
+
+    /// Activate (focus) a specific window by id, wherever it lives.
+    pub fn focus_window(&mut self, id: usize) {
+        self.layout.activate_window(&id);
+        self.verify();
+    }
+
+    // --- escape hatches ------------------------------------------------------
+
+    /// Borrow the underlying layout for queries/actions not yet wrapped.
+    /// Prefer the wrapped actions and [`LayoutModel`] queries.
+    pub fn layout(&self) -> &Layout<TestWindow> {
+        &self.layout
+    }
+
+    /// Mutable access to the underlying layout. The caller is responsible for
+    /// calling [`Self::verify`] afterwards.
+    pub fn layout_mut(&mut self) -> &mut Layout<TestWindow> {
+        &mut self.layout
+    }
+
+    fn fresh_id(&mut self) -> usize {
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        id
+    }
+}
+
+impl Default for LayoutSim {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LayoutModel for LayoutSim {
+    type WindowId = usize;
+
+    fn window_ids(&self) -> Vec<usize> {
+        LayoutModel::window_ids(&self.layout)
+    }
+
+    fn active_window_id(&self) -> Option<usize> {
+        self.layout.active_window_id()
+    }
+
+    fn window_slot(&self, id: &usize) -> Option<WindowLayer> {
+        self.layout.window_slot(id)
+    }
+
+    fn window_geometry(&self, id: &usize) -> Option<Rectangle<f64, Logical>> {
+        self.layout.window_geometry(id)
+    }
+
+    fn active_fixed_side(&self) -> Option<FixedSide> {
+        LayoutModel::active_fixed_side(&self.layout)
+    }
+}
+
+impl LayoutSim {
+    /// Convenience: x-position of a window's render rectangle, panicking with a
+    /// clear message if the window isn't present.
+    pub fn window_x(&self, id: usize) -> f64 {
+        self.window_geometry(&id)
+            .unwrap_or_else(|| panic!("window {id} has no geometry (not in layout?)"))
+            .loc
+            .x
+    }
+
+    /// Convenience: assert a window is in the expected slot.
+    #[track_caller]
+    pub fn assert_slot(&self, id: usize, expected: WindowLayer) {
+        let got = self.window_slot(&id);
+        assert_eq!(
+            got,
+            Some(expected),
+            "window {id} expected in {expected:?}, but slot is {got:?}",
+        );
+    }
+
+    /// Convenience: assert which window is focused.
+    #[track_caller]
+    pub fn assert_active(&self, expected: Option<usize>) {
+        let got = self.active_window_id();
+        assert_eq!(got, expected, "active window mismatch");
+    }
+
+    /// Right edge (`loc.x + size.w`) of a window's render rectangle.
+    pub fn window_right_edge(&self, id: usize) -> f64 {
+        let geo = self
+            .window_geometry(&id)
+            .unwrap_or_else(|| panic!("window {id} has no geometry (not in layout?)"));
+        geo.loc.x + geo.size.w
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window the carousel pushes into a fixed strip is reachable, lands
+    /// in the expected strip, and rides back out into the carousel — asserted
+    /// by slot, not just by "didn't panic".
+    #[test]
+    fn stack_move_into_right_strip_and_back() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+
+        // `b` is the active (rightmost) carousel column. A right-stack at the
+        // carousel's right edge overflows into the right fixed strip.
+        sim.move_window_right_stacked();
+        sim.assert_slot(b, WindowLayer::FixedRight);
+        sim.assert_slot(a, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+        sim.assert_active(Some(b));
+
+        // A configure-ack on the strip window must not panic (regression:
+        // `update_window` used to route every window through the carousel).
+        sim.communicate(b);
+        sim.assert_slot(b, WindowLayer::FixedRight);
+
+        // Ride it back out into the carousel.
+        sim.move_window_left_stacked();
+        sim.assert_slot(b, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), None);
+    }
+
+    /// Symmetric left-strip path.
+    #[test]
+    fn stack_move_into_left_strip_and_back() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+
+        // Focus the leftmost column and left-stack it into the left strip.
+        sim.focus_column_first();
+        sim.move_window_left_stacked();
+        sim.assert_slot(a, WindowLayer::FixedLeft);
+        sim.assert_slot(b, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Left));
+
+        sim.communicate(a);
+        sim.move_window_right_stacked();
+        sim.assert_slot(a, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), None);
+    }
+
+    /// Closing a window that lives in a fixed strip must route the removal
+    /// into the strip (regression: `Workspace::remove_tile` used to send every
+    /// removal to the carousel, which `unwrap()`-panicked).
+    #[test]
+    fn closing_a_fixed_strip_window_does_not_panic() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let only = sim.add_window();
+
+        sim.move_window_left_stacked();
+        sim.assert_slot(only, WindowLayer::FixedLeft);
+
+        sim.close_window(only);
+        assert!(sim.window_ids().is_empty(), "window should be gone");
+        assert_eq!(sim.active_fixed_side(), None);
+    }
+
+    /// A fixed-strip window stays on screen: its geometry must be queryable
+    /// and lie within the output, even though strips don't scroll.
+    #[test]
+    fn fixed_strip_window_has_queryable_geometry() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let _b = sim.add_window();
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Both windows must have a geometry; the carousel window `a` and the
+        // strip window are both on screen.
+        assert!(
+            sim.window_geometry(&a).is_some(),
+            "carousel window must have geometry",
+        );
+    }
+
+    /// Animations are genuinely simulated frame by frame: an animated action
+    /// leaves work in flight, frame-stepping makes observable progress in
+    /// `window_geometry`, and the animation eventually settles at a rest
+    /// position distinct from where it started.
+    #[test]
+    fn animations_are_simulated_frame_by_frame() {
+        let mut sim = LayoutSim::new_animated();
+        sim.add_output(1);
+        let _a = sim.add_window();
+        let _b = sim.add_window();
+        let c = sim.add_window();
+        sim.communicate_all();
+        sim.run_until_settled();
+
+        // `c` is the rightmost/active column. Record its resting x, then move
+        // it left — that kicks off a column-movement animation.
+        sim.focus_column_last();
+        sim.update_render_elements();
+        let x_start = sim.window_x(c);
+
+        sim.move_left();
+        assert!(
+            sim.are_animations_ongoing(),
+            "moving a column should start a movement animation",
+        );
+
+        // At t≈0 the render position is still essentially where it started
+        // (the move sets up a decaying offset that cancels the layout jump).
+        sim.update_render_elements();
+        let x_t0 = sim.window_x(c);
+        assert!(
+            (x_t0 - x_start).abs() < 1.0,
+            "at animation start the window should still render near its old x \
+             (start {x_start}, t0 {x_t0})",
+        );
+
+        // Step a few frames: the window is now mid-flight, away from x_t0.
+        sim.advance_frame();
+        sim.advance_frame();
+        sim.update_render_elements();
+        let x_mid = sim.window_x(c);
+        assert_ne!(
+            x_mid, x_t0,
+            "frame-stepping must move the window along its animation",
+        );
+
+        // Run the animation out; it settles, and the rest position differs
+        // from where the window started.
+        let frames = sim.run_until_settled();
+        sim.update_render_elements();
+        let x_settled = sim.window_x(c);
+        assert!(!sim.are_animations_ongoing());
+        assert!(frames > 0, "there was still animation left to run");
+        assert_ne!(
+            x_settled, x_start,
+            "moving the column must change its resting position",
+        );
+
+        // `complete_animations` is the instant equivalent of run_until_settled.
+        sim.focus_column_first();
+        sim.move_right();
+        sim.complete_animations();
+        assert!(!sim.are_animations_ongoing());
+    }
+
+    /// Regression (found by the slow fuzzer, distilled to a fast test):
+    /// consuming a window into its neighbour and then stack-moving a tile
+    /// inside that 2-tile column left the column's per-tile `data` cache
+    /// stale, tripping `Column::verify_invariants`.
+    #[test]
+    fn consume_then_stack_move_down_keeps_tile_data_consistent() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        // The two windows have *different* heights — that asymmetry is what
+        // exposed the stale-cache bug.
+        let _a = sim.add_window_with(|p| p.bbox = Rectangle::from_size(Size::from((1, 1))));
+        let _b = sim.add_window_with(|p| p.bbox = Rectangle::from_size(Size::from((1, 2))));
+
+        // Consume the active window into its left neighbour → one 2-tile column.
+        sim.apply(Op::ConsumeOrExpelWindowLeft { id: None });
+        // Focus the top tile, then stack-move it down within the column.
+        sim.apply(Op::FocusWindowUpOrColumnLeft);
+        sim.move_window_down_stacked();
+        // `apply` / `move_window_down_stacked` already re-checked invariants;
+        // a stale per-tile `data` cache would have panicked above.
+    }
+}
