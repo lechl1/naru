@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# Multi-stage rust build for naru, mirroring the pattern in
+# modules/waydns/waydns/sync/Dockerfile. The host install script copies
+# this file into the cloned naru repo as Dockerfile.alloy, runs
+# `docker build`, then `docker cp` extracts /out/naru into the repo's
+# target/release/ so the upstream scripts/install.sh keeps working unchanged.
+#
+# Base image must match the host distro so the binary's NEEDED sonames
+# match the host's installed runtime libs. Trixie shipped libdisplay-info
+# soname 2 while the host (Ubuntu 26.04) ships soname 3 — that mismatch
+# left the installed binary unable to load libdisplay-info.so.2 at runtime.
+
+FROM ubuntu:26.04 AS builder
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+# Network access comes from the legacy builder's CLI-level
+# `--network=host` (see 00-naru-linux-install.sh).
+# naru is a Wayland compositor (downstream niri fork). Its dep tree pulls
+# in *-sys crates for the full graphics/input/seat stack — every one of
+# them runs pkg-config in build.rs and panics without the matching `.pc`
+# file. Install the whole set up front rather than iterating per failure.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl pkg-config ca-certificates \
+        build-essential clang libclang-dev \
+        libssl-dev libsystemd-dev \
+        libudev-dev libseat-dev libinput-dev \
+        libwayland-dev wayland-protocols libxkbcommon-dev \
+        libdrm-dev libgbm-dev libegl-dev libgles-dev \
+        libpixman-1-dev libdisplay-info-dev libdbus-1-dev \
+        libpipewire-0.3-dev libspa-0.2-dev \
+        libxcb1-dev libxkbcommon-x11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin rust via rustup (Ubuntu's apt-shipped rustc lags behind upstream).
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain 1.88.0 --profile minimal --no-modify-path
+
+COPY . .
+RUN cargo build --release --bin naru \
+    && install -D /app/target/release/naru /out/naru
+
+FROM scratch AS export
+COPY --from=builder /out/naru /naru
