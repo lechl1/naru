@@ -48,7 +48,8 @@
 
 use std::time::Duration;
 
-use smithay::utils::{Logical, Rectangle, Size};
+use naru_config::FloatOrInt;
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::{Op, TestWindow, TestWindowParams};
 use crate::animation::Clock;
@@ -374,6 +375,29 @@ impl LayoutSim {
         self.verify();
     }
 
+    /// Hit-test `pos` (output-local logical coordinates) on `output{output_id}`
+    /// through the production `Layout::window_under` — the *mouse* path. This
+    /// is deliberately distinct from [`focus_window`], which activates a window
+    /// by id and bypasses hit-testing entirely: a pointer click first has to
+    /// find the window under the cursor, and that lookup used to skip the
+    /// fixed-side panels. Returns the id of the window under the point, if any.
+    pub fn window_under(&self, output_id: usize, pos: (f64, f64)) -> Option<usize> {
+        let name = format!("output{output_id}");
+        let output = self.layout.outputs().find(|o| o.name() == name)?.clone();
+        self.layout
+            .window_under(&output, Point::from(pos))
+            .map(|(win, _hit)| *win.id())
+    }
+
+    /// Simulate a left-click at `pos`: hit-test like the pointer handler, then
+    /// focus whatever window was hit. Returns the focused window id, or `None`
+    /// if the click landed on empty space.
+    pub fn click_to_focus(&mut self, output_id: usize, pos: (f64, f64)) -> Option<usize> {
+        let id = self.window_under(output_id, pos)?;
+        self.focus_window(id);
+        Some(id)
+    }
+
     // --- escape hatches ------------------------------------------------------
 
     /// Borrow the underlying layout for queries/actions not yet wrapped.
@@ -639,5 +663,121 @@ mod tests {
         sim.move_window_down_stacked();
         // `apply` / `move_window_down_stacked` already re-checked invariants;
         // a stale per-tile `data` cache would have panicked above.
+    }
+
+    /// A mouse click must be able to focus a window that lives in a fixed-side
+    /// panel. The hit-test (`Layout::window_under`) used to check only floating
+    /// and the carousel, so a click on a sidepanel window fell straight through
+    /// to the carousel behind it — the window could never be focused by mouse.
+    #[test]
+    fn mouse_click_focuses_fixed_strip_window() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+
+        // Park `b` in the right strip; `a` stays in the carousel.
+        sim.move_window_right_stacked();
+        sim.assert_slot(b, WindowLayer::FixedRight);
+        sim.assert_slot(a, WindowLayer::Scrolling);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // A click at the centre of `b`'s render rectangle must resolve to `b`
+        // and focus it (setting the active fixed side). Before the fix,
+        // window_under skipped the fixed-side panels entirely, so a sidepanel
+        // window could never be focused by mouse — the click fell through to
+        // the carousel behind it.
+        //
+        // (We don't also assert a carousel click here: the right strip's
+        // right-edge anchor is still a known follow-up, so it currently renders
+        // at the left origin overlapping the carousel column. Where they
+        // overlap the panel correctly wins — it's in front — which leaves no
+        // carousel-only point to click in this two-window setup.)
+        let geo = sim.window_geometry(&b).expect("strip window has geometry");
+        let center = (geo.loc.x + geo.size.w / 2.0, geo.loc.y + geo.size.h / 2.0);
+        assert_eq!(
+            sim.window_under(1, center),
+            Some(b),
+            "window_under must hit the sidepanel window, not fall through to the carousel",
+        );
+        assert_eq!(sim.click_to_focus(1, center), Some(b));
+        sim.assert_active(Some(b));
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+    }
+
+    /// Up/down keyboard focus must move *within* a fixed-strip column. Before
+    /// the fix, `focus_up` / `focus_down` always operated on the carousel even
+    /// when focus was inside a strip, so the active sidepanel window never
+    /// changed.
+    #[test]
+    fn vertical_focus_moves_within_fixed_strip() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+
+        // Merge `a` and `b` into a single two-tile column, then ride that whole
+        // column into the right strip (no right neighbour ⇒ column-into-strip).
+        sim.apply(Op::ConsumeOrExpelWindowLeft { id: None });
+        sim.move_window_right_stacked();
+        sim.assert_slot(a, WindowLayer::FixedRight);
+        sim.assert_slot(b, WindowLayer::FixedRight);
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+
+        // Vertical focus moves between the two tiles of the strip column.
+        let before = sim.active_window_id().expect("a window is focused");
+        sim.focus_up();
+        let after_up = sim.active_window_id().expect("a window is focused");
+        assert_ne!(
+            before, after_up,
+            "focus_up must move within the strip column, not poke the empty carousel",
+        );
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+        sim.assert_slot(after_up, WindowLayer::FixedRight);
+
+        // ...and back down to where we started.
+        sim.focus_down();
+        assert_eq!(sim.active_window_id(), Some(before));
+    }
+
+    /// A top strut models the space a top bar (waybar) reserves: the working
+    /// area starts below it, and *both* the carousel and the side panels must
+    /// lay their windows out below it. The panels ignoring the reserved top
+    /// space is what left sidepanel windows rendering up under the bar.
+    #[test]
+    fn fixed_strip_windows_clear_a_top_strut() {
+        let mut options = Options {
+            enable_stacking: true,
+            ..Default::default()
+        };
+        options.layout.struts.top = FloatOrInt(50.0);
+
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1);
+        let a = sim.add_window(); // carousel
+        let b = sim.add_window();
+        sim.move_window_right_stacked(); // b → right strip
+        sim.assert_slot(b, WindowLayer::FixedRight);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let carousel_top = sim.window_geometry(&a).expect("carousel geo").loc.y;
+        let strip_top = sim.window_geometry(&b).expect("strip geo").loc.y;
+
+        assert!(
+            carousel_top >= 50.0,
+            "carousel window should clear the 50px top strut, got {carousel_top}",
+        );
+        assert!(
+            strip_top >= 50.0,
+            "strip window should clear the 50px top strut, got {strip_top}",
+        );
+        assert!(
+            (carousel_top - strip_top).abs() < 0.5,
+            "strip window top ({strip_top}) must align with the carousel ({carousel_top})",
+        );
     }
 }
