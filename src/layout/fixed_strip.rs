@@ -22,7 +22,7 @@ use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
 use super::tile::Tile;
-use super::{LayoutElement, Options, RemovedTile};
+use super::{HitType, LayoutElement, Options, RemovedTile};
 use crate::animation::Clock;
 use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::xray::XrayPos;
@@ -201,6 +201,39 @@ impl<W: LayoutElement> FixedStrip<W> {
         }
         self.inner.set_active_column_idx_static(idx + 1);
         true
+    }
+
+    /// Move focus one row up within the active column of the strip. Strips can
+    /// hold multi-tile columns, so vertical keyboard focus has to be routed
+    /// here when `active_fixed_side` points at this strip — otherwise it would
+    /// fall through to the carousel. Re-pins the view so the inner
+    /// ScrollingSpace's row-focus side effect can't bleed a horizontal scroll
+    /// into the strip. Returns true if focus moved.
+    pub fn focus_up(&mut self) -> bool {
+        let moved = self.inner.focus_up();
+        self.inner.force_view_offset_zero();
+        moved
+    }
+
+    /// Mirror of [`focus_up`](Self::focus_up): move focus one row down within
+    /// the strip's active column.
+    pub fn focus_down(&mut self) -> bool {
+        let moved = self.inner.focus_down();
+        self.inner.force_view_offset_zero();
+        moved
+    }
+
+    /// Hit-test a workspace-local point against this strip's windows, mirroring
+    /// the carousel's [`ScrollingSpace::window_under`]. Returns `None` when the
+    /// strip is empty or the point misses every tile, so the workspace can fall
+    /// through to the next layer. The inner ScrollingSpace positions its tiles
+    /// via the pinned `parent_area`, so the point is already in the right
+    /// coordinate space — no extra translation needed.
+    pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
+        if self.is_empty() {
+            return None;
+        }
+        self.inner.window_under(pos)
     }
 
     /// Focus the strip's innermost (carousel-facing) column. No-op if the

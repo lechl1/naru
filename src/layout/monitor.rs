@@ -1745,16 +1745,22 @@ impl<W: LayoutElement> Monitor<W> {
                 }
             }
 
-            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
-
-            // Fixed-side panels render on top of the carousel so the
-            // carousel's position relative to the screen stays pinned as
-            // panels grow / shrink. The drop-shadow bars draw between
-            // carousel and strips so each populated panel reads as a
-            // raised surface over the carousel beneath.
-            ws.render_fixed_strip_shadows(push!());
+            // Push order is front-to-back (earlier = on top — see naru.rs,
+            // where the overlay layer is pushed first and the wallpaper
+            // backdrop last). The fixed-side panels therefore render *in front
+            // of* the carousel: a carousel column scrolled to the edge slides
+            // behind the panel rather than over it. The carousel's position
+            // relative to the screen still stays pinned as panels grow / shrink
+            // (that's a layout property, independent of z-order).
+            //
+            // The drop-shadow bands draw between the panels and the carousel —
+            // on top of the carousel, beneath the panels — so the carousel
+            // fades into the raised panel just before it disappears underneath.
             ws.render_fixed_left(ctx.r(), xray_pos, focus_ring, push!());
             ws.render_fixed_right(ctx.r(), xray_pos, focus_ring, push!());
+            ws.render_fixed_strip_shadows(push!());
+
+            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
         }
     }
 

@@ -43,17 +43,24 @@ use crate::utils::{
 };
 use crate::window::ResolvedWindowRules;
 
-/// Width in logical pixels of a single band in the fixed-panel drop shadow's
-/// fake gradient. The render path stacks several bands side-by-side, each
-/// with a decreasing alpha, to approximate a smooth shadow without a custom
-/// shader.
+/// Width in logical pixels of a single band in the fixed-panel edge gradient.
+/// The render path stacks several bands side-by-side, each with a decreasing
+/// alpha, to approximate a smooth gradient without a custom shader.
 const FIXED_PANEL_SHADOW_BAND_WIDTH: f64 = 2.0;
 
-/// Per-band alpha multipliers applied to the (otherwise opaque black) shadow
-/// buffer. Bands are ordered carousel-ward → away-from-strip, so the first
-/// (densest) band sits adjacent to the strip's inner edge and successive
-/// bands fade out into the carousel.
-const FIXED_PANEL_SHADOW_BAND_ALPHAS: &[f32] = &[0.45, 0.30, 0.17, 0.08];
+/// Per-band alpha multipliers applied to the (otherwise opaque black) gradient
+/// buffer. Bands are ordered strip-ward → carousel-ward, so the first (densest)
+/// band sits adjacent to the panel's inner edge and successive bands fade out
+/// into the carousel.
+///
+/// Because the panels now render *in front of* the carousel, this gradient
+/// reads as the carousel fading out as it approaches the panel — the "fade
+/// before disappearing behind the side panel" — rather than as a thin drop
+/// shadow. It's deliberately wide (`len() × WIDTH` ≈ 24 px) and smoothly
+/// tapered so the transition is gentle.
+const FIXED_PANEL_SHADOW_BAND_ALPHAS: &[f32] = &[
+    0.50, 0.43, 0.36, 0.30, 0.24, 0.19, 0.15, 0.11, 0.08, 0.05, 0.03, 0.01,
+];
 
 /// Color of the fixed-panel drop shadow before alpha multiplication.
 const FIXED_PANEL_SHADOW_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
@@ -161,10 +168,11 @@ pub struct Workspace<W: LayoutElement> {
     /// This workspace's background.
     background_buffer: SolidColorBuffer,
 
-    /// Shared black buffer used to draw the fixed-panel drop shadow's
-    /// fake-gradient bands. Sized to one band wide
-    /// (`FIXED_PANEL_SHADOW_BAND_WIDTH × view_size.h`) and re-used at render
-    /// time by stacking it with the alphas in
+    /// Shared black buffer used to draw the fixed-panel edge gradient's bands.
+    /// Sized one band wide and as tall as the working area
+    /// (`FIXED_PANEL_SHADOW_BAND_WIDTH × working_area.size.h`) so it spans the
+    /// panel's vertical extent below the bar rather than the whole output, and
+    /// re-used at render time by stacking it with the alphas in
     /// [`FIXED_PANEL_SHADOW_BAND_ALPHAS`].
     fixed_panel_shadow_buffer: SolidColorBuffer,
 
@@ -377,7 +385,7 @@ impl<W: LayoutElement> Workspace<W> {
             shadow: Shadow::new(shadow_config),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             fixed_panel_shadow_buffer: SolidColorBuffer::new(
-                Size::from((FIXED_PANEL_SHADOW_BAND_WIDTH, view_size.h)),
+                Size::from((FIXED_PANEL_SHADOW_BAND_WIDTH, working_area.size.h)),
                 FIXED_PANEL_SHADOW_COLOR,
             ),
             output: Some(output),
@@ -467,7 +475,7 @@ impl<W: LayoutElement> Workspace<W> {
             shadow: Shadow::new(shadow_config),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
             fixed_panel_shadow_buffer: SolidColorBuffer::new(
-                Size::from((FIXED_PANEL_SHADOW_BAND_WIDTH, view_size.h)),
+                Size::from((FIXED_PANEL_SHADOW_BAND_WIDTH, working_area.size.h)),
                 FIXED_PANEL_SHADOW_COLOR,
             ),
             clock,
@@ -817,6 +825,24 @@ impl<W: LayoutElement> Workspace<W> {
                 scale.fractional_scale(),
                 self.options.clone(),
             );
+            // The fixed-side panels track the working area too. Skipping them
+            // here is what left the side panels overlapping the waybar: when a
+            // layer-shell surface (the bar) maps its exclusive zone *after* the
+            // workspace was created, `working_area.loc.y` grows, but only the
+            // carousel and floating layers were re-pinned — the strips kept
+            // their stale full-height area and rendered under the bar.
+            self.fixed_left.update_config(
+                size,
+                working_area,
+                scale.fractional_scale(),
+                self.options.clone(),
+            );
+            self.fixed_right.update_config(
+                size,
+                working_area,
+                scale.fractional_scale(),
+                self.options.clone(),
+            );
 
             let shadow_config =
                 compute_workspace_shadow_config(self.options.overview.workspace_shadow, size);
@@ -825,7 +851,10 @@ impl<W: LayoutElement> Workspace<W> {
 
         self.background_buffer.resize(size);
         self.fixed_panel_shadow_buffer
-            .resize(Size::from((FIXED_PANEL_SHADOW_BAND_WIDTH, size.h)));
+            .resize(Size::from((
+                FIXED_PANEL_SHADOW_BAND_WIDTH,
+                working_area.size.h,
+            )));
 
         if scale_transform_changed {
             for window in self.windows() {
@@ -1381,7 +1410,11 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.focus_down()
         } else {
-            self.scrolling.focus_down()
+            match self.active_fixed_side {
+                Some(FixedSide::Left) => self.fixed_left.focus_down(),
+                Some(FixedSide::Right) => self.fixed_right.focus_down(),
+                None => self.scrolling.focus_down(),
+            }
         }
     }
 
@@ -1389,7 +1422,11 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.focus_up()
         } else {
-            self.scrolling.focus_up()
+            match self.active_fixed_side {
+                Some(FixedSide::Left) => self.fixed_left.focus_up(),
+                Some(FixedSide::Right) => self.fixed_right.focus_up(),
+                None => self.scrolling.focus_up(),
+            }
         }
     }
 
@@ -1397,7 +1434,17 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.focus_down();
         } else {
-            self.scrolling.focus_down_or_left();
+            // Within a strip, up/down stays inside the strip's active column;
+            // the carousel-only horizontal fallback does not apply.
+            match self.active_fixed_side {
+                Some(FixedSide::Left) => {
+                    self.fixed_left.focus_down();
+                }
+                Some(FixedSide::Right) => {
+                    self.fixed_right.focus_down();
+                }
+                None => self.scrolling.focus_down_or_left(),
+            }
         }
     }
 
@@ -1405,7 +1452,15 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.focus_down();
         } else {
-            self.scrolling.focus_down_or_right();
+            match self.active_fixed_side {
+                Some(FixedSide::Left) => {
+                    self.fixed_left.focus_down();
+                }
+                Some(FixedSide::Right) => {
+                    self.fixed_right.focus_down();
+                }
+                None => self.scrolling.focus_down_or_right(),
+            }
         }
     }
 
@@ -1413,7 +1468,15 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.focus_up();
         } else {
-            self.scrolling.focus_up_or_left();
+            match self.active_fixed_side {
+                Some(FixedSide::Left) => {
+                    self.fixed_left.focus_up();
+                }
+                Some(FixedSide::Right) => {
+                    self.fixed_right.focus_up();
+                }
+                None => self.scrolling.focus_up_or_left(),
+            }
         }
     }
 
@@ -1421,7 +1484,15 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             self.floating.focus_up();
         } else {
-            self.scrolling.focus_up_or_right();
+            match self.active_fixed_side {
+                Some(FixedSide::Left) => {
+                    self.fixed_left.focus_up();
+                }
+                Some(FixedSide::Right) => {
+                    self.fixed_right.focus_up();
+                }
+                None => self.scrolling.focus_up_or_right(),
+            }
         }
     }
 
@@ -2329,14 +2400,15 @@ impl<W: LayoutElement> Workspace<W> {
             });
     }
 
-    /// Emits a faux-gradient black drop shadow on the carousel-facing inner
-    /// edge of each populated fixed-side panel. The gradient is built by
-    /// stacking [`FIXED_PANEL_SHADOW_BAND_ALPHAS.len()`] one-band-wide
-    /// rectangles side-by-side, each with a decreasing alpha, so the strip
-    /// reads as a raised surface fading into the carousel. Drawn between
-    /// [`render_scrolling`](Self::render_scrolling) and the per-strip render
-    /// methods so it sits on top of the carousel but beneath the strip's
-    /// own windows. Empty strips contribute nothing.
+    /// Emits a faux-gradient black edge fade on the carousel-facing inner edge
+    /// of each populated fixed-side panel. The gradient is built by stacking
+    /// [`FIXED_PANEL_SHADOW_BAND_ALPHAS.len()`] one-band-wide rectangles
+    /// side-by-side, each with a decreasing alpha, so the carousel reads as
+    /// fading out as it approaches the panel before sliding behind it. Pushed
+    /// *after* the per-strip render methods and *before*
+    /// [`render_scrolling`](Self::render_scrolling) (push order is
+    /// front-to-back), so it sits on top of the carousel but beneath the
+    /// panel's own windows. Empty strips contribute nothing.
     pub fn render_fixed_strip_shadows<R: NaruRenderer>(
         &self,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
@@ -2537,7 +2609,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
-        // This logic is consistent with tiles_with_render_positions().
+        // Mirror the render z-order (front → back): floating on top, then the
+        // fixed-side panels, then the carousel behind them. Hit-testing the
+        // strips before the carousel is what lets a mouse click focus a
+        // sidepanel window (and matches the carousel sliding *behind* the
+        // panel after the z-order change).
         if self.is_floating_visible() {
             if let Some(rv) = self
                 .floating
@@ -2546,6 +2622,13 @@ impl<W: LayoutElement> Workspace<W> {
             {
                 return Some(rv);
             }
+        }
+
+        if let Some(rv) = self.fixed_left.window_under(pos) {
+            return Some(rv);
+        }
+        if let Some(rv) = self.fixed_right.window_under(pos) {
+            return Some(rv);
         }
 
         self.scrolling.window_under(pos)
