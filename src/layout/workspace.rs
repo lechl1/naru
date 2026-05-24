@@ -1269,6 +1269,69 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn focus_left(&mut self) -> bool {
+        self.focus_left_in_layer() || self.focus_in_direction_cross_layer(FocusDir::Left)
+    }
+
+    pub fn focus_right(&mut self) -> bool {
+        self.focus_right_in_layer() || self.focus_in_direction_cross_layer(FocusDir::Right)
+    }
+
+    pub fn focus_up(&mut self) -> bool {
+        self.focus_up_in_layer() || self.focus_in_direction_cross_layer(FocusDir::Up)
+    }
+
+    pub fn focus_down(&mut self) -> bool {
+        self.focus_down_in_layer() || self.focus_in_direction_cross_layer(FocusDir::Down)
+    }
+
+    /// Positional focus across the floating↔tiling boundary. When in-layer
+    /// directional focus can't move any further in `dir` (the `*_in_layer`
+    /// call returned false), jump to the nearest window in the *other* layer
+    /// in that direction — the candidate closest along `dir`, with a penalty
+    /// for perpendicular misalignment, so focus crosses between floating and
+    /// tiled windows the way the eye expects. Returns false if there's no such
+    /// window.
+    fn focus_in_direction_cross_layer(&mut self, dir: FocusDir) -> bool {
+        let Some(active_id) = self.active_window().map(|w| w.id().clone()) else {
+            return false;
+        };
+        let from_floating = self.floating_is_active();
+
+        // Collect render rects (workspace-local) in one immutable pass so the
+        // borrow is released before we activate the chosen window.
+        let mut active_rect = None;
+        let mut candidates: Vec<(W::Id, Rectangle<f64, Logical>)> = Vec::new();
+        for (tile, pos, visible) in self.tiles_with_render_positions() {
+            let id = tile.window().id().clone();
+            let rect = Rectangle::new(pos, tile.tile_size());
+            if id == active_id {
+                active_rect = Some(rect);
+                continue;
+            }
+            if visible {
+                candidates.push((id, rect));
+            }
+        }
+        let Some(from) = active_rect else {
+            return false;
+        };
+
+        let best = candidates
+            .into_iter()
+            // Cross-layer only: keep windows in the opposite layer.
+            .filter(|(id, _)| self.floating.has_window(id) != from_floating)
+            .filter_map(|(id, to)| directional_score(from, to, dir).map(|s| (id, s)))
+            .min_by(|(_, a), (_, b)| a.total_cmp(b));
+
+        if let Some((id, _)) = best {
+            self.activate_window(&id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn focus_left_in_layer(&mut self) -> bool {
         if self.floating_is_active.get() {
             return self.floating.focus_left();
         }
@@ -1310,7 +1373,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn focus_right(&mut self) -> bool {
+    fn focus_right_in_layer(&mut self) -> bool {
         if self.floating_is_active.get() {
             return self.floating.focus_right();
         }
@@ -1406,7 +1469,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.focus_window_in_column(index);
     }
 
-    pub fn focus_down(&mut self) -> bool {
+    fn focus_down_in_layer(&mut self) -> bool {
         if self.floating_is_active.get() {
             self.floating.focus_down()
         } else {
@@ -1418,7 +1481,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn focus_up(&mut self) -> bool {
+    fn focus_up_in_layer(&mut self) -> bool {
         if self.floating_is_active.get() {
             self.floating.focus_up()
         } else {
@@ -2998,6 +3061,41 @@ impl<W: LayoutElement> Workspace<W> {
             }
         }
     }
+}
+
+/// Direction for cross-layer positional focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Scores `to` as a focus target reached from `from` by moving in `dir` (lower
+/// is better). Returns `None` when `to` is not in that direction — i.e. its
+/// center isn't past `from`'s center along the axis. The score is the
+/// center-to-center distance along `dir` plus a weighted perpendicular offset,
+/// so a window roughly in line is preferred over one far off-axis.
+fn directional_score(
+    from: Rectangle<f64, Logical>,
+    to: Rectangle<f64, Logical>,
+    dir: FocusDir,
+) -> Option<f64> {
+    let fcx = from.loc.x + from.size.w / 2.0;
+    let fcy = from.loc.y + from.size.h / 2.0;
+    let tcx = to.loc.x + to.size.w / 2.0;
+    let tcy = to.loc.y + to.size.h / 2.0;
+    let (primary, perp) = match dir {
+        FocusDir::Left => (fcx - tcx, (tcy - fcy).abs()),
+        FocusDir::Right => (tcx - fcx, (tcy - fcy).abs()),
+        FocusDir::Up => (fcy - tcy, (tcx - fcx).abs()),
+        FocusDir::Down => (tcy - fcy, (tcx - fcx).abs()),
+    };
+    if primary <= 0.0 {
+        return None;
+    }
+    Some(primary + perp * 1.5)
 }
 
 pub(super) fn compute_working_area(output: &Output) -> Rectangle<f64, Logical> {

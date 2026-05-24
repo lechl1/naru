@@ -797,4 +797,61 @@ mod tests {
         assert_eq!(sim.active_fixed_side(), None);
         sim.assert_active(Some(f));
     }
+
+    /// Directional focus must cross the floating↔tiling boundary positionally:
+    /// from a tiled window, pressing toward a floating window focuses it, and
+    /// pressing back returns to the tiled window. (Before, focus stayed within
+    /// the active layer and the two could only be swapped with a dedicated
+    /// bind.)
+    #[test]
+    fn directional_focus_crosses_floating_tiling_boundary() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let t = sim.add_window(); // tiled (carousel)
+        let f = sim.add_floating_window(); // floating
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let tg = sim.window_geometry(&t).expect("tiled geo");
+        let fg = sim.window_geometry(&f).expect("floating geo");
+        let dx = (fg.loc.x + fg.size.w / 2.0) - (tg.loc.x + tg.size.w / 2.0);
+        let dy = (fg.loc.y + fg.size.h / 2.0) - (tg.loc.y + tg.size.h / 2.0);
+        assert!(
+            dx.abs() > 1.0 || dy.abs() > 1.0,
+            "windows overlap exactly; can't pick a crossing direction",
+        );
+
+        // From the tiled window, move along the axis on which the floating
+        // window is offset, toward it.
+        sim.focus_window(t);
+        sim.assert_slot(t, WindowLayer::Scrolling);
+        if dx.abs() >= dy.abs() {
+            if dx > 0.0 {
+                sim.focus_right();
+            } else {
+                sim.focus_left();
+            }
+        } else if dy > 0.0 {
+            sim.focus_down();
+        } else {
+            sim.focus_up();
+        }
+        sim.assert_active(Some(f));
+        sim.assert_slot(f, WindowLayer::Floating);
+
+        // And the opposite direction crosses back to the tiled window.
+        if dx.abs() >= dy.abs() {
+            if dx > 0.0 {
+                sim.focus_left();
+            } else {
+                sim.focus_right();
+            }
+        } else if dy > 0.0 {
+            sim.focus_up();
+        } else {
+            sim.focus_down();
+        }
+        sim.assert_active(Some(t));
+    }
 }
