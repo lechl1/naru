@@ -1838,6 +1838,37 @@ impl<W: LayoutElement> Workspace<W> {
             .move_active_window_to_neighbor_column_as_new_row(to_left)
     }
 
+    /// Extract the active window into a brand-new single-window column on the
+    /// given side (`to_left` ⇒ inserted immediately to the left of the source
+    /// column, otherwise to the right). This is the path for a source column
+    /// that holds more than one window: instead of merging the moved window
+    /// into a neighbour's stack, it becomes a column of its own.
+    ///
+    /// Returns `false` — without side effects — when the floating layer is
+    /// active, the carousel is empty, or the active column sits at the carousel
+    /// edge on that side (no neighbour to split out next to). The edge case
+    /// falls through to the caller's strip handling, matching the single-window
+    /// routing.
+    pub fn move_active_window_to_new_neighbor_column(&mut self, to_left: bool) -> bool {
+        if self.floating_is_active.get() {
+            return false;
+        }
+        let count = self.scrolling.column_count();
+        if count == 0 {
+            return false;
+        }
+        let idx = self.scrolling.active_column_index();
+        let has_neighbor = if to_left { idx > 0 } else { idx + 1 < count };
+        if !has_neighbor {
+            return false;
+        }
+        if to_left {
+            self.scrolling.move_active_window_to_new_column_left()
+        } else {
+            self.scrolling.move_active_window_to_new_column_right()
+        }
+    }
+
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
         match self.layer_for(window) {
             // Floating windows have no columns to consume into / expel from.

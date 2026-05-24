@@ -2263,20 +2263,27 @@ impl<W: LayoutElement> Layout<W> {
             self.stacking_move_state = None;
             return;
         };
-        // Default routing inserts the window as a NEW row in the left-neighbor column
-        // (positionally aware on the y-axis). When the user opts into
-        // `stacking-move-overlap-first`, restore the legacy first-step semantics: a
-        // single-window source that IS its whole column overlaps onto the neighbour's
-        // tile instead (avoids a visual no-op of remove-then-insert at the same slot).
+        // Routing precedence: (1) with `stacking-move-overlap-first`, a single-window
+        // source that IS its whole column overlaps onto the neighbour's tile (legacy
+        // first-step semantics — avoids a visual no-op of remove-then-insert at the
+        // same slot); (2) a source column holding more than one window splits the
+        // active window out into its own new single-window column rather than merging
+        // it into a neighbour's stack; (3) otherwise the window drops into the
+        // left-neighbour column as a new row (positionally aware on the y-axis).
         let want_overlap = self.options.stacking_move_overlap_first
             && focused_stack_len == 1
             && column_tile_count == 1;
+        let split_into_new_column = column_tile_count > 1 || focused_stack_len > 1;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
         let success = if want_overlap {
             workspace.move_active_window_to_left_neighbor_overlap()
+        } else if split_into_new_column
+            && workspace.move_active_window_to_new_neighbor_column(true)
+        {
+            true
         } else if workspace.move_active_window_to_neighbor_column_as_new_row(true) {
             true
         } else if workspace.move_active_carousel_column_into_left_strip() {
@@ -2343,12 +2350,17 @@ impl<W: LayoutElement> Layout<W> {
         let want_overlap = self.options.stacking_move_overlap_first
             && focused_stack_len == 1
             && column_tile_count == 1;
+        let split_into_new_column = column_tile_count > 1 || focused_stack_len > 1;
         let Some(workspace) = self.active_workspace_mut() else {
             self.stacking_move_state = None;
             return;
         };
         let success = if want_overlap {
             workspace.move_active_window_to_right_neighbor_overlap()
+        } else if split_into_new_column
+            && workspace.move_active_window_to_new_neighbor_column(false)
+        {
+            true
         } else if workspace.move_active_window_to_neighbor_column_as_new_row(false) {
             true
         } else if workspace.move_active_carousel_column_into_right_strip() {

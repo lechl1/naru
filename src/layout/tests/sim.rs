@@ -854,4 +854,112 @@ mod tests {
         }
         sim.assert_active(Some(t));
     }
+
+    /// How many windows render in the same carousel column as `id` (itself
+    /// included). Tiles in one column share an exact render x, while distinct
+    /// columns are at least a column-width + gap apart and the view scroll
+    /// offset applies to every column equally — so an x match is an
+    /// unambiguous "same column" signal regardless of scroll position.
+    fn column_occupancy(sim: &LayoutSim, id: usize) -> usize {
+        let x = sim.window_x(id);
+        sim.window_ids()
+            .into_iter()
+            .filter(|w| (sim.window_x(*w) - x).abs() < 1.0)
+            .count()
+    }
+
+    /// Moving a window right out of a column that holds more than one window
+    /// must split it into its own new single-window column — not merge it into
+    /// the right neighbour's stack. Regression: the default routing pushed the
+    /// window into the neighbour column as a new row regardless of how many
+    /// windows the source column held.
+    #[test]
+    fn stack_move_right_from_multi_window_column_splits_into_new_column() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+        let c = sim.add_window();
+
+        // Build [a, b][c]: focus the leftmost column and consume its right
+        // neighbour `b` into it, leaving `c` as a separate right-neighbour
+        // column — the exact merge-prone setup.
+        sim.focus_column_first();
+        sim.apply(Op::ConsumeWindowIntoColumn);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        sim.focus_window(b);
+        assert_eq!(
+            column_occupancy(&sim, b),
+            2,
+            "precondition: b shares a two-window column with a",
+        );
+
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // `b` is pulled out into a column of its own, still tiled and focused.
+        sim.assert_slot(b, WindowLayer::Scrolling);
+        sim.assert_active(Some(b));
+        assert_eq!(
+            column_occupancy(&sim, b),
+            1,
+            "b should be alone in a brand-new column, not merged into a neighbour",
+        );
+        // ...and specifically did NOT land in `c`'s column (the old merge target).
+        assert!(
+            (sim.window_x(b) - sim.window_x(c)).abs() > 1.0,
+            "b must not have merged into the right neighbour c's column",
+        );
+        // `a` is left behind, now alone in its column too.
+        assert_eq!(column_occupancy(&sim, a), 1, "a should be left alone");
+    }
+
+    /// Mirror of the right-split test for the left direction.
+    #[test]
+    fn stack_move_left_from_multi_window_column_splits_into_new_column() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+        let c = sim.add_window();
+
+        // Build [a][b, c]: focus the middle column `b` and consume `c` into it,
+        // leaving `a` as a separate left-neighbour column.
+        sim.focus_column_first();
+        sim.focus_right();
+        sim.apply(Op::ConsumeWindowIntoColumn);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        sim.focus_window(c);
+        assert_eq!(
+            column_occupancy(&sim, c),
+            2,
+            "precondition: c shares a two-window column with b",
+        );
+
+        sim.move_window_left_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        sim.assert_slot(c, WindowLayer::Scrolling);
+        sim.assert_active(Some(c));
+        assert_eq!(
+            column_occupancy(&sim, c),
+            1,
+            "c should be alone in a brand-new column, not merged into a neighbour",
+        );
+        assert!(
+            (sim.window_x(c) - sim.window_x(a)).abs() > 1.0,
+            "c must not have merged into the left neighbour a's column",
+        );
+        assert_eq!(column_occupancy(&sim, b), 1, "b should be left alone");
+    }
 }
