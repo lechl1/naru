@@ -38,7 +38,31 @@ impl Eq for RegexEq {}
 impl FromStr for RegexEq {
     type Err = <Regex as FromStr>::Err;
 
+    /// Parses a regex, with CSS-selector-style comma lists. A value containing
+    /// commas — e.g. `app-id="firefox, chromium, org.kde.konsole"` — is split
+    /// on commas into individual patterns that are OR'd together into a single
+    /// regex, so the rule matches any of the listed app-ids/titles. Whitespace
+    /// around each entry is trimmed.
+    ///
+    /// This stays backward-compatible with single regexes that legitimately
+    /// contain a comma (e.g. a `{1,3}` quantifier): the split is only used when
+    /// *every* comma-separated piece is itself a non-empty valid regex;
+    /// otherwise the whole string is parsed as one regex, exactly as before.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains(',') {
+            let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+            if parts
+                .iter()
+                .all(|p| !p.is_empty() && Regex::from_str(p).is_ok())
+            {
+                let joined = parts
+                    .iter()
+                    .map(|p| format!("(?:{p})"))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                return Regex::from_str(&joined).map(Self);
+            }
+        }
         Regex::from_str(s).map(Self)
     }
 }
@@ -204,4 +228,39 @@ pub fn parse_arg_node<S: knuffel::traits::ErrorSpan, T: knuffel::traits::DecodeS
     }
 
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regex_eq_comma_list_matches_any() {
+        // CSS-selector-style list: matches any listed app-id, none else.
+        let re = RegexEq::from_str("firefox, org.kde.konsole, kitty").unwrap();
+        assert!(re.0.is_match("firefox"));
+        assert!(re.0.is_match("org.kde.konsole"));
+        assert!(re.0.is_match("kitty"));
+        assert!(!re.0.is_match("chromium"));
+    }
+
+    #[test]
+    fn regex_eq_single_pattern_is_unchanged() {
+        // A value with no comma is parsed verbatim (no OR-wrapping), so the
+        // stored regex string — which PartialEq and the snapshot tests compare
+        // — is byte-for-byte the input.
+        let re = RegexEq::from_str(".*alacritty").unwrap();
+        assert_eq!(re.0.as_str(), ".*alacritty");
+        assert!(re.0.is_match("org.alacritty"));
+    }
+
+    #[test]
+    fn regex_eq_quantifier_comma_falls_back_to_single_regex() {
+        // `a{1,2}` contains a comma but is a single regex; the split must not
+        // shred it — every piece isn't a valid regex, so we fall back.
+        let re = RegexEq::from_str("^a{1,2}$").unwrap();
+        assert!(re.0.is_match("a"));
+        assert!(re.0.is_match("aa"));
+        assert!(!re.0.is_match("aaa"));
+    }
 }
