@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+# Build the naru binary + run the naru-config unit tests (incl. the new
+# comma-separated app-id matching), reusing the cached buildkit mounts from
+# Dockerfile.alloy's release build so this stays incremental. Mirrors that
+# builder stage's base + deps. The built binary is exported so the comma-list
+# blocks in the real config.kdl can be validated with `naru validate`.
+FROM ubuntu:26.04 AS tester
+ARG TARGETARCH
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+ && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+        > /etc/apt/apt.conf.d/keep-cache
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=cache,id=apt-${TARGETARCH},target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        curl pkg-config ca-certificates \
+        build-essential clang libclang-dev \
+        libssl-dev libsystemd-dev \
+        libudev-dev libseat-dev libinput-dev \
+        libwayland-dev wayland-protocols libxkbcommon-dev \
+        libdrm-dev libgbm-dev libegl-dev libgles-dev \
+        libpixman-1-dev libdisplay-info-dev libdbus-1-dev \
+        libcairo2-dev libpango1.0-dev \
+        libpipewire-0.3-dev libspa-0.2-dev \
+        libxcb1-dev libxkbcommon-x11-dev
+
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain 1.88.0 --profile minimal --no-modify-path
+
+COPY . .
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-${TARGETARCH},target=/usr/local/cargo/git \
+    --mount=type=cache,id=target-naru-${TARGETARCH},target=/app/target,sharing=locked \
+    cargo test --release -p naru-config utils::tests -- --nocapture \
+    && cargo test --release --lib layout::tests::sim -- --nocapture \
+    && cargo build --release --bin naru \
+    && install -D /app/target/release/naru /out/naru
