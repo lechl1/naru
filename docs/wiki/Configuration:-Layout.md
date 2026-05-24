@@ -130,6 +130,35 @@ layout {
 }
 ```
 
+### `new-window-placement`
+
+Controls where a newly-opened window lands relative to the currently active
+window. This can be set to:
+
+- `"stack"`: stack the new window with the active one, sizing them to share the
+  stacking axis equally. On a **landscape** output the window opens as a new row
+  directly **under** the active window — in the same column, splitting its
+  height equally. On a **portrait** output it opens as a new column to the
+  **right** instead (stacking vertically would make windows too short on a tall
+  screen). With no active column to stack under (an empty workspace) the window
+  opens the first column. The shipped naru config selects this.
+- `"new"`: open the new window in its own new column to the right of the active
+  one, independent of the active window's size. This is the upstream niri
+  behaviour and the built-in default when the option is omitted.
+
+```kdl
+layout {
+    new-window-placement "stack"
+}
+```
+
+> [!NOTE]
+> Under `"stack"`, the per-app `default-column-width` from a
+> [window rule](./Configuration:-Window-Rules.md#default-column-width) only
+> applies to windows that actually open a new column (portrait outputs, the
+> first window in a column, or `"new"` mode). A window stacked *under* the
+> active one inherits the existing column's width.
+
 ### `always-center-single-column`
 
 <sup>Since: 0.1.9</sup>

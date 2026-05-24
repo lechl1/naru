@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use naru_config::utils::MergeWith as _;
 use naru_config::{
-    CenterFocusedColumn, CornerRadius, OutputName, PresetSize, Workspace as WorkspaceConfig,
+    CenterFocusedColumn, CornerRadius, NewWindowPlacement, OutputName, PresetSize,
+    Workspace as WorkspaceConfig,
 };
 use naru_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::element::Kind;
@@ -903,8 +904,21 @@ impl<W: LayoutElement> Workspace<W> {
                         self.floating_is_active = FloatingActive::Yes;
                     }
                 } else {
-                    self.scrolling
-                        .add_tile(None, tile, activate, width, is_full_width, None);
+                    // `new-window-placement "stack"` opens the window under the active one
+                    // on a landscape output (a new row in the active column, auto-sized to
+                    // an equal share of the column height) and as a new column to the right
+                    // on a portrait output. `"new"` (the code default) and an empty carousel
+                    // both open a fresh column to the right.
+                    let stack_under = self.options.layout.new_window_placement
+                        == NewWindowPlacement::Stack
+                        && self.view_size.w >= self.view_size.h
+                        && !self.scrolling.is_empty();
+                    if stack_under {
+                        self.scrolling.add_tile_below_active(tile, activate);
+                    } else {
+                        self.scrolling
+                            .add_tile(None, tile, activate, width, is_full_width, None);
+                    }
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
