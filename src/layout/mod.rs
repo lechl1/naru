@@ -2195,12 +2195,39 @@ impl<W: LayoutElement> Layout<W> {
         });
     }
 
+    /// If the active window is floating, pull it into the tiling layer (as a
+    /// new column at the active position) and report that we handled the move.
+    ///
+    /// The tiling stack-move helpers (`move_active_carousel_column_into_*`,
+    /// `move_active_window_to_neighbor_column_as_new_row`, …) all bail out when
+    /// the floating layer is active, so without this a stack-move on a floating
+    /// window would be a no-op, leaving it centered on screen. Now that windows
+    /// can open floating by default, "stack-move to tile it" is the natural way
+    /// to drop a floating window into the carousel, so we honour that here.
+    fn tile_active_floating_window(&mut self) -> bool {
+        let Some(ws) = self.active_workspace_mut() else {
+            return false;
+        };
+        if !ws.floating_is_active() {
+            return false;
+        }
+        ws.set_window_floating(None, false);
+        true
+    }
+
     pub fn move_window_left_stacked(&mut self) {
         if !self.options.enable_stacking {
             self.stacking_move_state = None;
             // Delegate to the legacy column-swap behavior so the default Mod+Ctrl+Arrow
             // bindings are no-op-free until the user opts in.
             self.move_left();
+            return;
+        }
+
+        // A stack-move on a floating window tiles it (see the helper) rather
+        // than no-op'ing on the empty carousel beneath it.
+        if self.tile_active_floating_window() {
+            self.stacking_move_state = None;
             return;
         }
 
@@ -2278,6 +2305,13 @@ impl<W: LayoutElement> Layout<W> {
             return;
         }
 
+        // A stack-move on a floating window tiles it (see the helper) rather
+        // than no-op'ing on the empty carousel beneath it.
+        if self.tile_active_floating_window() {
+            self.stacking_move_state = None;
+            return;
+        }
+
         // Strip-aware dispatch — see [`move_window_left_stacked`] for the
         // rationale. Symmetric: left strip OUT-or-within, right strip just
         // within (no OUT toward right).
@@ -2337,6 +2371,11 @@ impl<W: LayoutElement> Layout<W> {
             self.move_up();
             return;
         }
+        // A stack-move on a floating window tiles it rather than no-op'ing.
+        if self.tile_active_floating_window() {
+            self.stacking_move_state = None;
+            return;
+        }
         let direction = StackingMoveDirection::Up;
         let Some((focused_id, focused_stack_len, _column_tile_count)) =
             self.active_focused_tile_info()
@@ -2370,6 +2409,11 @@ impl<W: LayoutElement> Layout<W> {
         if !self.options.enable_stacking {
             self.stacking_move_state = None;
             self.move_down();
+            return;
+        }
+        // A stack-move on a floating window tiles it rather than no-op'ing.
+        if self.tile_active_floating_window() {
+            self.stacking_move_state = None;
             return;
         }
         let direction = StackingMoveDirection::Down;

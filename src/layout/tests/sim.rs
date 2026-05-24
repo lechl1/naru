@@ -780,4 +780,21 @@ mod tests {
             "strip window top ({strip_top}) must align with the carousel ({carousel_top})",
         );
     }
+
+    /// A stack-move on a *floating* window must pull it into the tiling layer
+    /// rather than no-op. The tiling stack-move helpers ignore floating
+    /// windows, so before the fix — and especially with floating-by-default —
+    /// the window just stayed centered as a floating window.
+    #[test]
+    fn stack_move_on_floating_window_tiles_it() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let f = sim.add_floating_window();
+        sim.assert_slot(f, WindowLayer::Floating);
+
+        sim.move_window_right_stacked();
+        sim.assert_slot(f, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), None);
+        sim.assert_active(Some(f));
+    }
 }
