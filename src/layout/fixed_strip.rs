@@ -9,8 +9,10 @@
 //! Windows enter a strip only via stack-move overflow at the carousel's
 //! left/right edges. Cross-strip moves route through the carousel multi-step.
 //! The strip's screen position is anchored to one workspace edge (left or
-//! right). For the right side the anchor offset is rebuilt after every
-//! content change so columns always pack against the workspace's right edge.
+//! right) by pinning the inner ScrollingSpace's `view_offset` so the whole
+//! column block parks flush against that edge — see [`FixedStrip::repin`].
+//! The block stays put regardless of which column is focused, and the
+//! right-side strip ends flush with the working area's right edge.
 
 use std::rc::Rc;
 
@@ -39,35 +41,21 @@ pub enum FixedSide {
 
 /// A vertical strip of columns pinned to one edge of the workspace.
 ///
-/// Wraps a `ScrollingSpace<W>` running with the carousel disabled. The wrapper
-/// caches the workspace's outer working area so it can rebuild the inner
-/// ScrollingSpace's `parent_area` whenever the strip's content width changes
-/// — which is how the right-side strip stays anchored to the workspace's
-/// right edge while still using the carousel's column-width math.
+/// Wraps a `ScrollingSpace<W>` running with the carousel disabled. After every
+/// content or focus change the wrapper re-pins the inner ScrollingSpace's view
+/// offset (see [`FixedStrip::repin`]) so the column block stays anchored to the
+/// strip's workspace edge — a right-side strip ends flush with the working
+/// area's right edge — while still using the carousel's column-width math.
 #[derive(Debug)]
 pub struct FixedStrip<W: LayoutElement> {
     /// Which workspace edge this strip is anchored to.
     side: FixedSide,
 
     /// Underlying scrolling layout, used as a column container only.
-    /// `view_offset` is held at static zero — callers route column adds /
-    /// removes through this wrapper so the strip never falls into the
-    /// carousel's scroll/center code paths.
+    /// `view_offset` is pinned to a static edge anchor (see [`FixedStrip::
+    /// repin`]) — callers route column adds / removes through this wrapper so
+    /// the strip never falls into the carousel's scroll/center code paths.
     inner: ScrollingSpace<W>,
-
-    /// Cached workspace view size.
-    view_size: Size<f64, Logical>,
-
-    /// Cached outer working area (the workspace's `working_area`, already
-    /// adjusted for layer-shell exclusive zones). Used as the base from
-    /// which the side-specific `parent_area` is derived.
-    outer_working_area: Rectangle<f64, Logical>,
-
-    /// Cached output scale.
-    scale: f64,
-
-    /// Cached layout options.
-    options: Rc<Options>,
 }
 
 impl<W: LayoutElement> FixedStrip<W> {
@@ -79,70 +67,22 @@ impl<W: LayoutElement> FixedStrip<W> {
         clock: Clock,
         options: Rc<Options>,
     ) -> Self {
-        let inner_parent_area =
-            Self::compute_inner_parent_area(side, outer_working_area, 0.0);
-        let inner =
-            ScrollingSpace::new(view_size, inner_parent_area, scale, clock, options.clone());
-        Self {
-            side,
-            inner,
-            view_size,
-            outer_working_area,
-            scale,
-            options,
-        }
+        // The inner ScrollingSpace gets the outer working area verbatim (same
+        // as the carousel) for both sides; the strip's edge anchoring is done
+        // by pinning the view offset in `repin`, not by shifting the parent
+        // area. So column-width math matches the carousel exactly.
+        let inner = ScrollingSpace::new(view_size, outer_working_area, scale, clock, options);
+        Self { side, inner }
     }
 
-    /// Derives the inner ScrollingSpace's `parent_area` from the outer
-    /// workspace working area and this strip's current content width.
-    ///
-    /// For [`FixedSide::Left`] the parent area is unchanged from the outer
-    /// working area — columns naturally lay out starting at the workspace's
-    /// left edge.
-    ///
-    /// For [`FixedSide::Right`] the parent area is shifted right by
-    /// `outer.width - content_width` so columns lay out flush against the
-    /// workspace's right edge while still being sized against the full outer
-    /// width (matching the carousel's column-width semantics).
-    fn compute_inner_parent_area(
-        side: FixedSide,
-        outer: Rectangle<f64, Logical>,
-        content_width: f64,
-    ) -> Rectangle<f64, Logical> {
-        match side {
-            FixedSide::Left => outer,
-            FixedSide::Right => {
-                let offset = (outer.size.w - content_width).max(0.0);
-                Rectangle::new(
-                    Point::from((outer.loc.x + offset, outer.loc.y)),
-                    outer.size,
-                )
-            }
-        }
-    }
-
-    /// Rebuilds the inner ScrollingSpace's `parent_area` so a right-side
-    /// strip stays anchored to the workspace's right edge after any change
-    /// to content width. No-op for left-side strips. Resets the inner
-    /// `view_offset` to zero afterwards so the carousel's
-    /// `animate_view_offset_to_column` side effect inside `update_config`
-    /// never bleeds into the strip.
-    fn refresh_anchor(&mut self) {
-        if self.side == FixedSide::Left {
-            return;
-        }
-        let new_parent_area = Self::compute_inner_parent_area(
-            self.side,
-            self.outer_working_area,
-            self.inner.content_width(),
-        );
-        self.inner.update_config(
-            self.view_size,
-            new_parent_area,
-            self.scale,
-            self.options.clone(),
-        );
-        self.inner.force_view_offset_zero();
+    /// Re-pins the inner ScrollingSpace's view offset so the strip's column
+    /// block stays flush against its anchored workspace edge (the right edge
+    /// for a right strip, the left edge for a left strip). Called after every
+    /// content or focus change because the underlying ScrollingSpace mutators
+    /// reset or re-centre the view offset as a carousel-style side effect.
+    fn repin(&mut self) {
+        self.inner
+            .pin_columns_to_edge(self.side == FixedSide::Right);
     }
 
     pub fn update_config(
@@ -152,18 +92,9 @@ impl<W: LayoutElement> FixedStrip<W> {
         scale: f64,
         options: Rc<Options>,
     ) {
-        self.view_size = view_size;
-        self.outer_working_area = outer_working_area;
-        self.scale = scale;
-        self.options = options.clone();
-        let inner_parent_area = Self::compute_inner_parent_area(
-            self.side,
-            outer_working_area,
-            self.inner.content_width(),
-        );
         self.inner
-            .update_config(view_size, inner_parent_area, scale, options);
-        self.inner.force_view_offset_zero();
+            .update_config(view_size, outer_working_area, scale, options);
+        self.repin();
     }
 
     pub fn side(&self) -> FixedSide {
@@ -189,6 +120,7 @@ impl<W: LayoutElement> FixedStrip<W> {
             return false;
         }
         self.inner.set_active_column_idx_static(idx - 1);
+        self.repin();
         true
     }
 
@@ -200,6 +132,7 @@ impl<W: LayoutElement> FixedStrip<W> {
             return false;
         }
         self.inner.set_active_column_idx_static(idx + 1);
+        self.repin();
         true
     }
 
@@ -211,7 +144,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// into the strip. Returns true if focus moved.
     pub fn focus_up(&mut self) -> bool {
         let moved = self.inner.focus_up();
-        self.inner.force_view_offset_zero();
+        self.repin();
         moved
     }
 
@@ -219,7 +152,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// the strip's active column.
     pub fn focus_down(&mut self) -> bool {
         let moved = self.inner.focus_down();
-        self.inner.force_view_offset_zero();
+        self.repin();
         moved
     }
 
@@ -227,7 +160,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// the carousel's [`ScrollingSpace::window_under`]. Returns `None` when the
     /// strip is empty or the point misses every tile, so the workspace can fall
     /// through to the next layer. The inner ScrollingSpace positions its tiles
-    /// via the pinned `parent_area`, so the point is already in the right
+    /// via the pinned view offset, so the point is already in the right
     /// coordinate space — no extra translation needed.
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
         if self.is_empty() {
@@ -249,6 +182,7 @@ impl<W: LayoutElement> FixedStrip<W> {
             FixedSide::Right => 0,
         };
         self.inner.set_active_column_idx_static(idx);
+        self.repin();
         true
     }
 
@@ -268,13 +202,12 @@ impl<W: LayoutElement> FixedStrip<W> {
     }
 
     /// Activate the column containing `window` (if any), making it the
-    /// strip's focused column. Returns true on success. Keeps the inner
-    /// `view_offset` clamped to zero so carousel-style scrolling never
-    /// kicks in.
+    /// strip's focused column. Returns true on success. Re-pins the strip to
+    /// its edge anchor afterwards so carousel-style scrolling never kicks in.
     pub fn activate_window(&mut self, window: &W::Id) -> bool {
         let success = self.inner.activate_window(window);
         if success {
-            self.inner.force_view_offset_zero();
+            self.repin();
         }
         success
     }
@@ -291,8 +224,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// the underlying column/tile bookkeeping runs.
     pub fn remove_tile(&mut self, window: &W::Id, transaction: Transaction) -> RemovedTile<W> {
         let removed = self.inner.remove_tile(window, transaction);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         removed
     }
 
@@ -300,8 +232,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// caller clears `active_fixed_side` once the strip empties.
     pub fn remove_active_tile(&mut self, transaction: Transaction) -> Option<RemovedTile<W>> {
         let removed = self.inner.remove_active_tile(transaction)?;
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         Some(removed)
     }
 
@@ -309,8 +240,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// caller clears `active_fixed_side` once the strip empties.
     pub fn remove_active_column(&mut self) -> Option<Column<W>> {
         let column = self.inner.remove_active_column()?;
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         Some(column)
     }
 
@@ -324,8 +254,7 @@ impl<W: LayoutElement> FixedStrip<W> {
             return false;
         }
         self.inner.update_window(window, serial);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         true
     }
 
@@ -338,45 +267,38 @@ impl<W: LayoutElement> FixedStrip<W> {
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
         self.inner.set_window_width(window, change);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
         self.inner.set_window_height(window, change);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
         self.inner.reset_window_height(window);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
         self.inner.toggle_window_width(window, forwards);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
         self.inner.toggle_window_height(window, forwards);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) -> bool {
         let rv = self.inner.set_fullscreen(window, is_fullscreen);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         rv
     }
 
     pub fn set_maximized(&mut self, window: &W::Id, maximize: bool) -> bool {
         let rv = self.inner.set_maximized(window, maximize);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         rv
     }
 
@@ -391,16 +313,14 @@ impl<W: LayoutElement> FixedStrip<W> {
     ) -> bool {
         let rv = self.inner.interactive_resize_update(window, delta);
         if rv {
-            self.inner.force_view_offset_zero();
-            self.refresh_anchor();
+            self.repin();
         }
         rv
     }
 
     pub fn interactive_resize_end(&mut self, window: Option<&W::Id>) {
         self.inner.interactive_resize_end(window);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn start_close_animation_for_window(
@@ -411,8 +331,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     ) {
         self.inner
             .start_close_animation_for_window(renderer, window, blocker);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     /// Starts `window`'s open animation if it lives in this strip. Returns
@@ -433,38 +352,32 @@ impl<W: LayoutElement> FixedStrip<W> {
     ) {
         self.inner
             .add_tile_right_of(right_of, tile, activate, width, is_full_width);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
         self.inner.consume_or_expel_window_left(window);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
         self.inner.consume_or_expel_window_right(window);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn consume_into_column(&mut self) {
         self.inner.consume_into_column();
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn expel_from_column(&mut self) {
         self.inner.expel_from_column();
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
         self.inner.swap_window_in_direction(direction);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     /// Within-strip equivalent of
@@ -479,8 +392,7 @@ impl<W: LayoutElement> FixedStrip<W> {
         let result = self
             .inner
             .move_active_window_to_neighbor_column_as_new_row(to_left);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         result
     }
 
@@ -510,8 +422,7 @@ impl<W: LayoutElement> FixedStrip<W> {
         };
         self.inner.add_column(Some(insert_idx), column, false, None);
         self.inner.set_active_column_idx_static(insert_idx);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
     }
 
     /// Remove the column at this strip's inner (carousel-facing) edge, ready
@@ -527,8 +438,7 @@ impl<W: LayoutElement> FixedStrip<W> {
             FixedSide::Right => 0,
         };
         let column = self.inner.remove_column_by_idx(idx, None);
-        self.inner.force_view_offset_zero();
-        self.refresh_anchor();
+        self.repin();
         Some(column)
     }
 
@@ -583,8 +493,8 @@ impl<W: LayoutElement> FixedStrip<W> {
         if self.is_empty() {
             return;
         }
-        // Position is encoded in the inner ScrollingSpace's `parent_area`,
-        // which `refresh_anchor` keeps up to date on the right side.
+        // Position is encoded in the inner ScrollingSpace's pinned view
+        // offset, which `repin` keeps anchored to the strip's workspace edge.
         self.inner.render(ctx, xray_pos, focus_ring, push);
     }
 
@@ -593,7 +503,7 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner.verify_invariants();
 
         // A strip is a no-scroll container: its view offset is pinned at a
-        // static zero (carousel scroll/center code is never invoked).
+        // static edge anchor (carousel scroll/center code is never invoked).
         assert!(
             matches!(
                 self.inner.view_offset(),

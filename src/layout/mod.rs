@@ -2271,13 +2271,22 @@ impl<W: LayoutElement> Layout<W> {
             self.stacking_move_state = None;
             return;
         };
-        // Routing precedence: (1) with `stacking-move-overlap-first`, a single-window
-        // source that IS its whole column overlaps onto the neighbour's tile (legacy
-        // first-step semantics — avoids a visual no-op of remove-then-insert at the
-        // same slot); (2) a source column holding more than one window splits the
-        // active window out into its own new single-window column rather than merging
-        // it into a neighbour's stack; (3) otherwise the window drops into the
-        // left-neighbour column as a new row (positionally aware on the y-axis).
+        // Core rule: moving a window out of a column that holds more than one
+        // window always splits it into its own new column first; merging into
+        // another column (or entering a side panel) is only ever done FROM a
+        // single-window column. `split_into_new_column` is that "source holds
+        // more than one window" predicate; it gates every merge/panel branch.
+        //
+        // Routing precedence: (1) with `stacking-move-overlap-first`, a single-
+        // window source that IS its whole column overlaps onto the neighbour's
+        // tile (legacy first-step semantics — avoids a visual no-op of remove-
+        // then-insert at the same slot); (2) a source column holding more than
+        // one window splits the active window out into its own new single-window
+        // column rather than merging it into a neighbour's stack; (3) otherwise
+        // (single-window source) the window drops into the left-neighbour column
+        // as a new row (positionally aware on the y-axis); (4) at the carousel
+        // edge a single-window column slides into the fixed side panel, while a
+        // multi-window one falls through to (5) and splits at the edge instead.
         let want_overlap = self.options.stacking_move_overlap_first
             && focused_stack_len == 1
             && column_tile_count == 1;
@@ -2294,15 +2303,22 @@ impl<W: LayoutElement> Layout<W> {
             true
         } else if workspace.move_active_window_to_neighbor_column_as_new_row(true) {
             true
-        } else if workspace.move_active_carousel_column_into_left_strip() {
-            // Carousel's leftmost edge: extract the active column and insert
-            // it into the left fixed panel at the strip's inner (carousel-
-            // facing) edge. The OUT path (panel inner edge back into the
-            // carousel) plus the right side are follow-ups.
+        } else if !split_into_new_column && workspace.move_active_carousel_column_into_left_strip()
+        {
+            // Carousel's leftmost edge with a *single-window* column: extract
+            // it and insert it into the left fixed panel at the strip's inner
+            // (carousel-facing) edge. A multi-window column must first shed the
+            // active window into its own column (the fallback below) before any
+            // of its windows can enter the panel — `split_into_new_column`
+            // gates that. The OUT path back into the carousel is handled by the
+            // strip-aware dispatch above.
             true
         } else {
-            // Defensive fallback (e.g. floating layer active): preserve the
-            // legacy behaviour of creating a new leftmost column.
+            // Either a multi-window source column at the leftmost edge (split
+            // the active window out into a new leftmost column — it can ride
+            // into the panel on the next move), or a defensive fallback (e.g.
+            // floating layer active). Both preserve the "new leftmost column"
+            // behaviour.
             workspace.move_active_window_to_new_column_left()
         };
         if success {
@@ -2371,11 +2387,17 @@ impl<W: LayoutElement> Layout<W> {
             true
         } else if workspace.move_active_window_to_neighbor_column_as_new_row(false) {
             true
-        } else if workspace.move_active_carousel_column_into_right_strip() {
-            // Carousel's rightmost edge: mirror of left-IN — extract the
-            // active column into `fixed_right` at its inner edge.
+        } else if !split_into_new_column && workspace.move_active_carousel_column_into_right_strip()
+        {
+            // Carousel's rightmost edge with a *single-window* column: mirror of
+            // left-IN — extract it into `fixed_right` at its inner edge. A
+            // multi-window column first sheds the active window into its own
+            // column (the fallback below); only then can it enter the panel.
             true
         } else {
+            // Multi-window source column at the rightmost edge (split the
+            // active window out into a new rightmost column — it enters the
+            // panel on the next move), or a defensive fallback.
             workspace.move_active_window_to_new_column_right()
         };
         if success {

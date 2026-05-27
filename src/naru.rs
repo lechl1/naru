@@ -2245,6 +2245,25 @@ impl Naru {
         }
     }
 
+    /// Synchronously persist the current session state, bypassing the debounce.
+    ///
+    /// Called once on clean shutdown. A termination signal stops the event loop
+    /// via `stop_signal.stop()`, which drops any pending debounced-save timer
+    /// before it can fire — so without this the last up-to-1 s of layout changes
+    /// (and, after a quiet session, potentially the whole arrangement) would
+    /// never reach disk. No-op when session-restore is disabled.
+    pub fn save_session_now(&self) {
+        let Some(sm) = self.session_manager.as_ref() else {
+            return;
+        };
+        let snapshot = crate::session::build_from_naru(self);
+        if let Err(e) = crate::session::save_atomic(&sm.state_path, &snapshot) {
+            warn!("session-restore: final save on shutdown failed: {e:#}");
+        } else {
+            debug!("session-restore: saved final state on shutdown");
+        }
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,

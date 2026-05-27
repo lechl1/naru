@@ -769,27 +769,41 @@ mod tests {
         let a = sim.add_window();
         let b = sim.add_window();
 
-        // Merge `a` and `b` into a single two-tile column, then ride that whole
-        // column into the right strip (no right neighbour ⇒ column-into-strip).
-        sim.apply(Op::ConsumeOrExpelWindowLeft { id: None });
+        // Build a two-tile strip column the only way the single-window-into-
+        // panel rule allows: a multi-window column can't ride wholesale into
+        // the panel, so park each window as its own single-window column and
+        // merge them *inside* the strip.
+        //
+        // `b` (rightmost/active) right-stacks into the right strip…
+        sim.move_window_right_stacked();
+        sim.assert_slot(b, WindowLayer::FixedRight);
+        // …then focus `a` back in the carousel and right-stack it in too; it
+        // lands at the strip's inner edge beside `b`.
+        sim.focus_window(a);
         sim.move_window_right_stacked();
         sim.assert_slot(a, WindowLayer::FixedRight);
         sim.assert_slot(b, WindowLayer::FixedRight);
         assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+        // Merge the two single-window strip columns into one two-tile column.
+        sim.apply(Op::ConsumeWindowIntoColumn);
+        sim.communicate_all();
+        sim.complete_animations();
 
-        // Vertical focus moves between the two tiles of the strip column.
+        // Vertical focus moves between the two tiles of the strip column. The
+        // merged-in window sits at the bottom and the active tile is the top
+        // one, so move *down* first.
         let before = sim.active_window_id().expect("a window is focused");
-        sim.focus_up();
-        let after_up = sim.active_window_id().expect("a window is focused");
+        sim.focus_down();
+        let after_down = sim.active_window_id().expect("a window is focused");
         assert_ne!(
-            before, after_up,
-            "focus_up must move within the strip column, not poke the empty carousel",
+            before, after_down,
+            "focus_down must move within the strip column, not poke the empty carousel",
         );
         assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
-        sim.assert_slot(after_up, WindowLayer::FixedRight);
+        sim.assert_slot(after_down, WindowLayer::FixedRight);
 
-        // ...and back down to where we started.
-        sim.focus_down();
+        // ...and back up to where we started.
+        sim.focus_up();
         assert_eq!(sim.active_window_id(), Some(before));
     }
 
@@ -829,6 +843,70 @@ mod tests {
         assert!(
             (carousel_top - strip_top).abs() < 0.5,
             "strip window top ({strip_top}) must align with the carousel ({carousel_top})",
+        );
+    }
+
+    /// A window parked in the right fixed-side strip must render flush against
+    /// the workspace's RIGHT edge, not at the left origin. Regression: the
+    /// strip's right-edge anchor was attempted by shifting the inner
+    /// ScrollingSpace's `parent_area`, but render positions are view-relative
+    /// (the view offset was forced to zero), so the shift never reached the
+    /// screen and the panel drew on the left, overlapping the carousel.
+    #[test]
+    fn right_strip_window_renders_against_right_edge() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1); // 1280×720 landscape, no struts → working area right edge = 1280
+        let a = sim.add_window();
+        let b = sim.add_window();
+
+        // Park `b` in the right strip; `a` stays in the carousel.
+        sim.move_window_right_stacked();
+        sim.assert_slot(b, WindowLayer::FixedRight);
+        sim.assert_slot(a, WindowLayer::Scrolling);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // The strip window's right edge sits on the working area's right edge…
+        let right_edge = sim.window_right_edge(b);
+        assert!(
+            (right_edge - 1280.0).abs() < 1.0,
+            "right-strip window should end flush with the 1280px right edge, got {right_edge}",
+        );
+        // …and it lives in the right half of the screen, not at the left origin.
+        let strip_x = sim.window_x(b);
+        assert!(
+            strip_x > 640.0,
+            "right-strip window should render in the right half, got x={strip_x}",
+        );
+        // The carousel window sits to its left.
+        assert!(
+            sim.window_x(a) < strip_x,
+            "carousel window (x={}) must be left of the right strip (x={strip_x})",
+            sim.window_x(a),
+        );
+    }
+
+    /// Mirror guard for the left strip: a parked window stays flush against the
+    /// LEFT edge (x≈0). This is the behaviour the right strip silently lacked.
+    #[test]
+    fn left_strip_window_renders_against_left_edge() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let _b = sim.add_window();
+
+        sim.focus_column_first();
+        sim.move_window_left_stacked();
+        sim.assert_slot(a, WindowLayer::FixedLeft);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let left_x = sim.window_x(a);
+        assert!(
+            left_x.abs() < 1.0,
+            "left-strip window should render flush against the left edge, got x={left_x}",
         );
     }
 
@@ -1012,6 +1090,79 @@ mod tests {
             "c must not have merged into the left neighbour a's column",
         );
         assert_eq!(column_occupancy(&sim, b), 1, "b should be left alone");
+    }
+
+    /// Moving toward a side panel from a *multi-window* column at the carousel
+    /// edge must NOT slide the whole column into the panel. Instead the active
+    /// window splits out into its own single-window column at the edge, and
+    /// only a *single-window* column can then enter the panel on a following
+    /// move. (A whole multi-window column used to ride straight into the
+    /// strip.)
+    #[test]
+    fn multi_window_column_splits_before_entering_right_strip() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+
+        // Merge a + b into a single two-tile column — the rightmost (and only)
+        // carousel column, so a right-stack is "toward the right panel".
+        sim.apply(Op::ConsumeOrExpelWindowLeft { id: None });
+        sim.communicate_all();
+        sim.complete_animations();
+        let active = sim.active_window_id().expect("a window is focused");
+        assert_eq!(column_occupancy(&sim, active), 2, "precondition: 2-tile column");
+
+        // First move: the active window splits out into its own column at the
+        // right edge. Nothing enters the panel yet.
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.assert_slot(active, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), None, "must not have entered the panel");
+        assert_eq!(
+            column_occupancy(&sim, active),
+            1,
+            "active window split into its own single-window column",
+        );
+
+        // Second move: now it's a single-window column at the edge, so it
+        // enters the right panel.
+        sim.move_window_right_stacked();
+        sim.assert_slot(active, WindowLayer::FixedRight);
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+        // The window left behind stayed in the carousel.
+        let other = if active == a { b } else { a };
+        sim.assert_slot(other, WindowLayer::Scrolling);
+    }
+
+    /// Left-edge mirror of [`multi_window_column_splits_before_entering_right_strip`].
+    #[test]
+    fn multi_window_column_splits_before_entering_left_strip() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        sim.add_window();
+        sim.add_window();
+
+        // Merge into one two-tile column, then focus the leftmost (only) column
+        // so a left-stack is "toward the left panel".
+        sim.apply(Op::ConsumeOrExpelWindowLeft { id: None });
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.focus_column_first();
+        let active = sim.active_window_id().expect("a window is focused");
+        assert_eq!(column_occupancy(&sim, active), 2, "precondition: 2-tile column");
+
+        sim.move_window_left_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.assert_slot(active, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), None, "must not have entered the panel");
+        assert_eq!(column_occupancy(&sim, active), 1, "split into its own column");
+
+        sim.move_window_left_stacked();
+        sim.assert_slot(active, WindowLayer::FixedLeft);
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Left));
     }
 
     /// `new-window-placement "stack"` on a landscape output: a second window

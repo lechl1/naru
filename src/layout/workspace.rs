@@ -2575,10 +2575,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     /// Renders the right fixed-side panel on top of the carousel. Empty
-    /// strip produces no elements. The right-side anchor (translating
-    /// output to the workspace's right edge) is a follow-up — for now this
-    /// renders at the left-anchored origin same as the left strip, so it is
-    /// only visually correct once that anchor work lands.
+    /// strip produces no elements. The strip anchors its column block to the
+    /// workspace's right edge via its pinned view offset (see
+    /// [`FixedStrip::repin`]), so no extra translation is applied here.
     pub fn render_fixed_right<R: NaruRenderer>(
         &self,
         ctx: RenderCtx<R>,

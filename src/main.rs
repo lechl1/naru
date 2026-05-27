@@ -282,6 +282,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(None, &mut state, |state| state.refresh_and_flush_clients())
         .unwrap();
 
+    // Clean shutdown: flush the session state synchronously. The debounced save
+    // timer is dropped when the loop stops, so this is the only guaranteed write
+    // of the final window arrangement.
+    state.naru.save_session_now();
+
     Ok(())
 }
 

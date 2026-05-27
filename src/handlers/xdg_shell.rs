@@ -1394,11 +1394,32 @@ impl State {
             .layout
             .find_window_and_output_mut(toplevel.wl_surface())
         {
+            // Snapshot the open-floating decision before recomputing so we can
+            // detect when a late-arriving app_id / title flips it.
+            let old_open_floating = mapped.resolved_open_floating();
             if mapped.recompute_window_rules(window_rules, self.naru.is_at_startup) {
+                let new_open_floating = mapped.resolved_open_floating();
                 drop(config);
                 let output = output.cloned();
                 let window = mapped.window.clone();
                 self.naru.layout.update_window(&window, None);
+
+                // `open-floating` is normally a one-shot decision made when the
+                // window first maps. But some clients (notably Chromium-based
+                // browsers) set their `app_id` *after* mapping, so at open time
+                // only a catch-all rule matched — e.g. a "float everything by
+                // default" rule — and the window opened floating. Now that the
+                // app_id is known and an app-specific rule (e.g. browsers →
+                // tiled) matches, re-apply the placement. Gated on the resolved
+                // value actually changing so config reloads or unrelated rule
+                // changes don't fight a user's manual float toggle; `set_window_
+                // floating` itself is a no-op when the window is already in the
+                // target layer.
+                if let Some(floating) = new_open_floating {
+                    if new_open_floating != old_open_floating {
+                        self.naru.layout.set_window_floating(Some(&window), floating);
+                    }
+                }
 
                 if let Some(output) = output {
                     self.naru.queue_redraw(&output);

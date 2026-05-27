@@ -456,6 +456,33 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.view_offset = ViewOffset::Static(0.0);
     }
 
+    /// Pins the (non-scrolling) view so the whole column block sits flush
+    /// against one edge of the working area. Used by [`super::fixed_strip::
+    /// FixedStrip`], which never scrolls: instead of centring the active
+    /// column the way the carousel does, a strip parks its entire content
+    /// block at the workspace edge it is anchored to.
+    ///
+    /// With `anchor_right`, the rightmost column's right edge lands on the
+    /// working area's right edge; otherwise the leftmost column's left edge
+    /// lands on its left edge. The result is independent of which column is
+    /// active, so moving focus between columns inside the strip doesn't shift
+    /// the block. Tiles render at `column_x(i) - view_pos`, so pinning the
+    /// leftmost column (`column_x == 0`) at `target_left` means
+    /// `view_offset = -column_x(active) - target_left`.
+    pub fn pin_columns_to_edge(&mut self, anchor_right: bool) {
+        if self.columns.is_empty() {
+            self.view_offset = ViewOffset::Static(0.0);
+            return;
+        }
+        let active_col_x = self.column_x(self.active_column_idx);
+        let target_left = if anchor_right {
+            self.working_area.loc.x + self.working_area.size.w - self.content_width()
+        } else {
+            self.working_area.loc.x
+        };
+        self.view_offset = ViewOffset::Static(-active_col_x - target_left);
+    }
+
     /// Sets the active column index without scroll animation. Used by
     /// [`super::fixed_strip::FixedStrip`] to keep "focused column inside the
     /// strip" bookkeeping consistent after column insertion / removal while

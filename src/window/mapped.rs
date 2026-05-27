@@ -339,6 +339,15 @@ impl Mapped {
         self.window.toplevel().expect("no X11 support")
     }
 
+    /// The currently-resolved `open-floating` window-rule value, if any rule set it.
+    ///
+    /// Used by the rule-recompute path to detect when a late-arriving `app_id`
+    /// flips the open-floating decision (so a window that opened floating under a
+    /// catch-all rule can be retiled once an app-specific rule starts matching).
+    pub fn resolved_open_floating(&self) -> Option<bool> {
+        self.rules.open_floating
+    }
+
     /// Recomputes the resolved window rules and returns whether they changed.
     pub fn recompute_window_rules(&mut self, rules: &[WindowRule], is_at_startup: bool) -> bool {
         self.need_to_recompute_rules = false;
