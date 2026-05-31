@@ -2542,7 +2542,7 @@ impl<W: LayoutElement> Workspace<W> {
         // The fade needs the edge_fade shader; if it failed to compile, fall
         // back to a plain direct render.
         let program = {
-            let mut ctx = ctx.as_gles();
+            let ctx = ctx.as_gles();
             EdgeFadeOffscreenRenderElement::shader(ctx.renderer)
         };
         let Some(program) = program else {
@@ -3168,7 +3168,13 @@ impl<W: LayoutElement> Workspace<W> {
         );
 
         assert_eq!(self.view_size, self.scrolling.view_size());
-        assert_eq!(self.working_area, self.scrolling.parent_area());
+        // `scrolling.parent_area()` is no longer a static mirror of
+        // `working_area`: `sync_carousel_parent_area` (run in
+        // `update_render_elements`) insets it by any populated fixed-side
+        // panel and re-syncs each frame, so its value reflects whichever
+        // panel-width snapshot was last applied — not necessarily the
+        // current `working_area` or `carousel_parent_area()`. Asserting
+        // any specific shape here would race with strip mutations.
         assert_eq!(&self.clock, self.scrolling.clock());
         assert!(Rc::ptr_eq(&self.options, self.scrolling.options()));
         self.scrolling.verify_invariants();
