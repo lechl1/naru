@@ -52,7 +52,7 @@ use crate::window::ResolvedWindowRules;
 /// content fades to fully transparent right at the panel's inner edge, so it
 /// dissolves into the wallpaper just before sliding behind the panel rather
 /// than being darkened by a shadow.
-const CAROUSEL_EDGE_FADE_WIDTH: f64 = 24.0;
+const CAROUSEL_EDGE_FADE_WIDTH: f64 = 12.0;
 
 /// True when the view's aspect ratio is ≥ 21:9 (covers 21:9 ≈ 2.333 and 32:10 = 3.2).
 fn is_ultrawide_view(view_size: Size<f64, Logical>) -> bool {
