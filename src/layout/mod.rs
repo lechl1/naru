@@ -996,9 +996,12 @@ impl<W: LayoutElement> Layout<W> {
         // Only under `new-window-placement "new"`. The `"stack"` placement wants every new
         // window under (or right of) the *active* window, so leaving the target as `Auto`
         // lets the workspace stack-placement path handle it uniformly instead of being
-        // pre-empted into a fresh column beside a same-app sibling.
+        // pre-empted into a fresh column beside a same-app sibling. Same goes for the
+        // per-rule `open-in-same-column true` opt-in — the rule-driven stacking decision
+        // needs to run against the *active* window, not a global same-app sibling.
         let same_app_id: Option<W::Id> = if matches!(target, AddWindowTarget::Auto)
             && self.options.layout.new_window_placement == NewWindowPlacement::New
+            && window.rules().open_in_same_column != Some(true)
         {
             window
                 .app_id()

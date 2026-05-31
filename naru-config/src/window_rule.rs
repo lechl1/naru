@@ -35,6 +35,23 @@ pub struct WindowRule {
     #[knuffel(child, unwrap(argument))]
     pub open_focused: Option<bool>,
 
+    /// If true, a new window matching this rule opens stacked with the active
+    /// window (a new row in its column on landscape, new column-in-stack on
+    /// portrait — mirroring `new-window-placement "stack"`), but only when the
+    /// currently active window also resolves to `open-in-same-column true` —
+    /// i.e. belongs to the same "group" by virtue of matching a rule that
+    /// enables this. Otherwise the stack opens in a fresh column.
+    #[knuffel(child, unwrap(argument))]
+    pub open_in_same_column: Option<bool>,
+
+    /// Upper bound on the number of windows that may share a column under
+    /// `open-in-same-column` stacking. Once the active column already holds
+    /// this many, the next matching window opens a fresh column instead.
+    /// On portrait outputs this caps the stacking row instead, matching
+    /// `new-window-placement "stack"` orientation semantics.
+    #[knuffel(child, unwrap(argument))]
+    pub max_windows_per_column: Option<u16>,
+
     // Rules applied dynamically.
     #[knuffel(child, unwrap(argument))]
     pub min_width: Option<u16>,

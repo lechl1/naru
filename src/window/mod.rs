@@ -73,6 +73,14 @@ pub struct ResolvedWindowRules {
     /// Whether the window should open focused.
     pub open_focused: Option<bool>,
 
+    /// Whether a new window matching this rule should stack into the active
+    /// window's column when the active window also opted into this. See the
+    /// matching field on [`naru_config::WindowRule`].
+    pub open_in_same_column: Option<bool>,
+
+    /// Cap on stacked windows for [`Self::open_in_same_column`].
+    pub max_windows_per_column: Option<u16>,
+
     /// Extra bound on the minimum window width.
     pub min_width: Option<u16>,
     /// Extra bound on the minimum window height.
@@ -255,6 +263,14 @@ impl ResolvedWindowRules {
 
                 if let Some(x) = rule.open_focused {
                     resolved.open_focused = Some(x);
+                }
+
+                if let Some(x) = rule.open_in_same_column {
+                    resolved.open_in_same_column = Some(x);
+                }
+
+                if let Some(x) = rule.max_windows_per_column {
+                    resolved.max_windows_per_column = Some(x);
                 }
 
                 if let Some(x) = rule.min_width {

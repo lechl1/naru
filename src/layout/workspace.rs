@@ -921,10 +921,40 @@ impl<W: LayoutElement> Workspace<W> {
                     // an equal share of the column height) and as a new column to the right
                     // on a portrait output. `"new"` (the code default) and an empty carousel
                     // both open a fresh column to the right.
-                    let stack_under = self.options.layout.new_window_placement
-                        == NewWindowPlacement::Stack
-                        && self.view_size.w >= self.view_size.h
+                    //
+                    // Per-window-rule `open-in-same-column` overrides this for windows
+                    // that opt in *and* are opened next to an active window that also
+                    // opts in — both sides have to belong to the "same group" before
+                    // we co-locate them. `max-windows-per-column` caps the stack: once
+                    // the active column already holds that many tiles, the next match
+                    // opens a fresh column instead.
+                    let landscape = self.view_size.w >= self.view_size.h;
+                    // "Active window in the scrolling carousel" — the per-rule
+                    // path stacks the new tile under that one specifically, so
+                    // when focus is in a fixed strip or in floating, the
+                    // `active_column` of the carousel isn't the right anchor
+                    // and we fall back to opening a new column.
+                    let active_in_scrolling = !self.floating_is_active.get()
+                        && self.active_fixed_side.is_none()
                         && !self.scrolling.is_empty();
+                    let rule_stack_ok = active_in_scrolling
+                        && tile.window().rules().open_in_same_column == Some(true)
+                        && self
+                            .active_window()
+                            .is_some_and(|w| w.rules().open_in_same_column == Some(true))
+                        && {
+                            let cap = tile
+                                .window()
+                                .rules()
+                                .max_windows_per_column
+                                .map(usize::from);
+                            let cur = self.scrolling.active_column_tile_count().unwrap_or(0);
+                            cap.is_none_or(|n| cur < n)
+                        };
+                    let stack_under = (rule_stack_ok
+                        || (self.options.layout.new_window_placement == NewWindowPlacement::Stack
+                            && !self.scrolling.is_empty()))
+                        && landscape;
                     if stack_under {
                         self.scrolling.add_tile_below_active(tile, activate);
                     } else {
