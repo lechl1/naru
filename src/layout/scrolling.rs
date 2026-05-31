@@ -3357,6 +3357,22 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.data[col_idx].update(&self.columns[col_idx]);
     }
 
+    /// Apply `preset` as the width of every column in the carousel. Used by
+    /// the `disable-carousel` layout option to keep all columns at the same
+    /// uniform width so the workspace stays fully visible between the
+    /// fixed-side panels. No-op on an empty carousel.
+    pub fn set_all_columns_to_preset(&mut self, preset: PresetSize) {
+        if self.columns.is_empty() {
+            return;
+        }
+        let change = SizeChange::from(preset);
+        for (col, data) in zip(&mut self.columns, &mut self.data) {
+            col.set_column_width(change, None, true);
+            cancel_resize_for_column(&mut self.interactive_resize, col);
+            data.update(col);
+        }
+    }
+
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
         if self.columns.is_empty() {
             return;

@@ -530,6 +530,62 @@ impl<W: LayoutElement> Workspace<W> {
         area
     }
 
+    /// In `disable-carousel` mode, returns the widest entry in
+    /// `preset_column_widths` such that `n` uniform columns of that width
+    /// still fit between the fixed-side panels (accounting for inter-column
+    /// gaps). Returns `None` when even the narrowest preset wouldn't fit, or
+    /// when there are no presets configured — both signal "overflow", which
+    /// the placement path handles by stacking instead of opening a new
+    /// column.
+    fn disabled_carousel_uniform_preset(&self, n: usize) -> Option<PresetSize> {
+        if n == 0 {
+            return None;
+        }
+        let available = self.carousel_parent_area().size.w;
+        let gaps = self.options.layout.gaps;
+        let usable = available - (n.saturating_sub(1)) as f64 * gaps;
+        if usable <= 0. {
+            return None;
+        }
+        let per_column = usable / n as f64;
+
+        let mut best: Option<(PresetSize, f64)> = None;
+        for &preset in &self.options.layout.preset_column_widths {
+            // Logical column width the preset would resolve to. Mirrors
+            // `resolve_preset_size` without the per-tile border math — that's
+            // good enough for the fit check, since the carousel-disabled path
+            // applies the same preset uniformly to every column.
+            let w = match preset {
+                PresetSize::Proportion(p) => (available - gaps) * p - gaps,
+                PresetSize::Fixed(f) => f64::from(f),
+            };
+            if w <= per_column && best.as_ref().is_none_or(|&(_, bw)| w > bw) {
+                best = Some((preset, w));
+            }
+        }
+        best.map(|(p, _)| p)
+    }
+
+    /// In `disable-carousel` mode, push the uniform "widest preset that fits
+    /// all current columns" width down to every column. Called after any
+    /// column add/remove so the resting layout stays fully visible between
+    /// the fixed-side panels. No-op when the option is off, when the
+    /// carousel is empty, or when no preset fits (the overflow case is
+    /// already handled by the placement path picking `add_tile_below_active`
+    /// instead of adding a new column).
+    fn apply_disabled_carousel_widths(&mut self) {
+        if !self.options.layout.disable_carousel {
+            return;
+        }
+        let n = self.scrolling.column_count();
+        if n == 0 {
+            return;
+        }
+        if let Some(preset) = self.disabled_carousel_uniform_preset(n) {
+            self.scrolling.set_all_columns_to_preset(preset);
+        }
+    }
+
     /// Re-inset the carousel when a fixed-side panel's width changes (windows
     /// added/removed/resized in a panel). Cheap no-op when the area is
     /// unchanged, so it's safe to call every frame.
@@ -951,15 +1007,44 @@ impl<W: LayoutElement> Workspace<W> {
                             let cur = self.scrolling.active_column_tile_count().unwrap_or(0);
                             cap.is_none_or(|n| cur < n)
                         };
+                    // With `disable-carousel`, the workspace can't scroll, so every
+                    // additional column has to fit between the fixed-side panels. We
+                    // check up front: if N+1 uniform columns at the widest viable
+                    // preset still fit, open a new column at that preset and re-apply
+                    // the uniform width to every column so the layout stays coherent.
+                    // If even the narrowest preset wouldn't fit, fall back to stacking
+                    // (new row landscape / new column portrait — same as
+                    // `new-window-placement "stack"`) so the new window still appears.
+                    let disabled = self.options.layout.disable_carousel;
+                    let disabled_fit_preset = if disabled && !self.scrolling.is_empty() {
+                        self.disabled_carousel_uniform_preset(self.scrolling.column_count() + 1)
+                    } else {
+                        None
+                    };
+
                     let stack_under = (rule_stack_ok
                         || (self.options.layout.new_window_placement == NewWindowPlacement::Stack
-                            && !self.scrolling.is_empty()))
+                            && !self.scrolling.is_empty())
+                        || (disabled
+                            && !self.scrolling.is_empty()
+                            && disabled_fit_preset.is_none()))
                         && landscape;
                     if stack_under {
                         self.scrolling.add_tile_below_active(tile, activate);
+                    } else if let Some(preset) = disabled_fit_preset {
+                        let preset_width = ColumnWidth::from(preset);
+                        self.scrolling
+                            .add_tile(None, tile, activate, preset_width, is_full_width, None);
+                        self.apply_disabled_carousel_widths();
                     } else {
                         self.scrolling
                             .add_tile(None, tile, activate, width, is_full_width, None);
+                        if disabled {
+                            // First column or portrait stack: still want the uniform
+                            // sizing to apply (a single column will pick the widest
+                            // preset overall).
+                            self.apply_disabled_carousel_widths();
+                        }
                     }
 
                     if activate {
@@ -1125,6 +1210,11 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
+
+        // In disable-carousel mode the uniform width depends on column count;
+        // re-apply after the removal so the remaining columns expand to fill.
+        // Cheap no-op when the option is off or the carousel is now empty.
+        self.apply_disabled_carousel_widths();
 
         removed
     }
@@ -2560,8 +2650,10 @@ impl<W: LayoutElement> Workspace<W> {
         let left_panel = !self.fixed_left.is_empty();
         let right_panel = !self.fixed_right.is_empty();
 
-        // No populated panel → no edge to fade against; render directly.
-        if !left_panel && !right_panel {
+        // No populated panel → no edge to fade against; render directly. Same
+        // for `disable-carousel`: the workspace doesn't scroll, so no content
+        // ever slides behind a panel and there's nothing to dissolve.
+        if (!left_panel && !right_panel) || self.options.layout.disable_carousel {
             self.scrolling
                 .render(ctx, xray_pos, focus_ring, &mut |elem| push(elem.into()));
             return;
