@@ -1634,7 +1634,10 @@ mod tests {
                     ),
                 ],
                 center_focused_column: OnOverflow,
+                new_window_placement: New,
                 always_center_single_column: false,
+                disable_carousel: false,
+                auto_fit_or_center: false,
                 empty_workspace_above_first: false,
                 default_column_display: Tabbed,
                 gaps: 8.0,
@@ -1658,6 +1661,13 @@ mod tests {
                     b: 0.25,
                     a: 1.0,
                 },
+                terminal_app_ids: [],
+                ultrawide_default_column_width: Proportion(
+                    0.4,
+                ),
+                ultrawide_terminal_column_width: Proportion(
+                    0.2,
+                ),
             },
             prefer_no_csd: true,
             enable_stacking: false,
@@ -1982,6 +1992,8 @@ mod tests {
                     open_focused: Some(
                         true,
                     ),
+                    open_in_same_column: None,
+                    max_windows_per_column: None,
                     min_width: None,
                     min_height: None,
                     max_width: None,
@@ -2572,6 +2584,27 @@ mod tests {
                         allow_when_locked: false,
                         allow_inhibiting: true,
                         hotkey_overlay_title: None,
+                    },
+                ],
+            },
+            session_restore: SessionRestore {
+                off: true,
+                state_path: None,
+                launch_commands: [
+                    LaunchCommand {
+                        app_id: "org.kde.dolphin",
+                        command: [
+                            "dolphin",
+                            "%s",
+                        ],
+                    },
+                    LaunchCommand {
+                        app_id: "org.kde.konsole",
+                        command: [
+                            "konsole",
+                            "--workdir",
+                            "%s",
+                        ],
                     },
                 ],
             },

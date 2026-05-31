@@ -22,6 +22,16 @@ pub struct Layout {
     /// [`NewWindowPlacement`].
     pub new_window_placement: NewWindowPlacement,
     pub always_center_single_column: bool,
+    /// If true, the scrolling carousel is disabled: every workspace's columns
+    /// must fit in the area between the fixed-side panels. New windows pick
+    /// the widest entry in [`Self::preset_column_widths`] that still leaves
+    /// room for all columns (so all columns end up at a uniform width);
+    /// windows that would not fit even at the narrowest preset fall back to
+    /// the `new-window-placement "stack"` path (new row on landscape, new
+    /// column on portrait). The per-pixel carousel edge-fade against the
+    /// fixed-side panels is also skipped — with no scrolling there's no
+    /// content to dissolve behind the panels.
+    pub disable_carousel: bool,
     /// After any layout change, recompute the workspace view offset so that
     /// either: (a) all columns are horizontally centered as a group when they
     /// fit inside the working area, or (b) the view is clamped so neither
@@ -63,6 +73,7 @@ impl Default for Layout {
             center_focused_column: CenterFocusedColumn::Never,
             new_window_placement: NewWindowPlacement::default(),
             always_center_single_column: false,
+            disable_carousel: false,
             auto_fit_or_center: false,
             empty_workspace_above_first: false,
             default_column_display: ColumnDisplay::Normal,
@@ -91,6 +102,7 @@ impl MergeWith<LayoutPart> for Layout {
             tab_indicator,
             insert_hint,
             always_center_single_column,
+            disable_carousel,
             auto_fit_or_center,
             empty_workspace_above_first,
             gaps,
@@ -161,6 +173,8 @@ pub struct LayoutPart {
     pub new_window_placement: Option<NewWindowPlacement>,
     #[knuffel(child)]
     pub always_center_single_column: Option<Flag>,
+    #[knuffel(child)]
+    pub disable_carousel: Option<Flag>,
     #[knuffel(child)]
     pub auto_fit_or_center: Option<Flag>,
     #[knuffel(child)]
