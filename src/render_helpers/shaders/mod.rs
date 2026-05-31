@@ -17,6 +17,7 @@ pub struct Shaders {
     pub postprocess_and_clip: Option<GlesTexProgram>,
     pub resize: Option<ShaderProgram>,
     pub gradient_fade: Option<GlesTexProgram>,
+    pub edge_fade: Option<GlesTexProgram>,
     pub blur: Option<BlurProgram>,
     pub custom_resize: RefCell<Option<ShaderProgram>>,
     pub custom_close: RefCell<Option<ShaderProgram>>,
@@ -142,6 +143,16 @@ impl Shaders {
             })
             .ok();
 
+        let edge_fade = renderer
+            .compile_custom_texture_shader(
+                include_str!("edge_fade.frag"),
+                &[UniformName::new("cutoff", UniformType::_2f)],
+            )
+            .map_err(|err| {
+                warn!("error compiling edge fade shader: {err:?}");
+            })
+            .ok();
+
         let blur = BlurProgram::compile(renderer)
             .map_err(|err| {
                 warn!("error compiling blur shaders: {err:?}");
@@ -155,6 +166,7 @@ impl Shaders {
             postprocess_and_clip,
             resize,
             gradient_fade,
+            edge_fade,
             blur,
             custom_resize: RefCell::new(None),
             custom_close: RefCell::new(None),

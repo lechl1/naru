@@ -11,4 +11,5 @@ Before=xdg-desktop-autostart.target
 [Service]
 Slice=session.slice
 Type=notify
+TimeoutStopSec=5s
 ExecStart=naru --session

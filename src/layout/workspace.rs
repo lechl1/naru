@@ -8,13 +8,14 @@ use naru_config::{
     Workspace as WorkspaceConfig,
 };
 use naru_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
-use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::utils::CropRenderElement;
+use smithay::backend::renderer::element::{Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::{layer_map_for_output, Window};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
@@ -31,6 +32,8 @@ use super::{
 };
 use crate::animation::Clock;
 use crate::naru_render_elements;
+use crate::render_helpers::edge_fade::{EdgeFadeOffscreenRenderElement, EdgeFadeShader};
+use crate::render_helpers::offscreen::OffscreenBuffer;
 use crate::render_helpers::renderer::NaruRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
@@ -44,27 +47,12 @@ use crate::utils::{
 };
 use crate::window::ResolvedWindowRules;
 
-/// Width in logical pixels of a single band in the fixed-panel edge gradient.
-/// The render path stacks several bands side-by-side, each with a decreasing
-/// alpha, to approximate a smooth gradient without a custom shader.
-const FIXED_PANEL_SHADOW_BAND_WIDTH: f64 = 2.0;
-
-/// Per-band alpha multipliers applied to the (otherwise opaque black) gradient
-/// buffer. Bands are ordered strip-ward → carousel-ward, so the first (densest)
-/// band sits adjacent to the panel's inner edge and successive bands fade out
-/// into the carousel.
-///
-/// Because the panels now render *in front of* the carousel, this gradient
-/// reads as the carousel fading out as it approaches the panel — the "fade
-/// before disappearing behind the side panel" — rather than as a thin drop
-/// shadow. It's deliberately wide (`len() × WIDTH` ≈ 24 px) and smoothly
-/// tapered so the transition is gentle.
-const FIXED_PANEL_SHADOW_BAND_ALPHAS: &[f32] = &[
-    0.50, 0.43, 0.36, 0.30, 0.24, 0.19, 0.15, 0.11, 0.08, 0.05, 0.03, 0.01,
-];
-
-/// Color of the fixed-panel drop shadow before alpha multiplication.
-const FIXED_PANEL_SHADOW_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// Width in logical pixels of the per-pixel opacity fade applied to the
+/// carousel's edge as it approaches a populated fixed-side panel. The carousel
+/// content fades to fully transparent right at the panel's inner edge, so it
+/// dissolves into the wallpaper just before sliding behind the panel rather
+/// than being darkened by a shadow.
+const CAROUSEL_EDGE_FADE_WIDTH: f64 = 24.0;
 
 /// True when the view's aspect ratio is ≥ 21:9 (covers 21:9 ≈ 2.333 and 32:10 = 3.2).
 fn is_ultrawide_view(view_size: Size<f64, Logical>) -> bool {
@@ -169,13 +157,11 @@ pub struct Workspace<W: LayoutElement> {
     /// This workspace's background.
     background_buffer: SolidColorBuffer,
 
-    /// Shared black buffer used to draw the fixed-panel edge gradient's bands.
-    /// Sized one band wide and as tall as the working area
-    /// (`FIXED_PANEL_SHADOW_BAND_WIDTH × working_area.size.h`) so it spans the
-    /// panel's vertical extent below the bar rather than the whole output, and
-    /// re-used at render time by stacking it with the alphas in
-    /// [`FIXED_PANEL_SHADOW_BAND_ALPHAS`].
-    fixed_panel_shadow_buffer: SolidColorBuffer,
+    /// Offscreen buffers used to render the thin carousel edge-fade band next to
+    /// each populated fixed-side panel (left / right). Only touched on frames
+    /// where carousel content actually reaches the corresponding panel edge.
+    left_fade_offscreen: OffscreenBuffer,
+    right_fade_offscreen: OffscreenBuffer,
 
     /// Clock for driving animations.
     pub(super) clock: Clock,
@@ -228,6 +214,8 @@ impl WorkspaceId {
 naru_render_elements! {
     WorkspaceRenderElement<R> => {
         Scrolling = ScrollingSpaceRenderElement<R>,
+        CroppedScrolling = CropRenderElement<ScrollingSpaceRenderElement<R>>,
+        EdgeFade = EdgeFadeOffscreenRenderElement,
         Floating = FloatingSpaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
     }
@@ -385,10 +373,8 @@ impl<W: LayoutElement> Workspace<W> {
             working_area,
             shadow: Shadow::new(shadow_config),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
-            fixed_panel_shadow_buffer: SolidColorBuffer::new(
-                Size::from((FIXED_PANEL_SHADOW_BAND_WIDTH, working_area.size.h)),
-                FIXED_PANEL_SHADOW_COLOR,
-            ),
+            left_fade_offscreen: OffscreenBuffer::default(),
+            right_fade_offscreen: OffscreenBuffer::default(),
             output: Some(output),
             clock,
             base_options,
@@ -475,10 +461,8 @@ impl<W: LayoutElement> Workspace<W> {
             working_area,
             shadow: Shadow::new(shadow_config),
             background_buffer: SolidColorBuffer::new(view_size, options.layout.background_color),
-            fixed_panel_shadow_buffer: SolidColorBuffer::new(
-                Size::from((FIXED_PANEL_SHADOW_BAND_WIDTH, working_area.size.h)),
-                FIXED_PANEL_SHADOW_COLOR,
-            ),
+            left_fade_offscreen: OffscreenBuffer::default(),
+            right_fade_offscreen: OffscreenBuffer::default(),
             clock,
             base_options,
             options,
@@ -530,7 +514,40 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.are_transitions_ongoing() || self.floating.are_transitions_ongoing()
     }
 
+    /// The carousel's parent area: the workspace working area inset on each
+    /// side by the width of a non-empty fixed-side panel. With both panels
+    /// empty this equals `self.working_area`, so the carousel spans the full
+    /// width exactly as before; a populated panel shrinks the carousel to the
+    /// space remaining between the panels. The carousel still *renders* past
+    /// these edges while scrolling (its edge tiles fade out behind the panels
+    /// — see the render path), but its resting layout is confined here.
+    fn carousel_parent_area(&self) -> Rectangle<f64, Logical> {
+        let left = self.fixed_left.width();
+        let right = self.fixed_right.width();
+        let mut area = self.working_area;
+        area.loc.x += left;
+        area.size.w = (area.size.w - left - right).max(0.);
+        area
+    }
+
+    /// Re-inset the carousel when a fixed-side panel's width changes (windows
+    /// added/removed/resized in a panel). Cheap no-op when the area is
+    /// unchanged, so it's safe to call every frame.
+    fn sync_carousel_parent_area(&mut self) {
+        let desired = self.carousel_parent_area();
+        if desired != self.scrolling.parent_area() {
+            self.scrolling.update_config(
+                self.view_size,
+                desired,
+                self.scale.fractional_scale(),
+                self.options.clone(),
+            );
+        }
+    }
+
     pub fn update_render_elements(&mut self, is_active: bool) {
+        self.sync_carousel_parent_area();
+
         self.scrolling
             .update_render_elements(is_active && !self.floating_is_active.get());
 
@@ -566,7 +583,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         self.scrolling.update_config(
             self.view_size,
-            self.working_area,
+            self.carousel_parent_area(),
             self.scale.fractional_scale(),
             options.clone(),
         );
@@ -816,7 +833,7 @@ impl<W: LayoutElement> Workspace<W> {
             // Pass our existing options as is.
             self.scrolling.update_config(
                 size,
-                working_area,
+                self.carousel_parent_area(),
                 scale.fractional_scale(),
                 self.options.clone(),
             );
@@ -851,11 +868,6 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.background_buffer.resize(size);
-        self.fixed_panel_shadow_buffer
-            .resize(Size::from((
-                FIXED_PANEL_SHADOW_BAND_WIDTH,
-                working_area.size.h,
-            )));
 
         if scale_transform_changed {
             for window in self.windows() {
@@ -2494,66 +2506,186 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// Renders the carousel beneath the fixed-side panels.
+    ///
+    /// When a populated panel's inner edge actually has carousel content next to
+    /// it, that content is faded to transparent over [`CAROUSEL_EDGE_FADE_WIDTH`]
+    /// logical pixels so it dissolves into the wallpaper just before sliding
+    /// behind the panel, rather than ending in a hard edge or being darkened by
+    /// a shadow. The fade is a real per-pixel alpha gradient: the carousel
+    /// content within the thin band is rendered to an offscreen texture and
+    /// drawn through the `edge_fade` shader, while the rest of the carousel is
+    /// drawn directly (cropped to exclude the band) to keep the common, perf-
+    /// sensitive scrolling path cheap. With no populated panel, or with no
+    /// content reaching a panel edge this frame, this is a plain direct render.
     pub fn render_scrolling<R: NaruRenderer>(
         &self,
-        ctx: RenderCtx<R>,
+        mut ctx: RenderCtx<R>,
         xray_pos: XrayPos,
         focus_ring: bool,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        let scrolling_focus_ring = focus_ring && !self.floating_is_active();
+        let focus_ring = focus_ring && !self.floating_is_active();
+
+        let left_panel = !self.fixed_left.is_empty();
+        let right_panel = !self.fixed_right.is_empty();
+
+        // No populated panel → no edge to fade against; render directly.
+        if !left_panel && !right_panel {
+            self.scrolling
+                .render(ctx, xray_pos, focus_ring, &mut |elem| push(elem.into()));
+            return;
+        }
+
+        let scale = Scale::from(self.scale.fractional_scale());
+
+        // The fade needs the edge_fade shader; if it failed to compile, fall
+        // back to a plain direct render.
+        let program = {
+            let mut ctx = ctx.as_gles();
+            EdgeFadeOffscreenRenderElement::shader(ctx.renderer)
+        };
+        let Some(program) = program else {
+            self.scrolling
+                .render(ctx, xray_pos, focus_ring, &mut |elem| push(elem.into()));
+            return;
+        };
+
+        let wa = self.working_area;
+        let fade_w = CAROUSEL_EDGE_FADE_WIDTH;
+        // Panel inner edges in logical screen-space x — the carousel slides
+        // behind the panels past these.
+        let left_edge = wa.loc.x + self.fixed_left.width();
+        let right_edge = wa.loc.x + wa.size.w - self.fixed_right.width();
+
+        // Thin fade bands just inside each panel edge. They span the full output
+        // height so this horizontal-only crop never clips content vertically.
+        let band = |x: f64| -> Rectangle<i32, Physical> {
+            Rectangle::new(Point::from((x, 0.)), Size::from((fade_w, self.view_size.h)))
+                .to_physical_precise_round(scale)
+        };
+        let left_band = band(left_edge);
+        let right_band = band(right_edge - fade_w);
+
+        // Collect the carousel elements once so we can both test band overlap
+        // and reuse them for the cropped middle.
+        let mut elems: Vec<ScrollingSpaceRenderElement<R>> = Vec::new();
         self.scrolling
-            .render(ctx, xray_pos, scrolling_focus_ring, &mut |elem| {
-                push(elem.into())
+            .render(ctx.r(), xray_pos, focus_ring, &mut |elem| elems.push(elem));
+
+        let left_active = left_panel
+            && elems.iter().any(|e| {
+                e.geometry(scale)
+                    .intersection(left_band)
+                    .is_some_and(|i| !i.is_empty())
             });
-    }
+        let right_active = right_panel
+            && elems.iter().any(|e| {
+                e.geometry(scale)
+                    .intersection(right_band)
+                    .is_some_and(|i| !i.is_empty())
+            });
 
-    /// Emits a faux-gradient black edge fade on the carousel-facing inner edge
-    /// of each populated fixed-side panel. The gradient is built by stacking
-    /// [`FIXED_PANEL_SHADOW_BAND_ALPHAS.len()`] one-band-wide rectangles
-    /// side-by-side, each with a decreasing alpha, so the carousel reads as
-    /// fading out as it approaches the panel before sliding behind it. Pushed
-    /// *after* the per-strip render methods and *before*
-    /// [`render_scrolling`](Self::render_scrolling) (push order is
-    /// front-to-back), so it sits on top of the carousel but beneath the
-    /// panel's own windows. Empty strips contribute nothing.
-    pub fn render_fixed_strip_shadows<R: NaruRenderer>(
-        &self,
-        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
-    ) {
-        let working_area = self.working_area;
-        let band_w = FIXED_PANEL_SHADOW_BAND_WIDTH;
-
-        if !self.fixed_left.is_empty() {
-            // Bands stack rightward from the strip's inner edge into the
-            // carousel; band 0 (densest alpha) is adjacent to the strip.
-            let base_x = working_area.loc.x + self.fixed_left.width();
-            for (i, &alpha) in FIXED_PANEL_SHADOW_BAND_ALPHAS.iter().enumerate() {
-                let x = base_x + (i as f64) * band_w;
-                let elem = SolidColorRenderElement::from_buffer(
-                    &self.fixed_panel_shadow_buffer,
-                    Point::from((x, working_area.loc.y)),
-                    alpha,
-                    Kind::Unspecified,
-                );
+        // Nothing actually reaches a panel edge this frame → direct render.
+        if !left_active && !right_active {
+            for elem in elems {
                 push(elem.into());
+            }
+            return;
+        }
+
+        // Draw the carousel between the fade bands at full opacity. Excluding the
+        // band region(s) is what lets the faded copy show through to the
+        // wallpaper instead of stacking on top of opaque content.
+        let mid_left = if left_active { left_edge + fade_w } else { wa.loc.x };
+        let mid_right = if right_active {
+            right_edge - fade_w
+        } else {
+            wa.loc.x + wa.size.w
+        };
+        let mid_rect = Rectangle::new(
+            Point::from((mid_left, 0.)),
+            Size::from(((mid_right - mid_left).max(0.), self.view_size.h)),
+        )
+        .to_physical_precise_round(scale);
+        for elem in elems {
+            if let Some(cropped) = CropRenderElement::from_element(elem, scale, mid_rect) {
+                push(WorkspaceRenderElement::CroppedScrolling(cropped));
             }
         }
 
-        if !self.fixed_right.is_empty() {
-            // Bands stack leftward from the strip's inner edge into the
-            // carousel; band 0 (densest alpha) is adjacent to the strip.
-            let strip_inner_edge =
-                working_area.loc.x + working_area.size.w - self.fixed_right.width();
-            for (i, &alpha) in FIXED_PANEL_SHADOW_BAND_ALPHAS.iter().enumerate() {
-                let x = strip_inner_edge - ((i as f64) + 1.0) * band_w;
-                let elem = SolidColorRenderElement::from_buffer(
-                    &self.fixed_panel_shadow_buffer,
-                    Point::from((x, working_area.loc.y)),
-                    alpha,
-                    Kind::Unspecified,
-                );
-                push(elem.into());
+        // Render each engaged edge's band through the fade shader. `x_alpha0` is
+        // the panel edge (fully transparent), `x_alpha1` the carousel-ward end
+        // (fully opaque).
+        if left_active {
+            self.render_fade_band(
+                &mut ctx,
+                &self.left_fade_offscreen,
+                xray_pos,
+                focus_ring,
+                scale,
+                left_band,
+                left_edge,
+                left_edge + fade_w,
+                &program,
+                push,
+            );
+        }
+        if right_active {
+            self.render_fade_band(
+                &mut ctx,
+                &self.right_fade_offscreen,
+                xray_pos,
+                focus_ring,
+                scale,
+                right_band,
+                right_edge,
+                right_edge - fade_w,
+                &program,
+                push,
+            );
+        }
+    }
+
+    /// Renders just the carousel content inside `band` into `offscreen`, then
+    /// pushes it through the `edge_fade` shader so it fades from transparent at
+    /// `x_alpha0` (the panel edge) to opaque at `x_alpha1` (carousel-ward).
+    #[allow(clippy::too_many_arguments)]
+    fn render_fade_band<R: NaruRenderer>(
+        &self,
+        ctx: &mut RenderCtx<R>,
+        offscreen: &OffscreenBuffer,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        scale: Scale<f64>,
+        band: Rectangle<i32, Physical>,
+        x_alpha0: f64,
+        x_alpha1: f64,
+        program: &EdgeFadeShader,
+        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
+    ) {
+        let mut ctx = ctx.as_gles();
+
+        let mut elems: Vec<ScrollingSpaceRenderElement<GlesRenderer>> = Vec::new();
+        self.scrolling
+            .render(ctx.r(), xray_pos, focus_ring, &mut |elem| elems.push(elem));
+
+        let cropped: Vec<CropRenderElement<ScrollingSpaceRenderElement<GlesRenderer>>> = elems
+            .into_iter()
+            .filter_map(|elem| CropRenderElement::from_element(elem, scale, band))
+            .collect();
+        if cropped.is_empty() {
+            return;
+        }
+
+        match offscreen.render(ctx.renderer, scale, &cropped) {
+            Ok((elem, _sync, _data)) => {
+                let elem =
+                    EdgeFadeOffscreenRenderElement::new(elem, program.clone(), x_alpha0, x_alpha1);
+                push(WorkspaceRenderElement::EdgeFade(elem));
+            }
+            Err(err) => {
+                warn!("error rendering carousel edge-fade band to offscreen: {err:?}");
             }
         }
     }

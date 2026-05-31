@@ -1753,12 +1753,11 @@ impl<W: LayoutElement> Monitor<W> {
             // relative to the screen still stays pinned as panels grow / shrink
             // (that's a layout property, independent of z-order).
             //
-            // The drop-shadow bands draw between the panels and the carousel —
-            // on top of the carousel, beneath the panels — so the carousel
-            // fades into the raised panel just before it disappears underneath.
+            // `render_scrolling` fades the carousel's edge out to transparent as
+            // it approaches a populated panel, so it dissolves into the wallpaper
+            // just before disappearing underneath.
             ws.render_fixed_left(ctx.r(), xray_pos, focus_ring, push!());
             ws.render_fixed_right(ctx.r(), xray_pos, focus_ring, push!());
-            ws.render_fixed_strip_shadows(push!());
 
             ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
         }

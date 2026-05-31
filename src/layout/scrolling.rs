@@ -4504,7 +4504,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.view_size
     }
 
-    #[cfg(test)]
     pub fn parent_area(&self) -> Rectangle<f64, Logical> {
         self.parent_area
     }
