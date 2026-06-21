@@ -576,7 +576,9 @@ impl XdgShellHandler for State {
                             state.states.unset(xdg_toplevel::State::Maximized);
                         });
 
-                        let is_floating = rules.compute_open_floating(&toplevel);
+                        let same_app = with_toplevel_role(&toplevel, |r| r.app_id.clone())
+                            .is_some_and(|app| ws.has_window_with_app_id(&app));
+                        let is_floating = rules.compute_open_floating(&toplevel, same_app);
                         let configure_width = if is_floating {
                             *floating_width
                         } else if *is_full_width {
@@ -786,7 +788,9 @@ impl XdgShellHandler for State {
                             }
                         });
 
-                        let is_floating = rules.compute_open_floating(&toplevel);
+                        let same_app = with_toplevel_role(&toplevel, |r| r.app_id.clone())
+                            .is_some_and(|app| ws.has_window_with_app_id(&app));
+                        let is_floating = rules.compute_open_floating(&toplevel, same_app);
                         let configure_width = if is_floating {
                             *floating_width
                         } else if *is_full_width {
@@ -1112,7 +1116,6 @@ impl State {
         let mut height = None;
         let mut floating_height = None;
         let is_full_width = rules.open_maximized.unwrap_or(false);
-        let is_floating = rules.compute_open_floating(toplevel);
 
         // Tell the surface the preferred size and bounds for its likely output.
         let ws = rules
@@ -1123,6 +1126,17 @@ impl State {
                 mon.map(|mon| mon.active_workspace_ref())
                     .or_else(|| self.naru.layout.active_workspace())
             });
+
+        // Auto-floating signal: a same-app tile already lives in the workspace
+        // this window would land in. Requires picking the workspace first, so
+        // this has to follow the `ws` resolution above.
+        let same_app = ws
+            .and_then(|ws| {
+                with_toplevel_role(toplevel, |r| r.app_id.clone())
+                    .map(|app| ws.has_window_with_app_id(&app))
+            })
+            .unwrap_or(false);
+        let is_floating = rules.compute_open_floating(toplevel, same_app);
 
         let mut is_pending_maximized = false;
         if let Some(ws) = ws {

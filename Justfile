@@ -1,10 +1,14 @@
 # naru — common dev tasks. Run `just` for a list.
 #
 # Recipes:
-#   just setup    — install build dependencies (auto-detects apt / dnf / pacman / apk)
-#   just build    — release build of the naru binary
+#   just setup    — install build dependencies (auto-detects apt / dnf / pacman / apk).
+#                   Only needed for `just test` and host-side hacking; `just build`
+#                   runs inside the Docker builder image so the host does not need
+#                   rustup or any of the *-dev packages.
+#   just build    — build the naru binary via docker buildx using Dockerfile.alloy
+#                   and extract it into target/release/naru
 #   just test     — run the workspace test suite (excludes naru-visual-tests)
-#   just install  — build and install system-wide via scripts/install.sh
+#   just install  — build (docker buildx) and install system-wide via scripts/install.sh
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
@@ -47,14 +51,40 @@ setup:
         exit 1
     fi
 
-# Release build.
+# Release build via docker buildx (no host rustup / cargo / *-dev tree
+# required). Uses the multi-stage Dockerfile.alloy: the `builder` stage
+# installs the full Wayland/graphics toolchain plus a pinned Rust
+# toolchain and runs `cargo build --release --bin naru`; the `export`
+# stage stages just the binary on `scratch`.
+#
+# `--output type=local` is written by the docker daemon, not by the user
+# invoking `just build`. With rootful Docker (or a rootless daemon with
+# uid mapping) that writer can end up not matching the target directory's
+# owner, leaving artifacts the next invocation cannot overwrite. To stay
+# robust to that, we materialise the export stage into a per-build tmp
+# directory and then `install` the binary into target/release/ — same
+# path `scripts/install.sh` expects, but with predictable ownership.
 build:
-    cargo build --release --bin naru
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(mktemp -d -t naru-build-XXXXXX)
+    trap 'rm -rf "$out"' EXIT
+    docker buildx build \
+        --target export \
+        --file Dockerfile.alloy \
+        --output "type=local,dest=$out" \
+        .
+    mkdir -p target/release
+    install -m 0755 "$out/naru" target/release/naru
 
 # Run the workspace test suite. Excludes naru-visual-tests (development-only).
 test:
     cargo test --workspace --exclude naru-visual-tests
 
-# Install system-wide. Requires a prior `just build`; runs scripts/install.sh under sudo.
+# Install system-wide. Depends on `build` (docker buildx), then runs
+# scripts/install.sh under sudo to drop /usr/bin/naru, the session files,
+# and the systemd units in place. It also defaults the Plasma theme to
+# Breeze Dark and the display manager to SDDM *only when neither is already
+# set* — existing, working choices are never overridden.
 install: build
     sudo ./scripts/install.sh

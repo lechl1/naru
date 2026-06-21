@@ -1021,27 +1021,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
     }
 
-    /// Insert `tile` as a new row directly beneath the active tile of the
-    /// active column — the "stack under the last active window" placement used
-    /// by `new-window-placement "stack"` on landscape outputs. The new tile
-    /// takes an equal share of the column height (`WindowHeight::Auto`), like
-    /// any other column row, and becomes active when `activate` is set.
-    ///
-    /// The caller must ensure the carousel is non-empty (there has to be an
-    /// active column to stack under); it is a no-op otherwise.
-    pub fn add_tile_below_active(&mut self, tile: Tile<W>, activate: bool) {
-        debug_assert!(
-            !self.columns.is_empty(),
-            "add_tile_below_active requires a non-empty carousel",
-        );
-        if self.columns.is_empty() {
-            return;
-        }
-        let col_idx = self.active_column_idx;
-        let below = self.columns[col_idx].active_tile_idx + 1;
-        self.add_tile_to_column(col_idx, Some(below), tile, activate);
-    }
-
     pub fn add_tile_right_of(
         &mut self,
         right_of: &W::Id,
@@ -3368,6 +3347,23 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let change = SizeChange::from(preset);
         for (col, data) in zip(&mut self.columns, &mut self.data) {
             col.set_column_width(change, None, true);
+            cancel_resize_for_column(&mut self.interactive_resize, col);
+            data.update(col);
+        }
+    }
+
+    /// Multiply each column's width by `factor`, in place, preserving the
+    /// relative proportions between columns. Used by the workspace-level
+    /// minimum-span enforcement so that close/resize/open events grow the
+    /// carousel back up to its floor without flattening user-set ratios.
+    /// No-op when `factor` is non-finite, ≤ 0, or the carousel is empty.
+    pub fn scale_all_columns_widths(&mut self, factor: f64) {
+        if !factor.is_finite() || factor <= 0.0 || self.columns.is_empty() {
+            return;
+        }
+        for (col, data) in zip(&mut self.columns, &mut self.data) {
+            let new_w = (data.width * factor).max(1.0);
+            col.set_column_width(SizeChange::SetFixed(new_w as i32), None, true);
             cancel_resize_for_column(&mut self.interactive_resize, col);
             data.update(col);
         }

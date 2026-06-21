@@ -1634,7 +1634,6 @@ mod tests {
                     ),
                 ],
                 center_focused_column: OnOverflow,
-                new_window_placement: New,
                 always_center_single_column: false,
                 disable_carousel: false,
                 auto_fit_or_center: false,
@@ -1663,7 +1662,7 @@ mod tests {
                 },
                 terminal_app_ids: [],
                 ultrawide_default_column_width: Proportion(
-                    0.4,
+                    0.3333333333333333,
                 ),
                 ultrawide_terminal_column_width: Proportion(
                     0.2,
@@ -1992,8 +1991,7 @@ mod tests {
                     open_focused: Some(
                         true,
                     ),
-                    open_in_same_column: None,
-                    max_windows_per_column: None,
+                    open_in_fixed_side: None,
                     min_width: None,
                     min_height: None,
                     max_width: None,

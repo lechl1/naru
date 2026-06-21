@@ -39,8 +39,7 @@ use std::time::Duration;
 use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
 use naru_config::utils::MergeWith as _;
 use naru_config::{
-    Config, CornerRadius, LayoutPart, NewWindowPlacement, PresetSize,
-    Workspace as WorkspaceConfig, WorkspaceReference,
+    Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
 };
 use naru_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use scrolling::{Column, ColumnWidth};
@@ -992,17 +991,7 @@ impl<W: LayoutElement> Layout<W> {
         // floating), giving "rightmost in current workspace" semantics. Falls back to the
         // original `Auto` (focus-relative placement) when no match exists or when the new
         // window has no app_id.
-        //
-        // Only under `new-window-placement "new"`. The `"stack"` placement wants every new
-        // window under (or right of) the *active* window, so leaving the target as `Auto`
-        // lets the workspace stack-placement path handle it uniformly instead of being
-        // pre-empted into a fresh column beside a same-app sibling. Same goes for the
-        // per-rule `open-in-same-column true` opt-in — the rule-driven stacking decision
-        // needs to run against the *active* window, not a global same-app sibling.
-        let same_app_id: Option<W::Id> = if matches!(target, AddWindowTarget::Auto)
-            && self.options.layout.new_window_placement == NewWindowPlacement::New
-            && window.rules().open_in_same_column != Some(true)
-        {
+        let same_app_id: Option<W::Id> = if matches!(target, AddWindowTarget::Auto) {
             window
                 .app_id()
                 .and_then(|app| self.find_same_app_in_active_workspace(&app))
@@ -1518,9 +1507,17 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        // Best-effort: when the window has been removed (unmapped, transferred
+        // between layouts, etc.) between `find_window_and_output` and this
+        // call, no workspace owns it any more. Returning a unit rect lets the
+        // popup positioner run without unconstrained data instead of
+        // `unwrap()`-panicking the whole compositor over a stale popup.
         self.workspaces()
             .find_map(|(_, _, ws)| ws.popup_target_rect(window))
-            .unwrap()
+            .unwrap_or_else(|| {
+                tracing::warn!("popup_target_rect: window not found in any workspace");
+                Rectangle::from_size(Size::from((0., 0.)))
+            })
     }
 
     pub fn update_output_size(&mut self, output: &Output) {

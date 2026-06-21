@@ -6,7 +6,7 @@ use naru_config::{
     BackgroundEffect, BlockOutFrom, BorderRule, CornerRadius, FloatingPosition, PresetSize,
     ResolvedPopupsRules, ShadowRule, TabIndicatorRule,
 };
-use naru_ipc::ColumnDisplay;
+use naru_ipc::{ColumnDisplay, OpenInFixedSide};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Logical, Size};
 use smithay::wayland::compositor::with_states;
@@ -73,13 +73,9 @@ pub struct ResolvedWindowRules {
     /// Whether the window should open focused.
     pub open_focused: Option<bool>,
 
-    /// Whether a new window matching this rule should stack into the active
-    /// window's column when the active window also opted into this. See the
-    /// matching field on [`naru_config::WindowRule`].
-    pub open_in_same_column: Option<bool>,
-
-    /// Cap on stacked windows for [`Self::open_in_same_column`].
-    pub max_windows_per_column: Option<u16>,
+    /// Open this window into a fixed-side panel instead of the carousel.
+    /// See [`naru_config::WindowRule::open_in_fixed_side`].
+    pub open_in_fixed_side: Option<OpenInFixedSide>,
 
     /// Extra bound on the minimum window width.
     pub min_width: Option<u16>,
@@ -265,12 +261,8 @@ impl ResolvedWindowRules {
                     resolved.open_focused = Some(x);
                 }
 
-                if let Some(x) = rule.open_in_same_column {
-                    resolved.open_in_same_column = Some(x);
-                }
-
-                if let Some(x) = rule.max_windows_per_column {
-                    resolved.max_windows_per_column = Some(x);
+                if let Some(x) = rule.open_in_fixed_side {
+                    resolved.open_in_fixed_side = Some(x);
                 }
 
                 if let Some(x) = rule.min_width {
@@ -377,13 +369,27 @@ impl ResolvedWindowRules {
         (min_size, max_size)
     }
 
-    pub fn compute_open_floating(&self, toplevel: &ToplevelSurface) -> bool {
+    pub fn compute_open_floating(
+        &self,
+        toplevel: &ToplevelSurface,
+        same_app_in_workspace: bool,
+    ) -> bool {
         if let Some(res) = self.open_floating {
             return res;
         }
 
         // Windows with a parent (usually dialogs) open as floating by default.
         if toplevel.parent().is_some() {
+            return true;
+        }
+
+        // Auto-floating for additional instances of the same app in the same
+        // workspace: the first window of an app tiles into the carousel, and
+        // every subsequent same-app window pops out as a floating secondary
+        // (think a second editor window or a download dialog) so it doesn't
+        // displace the primary tile. Rule-driven `open-floating` always wins,
+        // so any window-rule can opt out either way.
+        if same_app_in_workspace {
             return true;
         }
 

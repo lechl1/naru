@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use naru_config::utils::MergeWith as _;
 use naru_config::{
-    CenterFocusedColumn, CornerRadius, NewWindowPlacement, OutputName, PresetSize,
-    Workspace as WorkspaceConfig,
+    CenterFocusedColumn, CornerRadius, OutputName, PresetSize, Workspace as WorkspaceConfig,
 };
 use naru_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::element::utils::CropRenderElement;
@@ -530,13 +529,16 @@ impl<W: LayoutElement> Workspace<W> {
         area
     }
 
-    /// In `disable-carousel` mode, returns the widest entry in
-    /// `preset_column_widths` such that `n` uniform columns of that width
-    /// still fit between the fixed-side panels (accounting for inter-column
-    /// gaps). Returns `None` when even the narrowest preset wouldn't fit, or
-    /// when there are no presets configured — both signal "overflow", which
-    /// the placement path handles by stacking instead of opening a new
-    /// column.
+    /// In `disable-carousel` mode, returns a uniform column width for `n`
+    /// columns that is guaranteed to fit between the fixed-side panels
+    /// (accounting for inter-column gaps): the widest entry in
+    /// `preset_column_widths` that fits, or — when even the narrowest preset
+    /// wouldn't fit (or none are configured) — a computed sub-preset
+    /// proportion so the columns shrink to stay on screen. This is what keeps
+    /// the workspace from ever growing past the screen minus the side panels.
+    ///
+    /// Returns `None` only in degenerate cases (`n == 0`, or no usable width
+    /// between the panels at all).
     fn disabled_carousel_uniform_preset(&self, n: usize) -> Option<PresetSize> {
         if n == 0 {
             return None;
@@ -544,7 +546,7 @@ impl<W: LayoutElement> Workspace<W> {
         let available = self.carousel_parent_area().size.w;
         let gaps = self.options.layout.gaps;
         let usable = available - (n.saturating_sub(1)) as f64 * gaps;
-        if usable <= 0. {
+        if usable <= 0. || available <= gaps {
             return None;
         }
         let per_column = usable / n as f64;
@@ -563,16 +565,23 @@ impl<W: LayoutElement> Workspace<W> {
                 best = Some((preset, w));
             }
         }
-        best.map(|(p, _)| p)
+
+        // No configured preset fits `n` columns. Fall back to the proportion
+        // whose resolved width is exactly `per_column`, so the columns shrink
+        // uniformly to fill — but never exceed — the inset area. Inverts the
+        // proportion branch of the fit formula above.
+        Some(best.map(|(p, _)| p).unwrap_or_else(|| {
+            let p = (per_column + gaps) / (available - gaps);
+            PresetSize::Proportion(p.clamp(f64::MIN_POSITIVE, 1.0))
+        }))
     }
 
-    /// In `disable-carousel` mode, push the uniform "widest preset that fits
-    /// all current columns" width down to every column. Called after any
-    /// column add/remove so the resting layout stays fully visible between
-    /// the fixed-side panels. No-op when the option is off, when the
-    /// carousel is empty, or when no preset fits (the overflow case is
-    /// already handled by the placement path picking `add_tile_below_active`
-    /// instead of adding a new column).
+    /// In `disable-carousel` mode, push the uniform "widest width that fits
+    /// all current columns" down to every column. Called after any column
+    /// add/remove so the resting layout stays fully visible between the
+    /// fixed-side panels — shrinking the columns when needed so the carousel
+    /// never overflows the inset area. No-op when the option is off or when
+    /// the carousel is empty.
     fn apply_disabled_carousel_widths(&mut self) {
         if !self.options.layout.disable_carousel {
             return;
@@ -584,6 +593,68 @@ impl<W: LayoutElement> Workspace<W> {
         if let Some(preset) = self.disabled_carousel_uniform_preset(n) {
             self.scrolling.set_all_columns_to_preset(preset);
         }
+    }
+
+    /// Floor on how much of the workspace the carousel must visually occupy.
+    /// After a column add / close / resize, if the total carousel content extent
+    /// drops below `min_fraction × view_extent`, all columns are scaled up
+    /// proportionally to hit the floor — preserving relative widths.
+    ///
+    /// `min_fraction` is 1/3 on ultrawide outputs (≥21:9 either way), 1/2
+    /// otherwise. The "view extent" is `view_size.w` on landscape and
+    /// `view_size.h` on portrait, so the floor tracks the orientation the user
+    /// physically sees. No-op when:
+    ///   - `disable-carousel` is on (it already pins widths to fit), or
+    ///   - the carousel is empty, or
+    ///   - the carousel already meets the floor, or
+    ///   - the carousel can't grow further without overflowing the inset area
+    ///     (i.e. fixed-side panels eat the working area down to the floor).
+    fn enforce_min_carousel_span(&mut self) {
+        if self.options.layout.disable_carousel {
+            return;
+        }
+        if self.scrolling.column_count() == 0 {
+            return;
+        }
+
+        let landscape = self.view_size.w >= self.view_size.h;
+        let view_extent = if landscape {
+            self.view_size.w
+        } else {
+            self.view_size.h
+        };
+        if view_extent <= 0.0 {
+            return;
+        }
+
+        // Treat the output as "ultrawide" when either axis is ≥21:9 of the
+        // other — so a rotated portrait monitor counts too.
+        let (long, short) = if self.view_size.w >= self.view_size.h {
+            (self.view_size.w, self.view_size.h.max(1.0))
+        } else {
+            (self.view_size.h, self.view_size.w.max(1.0))
+        };
+        let is_uw = long / short >= 21.0 / 9.0;
+        let min_fraction = if is_uw { 1.0 / 3.0 } else { 1.0 / 2.0 };
+        let min_span = view_extent * min_fraction;
+
+        let current = self.scrolling.content_width();
+        if current >= min_span || current <= 0.0 {
+            return;
+        }
+
+        // Don't push the carousel past what its inset parent area can hold:
+        // if the fixed-side strips eat enough horizontal space that the floor
+        // is bigger than the carousel viewport, cap at the viewport so widths
+        // remain physically realizable.
+        let cap = self.carousel_parent_area().size.w;
+        let target = min_span.min(cap);
+        if target <= current {
+            return;
+        }
+
+        let factor = target / current;
+        self.scrolling.scale_all_columns_widths(factor);
     }
 
     /// Re-inset the carousel when a fixed-side panel's width changes (windows
@@ -604,21 +675,25 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn update_render_elements(&mut self, is_active: bool) {
         self.sync_carousel_parent_area();
 
-        self.scrolling
-            .update_render_elements(is_active && !self.floating_is_active.get());
+        // Only the layer that owns focus right now renders its active tile
+        // with the focused styling. Without this discrimination, the carousel
+        // and both strips all draw a focus ring on their last-active column,
+        // so moving focus into a strip leaves a "remnant" active indicator
+        // back in the carousel — and the user can't tell where keyboard input
+        // is actually going.
+        let tiling_active = is_active && !self.floating_is_active.get();
+        let scrolling_focused = tiling_active && self.active_fixed_side.is_none();
+        let fixed_left_focused = tiling_active && self.active_fixed_side == Some(FixedSide::Left);
+        let fixed_right_focused = tiling_active && self.active_fixed_side == Some(FixedSide::Right);
+
+        self.scrolling.update_render_elements(scrolling_focused);
 
         let view_rect = Rectangle::from_size(self.view_size);
         self.floating
             .update_render_elements(is_active && self.floating_is_active.get(), view_rect);
 
-        // Fixed-side panels render passively whenever they contain windows
-        // (focus is independent of which layer hosts those windows). Phase 4
-        // of the fixed-panels work refines the active/inactive state once a
-        // proper "panel is focused" notion exists in Workspace.
-        self.fixed_left
-            .update_render_elements(is_active && !self.floating_is_active.get());
-        self.fixed_right
-            .update_render_elements(is_active && !self.floating_is_active.get());
+        self.fixed_left.update_render_elements(fixed_left_focused);
+        self.fixed_right.update_render_elements(fixed_right_focused);
 
         self.shadow.update_render_elements(
             self.view_size,
@@ -689,6 +764,15 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.update_shaders();
         self.floating.update_shaders();
         self.shadow.update_shaders();
+    }
+
+    /// True if any window in this workspace (any layer) reports the given
+    /// xdg `app_id`. Used by the auto-open-floating default so a second copy
+    /// of an app in the same workspace pops out as floating instead of
+    /// displacing the primary tile.
+    pub fn has_window_with_app_id(&self, app_id: &str) -> bool {
+        self.windows()
+            .any(|w| w.app_id().as_deref() == Some(app_id))
     }
 
     pub fn windows(&self) -> impl Iterator<Item = &W> + '_ {
@@ -963,6 +1047,22 @@ impl<W: LayoutElement> Workspace<W> {
                 // Don't steal focus from an active fullscreen window.
                 let activate = activate.map_smart(|| !self.is_active_pending_fullscreen());
 
+                // `open-in-fixed-side` short-circuits placement entirely: the
+                // window opens as a fresh column at the inner edge of the named
+                // fixed-side panel, never touching the carousel / floating
+                // layers or the disable-carousel sizing path. `activate` is
+                // intentionally ignored — fixed-side strips own focus via the
+                // separate stack-move IN/OUT routes, not via "newly-opened
+                // window steals focus".
+                if let Some(side) = tile.window().rules().open_in_fixed_side {
+                    let strip = match side {
+                        naru_ipc::OpenInFixedSide::Left => &mut self.fixed_left,
+                        naru_ipc::OpenInFixedSide::Right => &mut self.fixed_right,
+                    };
+                    strip.add_tile_at_inner_edge(tile, width, is_full_width);
+                    return;
+                }
+
                 // If the tile is pending maximized or fullscreen, open it in the scrolling layout
                 // where it can do that.
                 if is_floating && tile.window().pending_sizing_mode().is_normal() {
@@ -972,49 +1072,15 @@ impl<W: LayoutElement> Workspace<W> {
                         self.floating_is_active = FloatingActive::Yes;
                     }
                 } else {
-                    // `new-window-placement "stack"` opens the window under the active one
-                    // on a landscape output (a new row in the active column, auto-sized to
-                    // an equal share of the column height) and as a new column to the right
-                    // on a portrait output. `"new"` (the code default) and an empty carousel
-                    // both open a fresh column to the right.
+                    // Every new window opens in a fresh column to the right of the
+                    // active one, independent of the active window's size.
                     //
-                    // Per-window-rule `open-in-same-column` overrides this for windows
-                    // that opt in *and* are opened next to an active window that also
-                    // opts in — both sides have to belong to the "same group" before
-                    // we co-locate them. `max-windows-per-column` caps the stack: once
-                    // the active column already holds that many tiles, the next match
-                    // opens a fresh column instead.
-                    let landscape = self.view_size.w >= self.view_size.h;
-                    // "Active window in the scrolling carousel" — the per-rule
-                    // path stacks the new tile under that one specifically, so
-                    // when focus is in a fixed strip or in floating, the
-                    // `active_column` of the carousel isn't the right anchor
-                    // and we fall back to opening a new column.
-                    let active_in_scrolling = !self.floating_is_active.get()
-                        && self.active_fixed_side.is_none()
-                        && !self.scrolling.is_empty();
-                    let rule_stack_ok = active_in_scrolling
-                        && tile.window().rules().open_in_same_column == Some(true)
-                        && self
-                            .active_window()
-                            .is_some_and(|w| w.rules().open_in_same_column == Some(true))
-                        && {
-                            let cap = tile
-                                .window()
-                                .rules()
-                                .max_windows_per_column
-                                .map(usize::from);
-                            let cur = self.scrolling.active_column_tile_count().unwrap_or(0);
-                            cap.is_none_or(|n| cur < n)
-                        };
-                    // With `disable-carousel`, the workspace can't scroll, so every
-                    // additional column has to fit between the fixed-side panels. We
-                    // check up front: if N+1 uniform columns at the widest viable
-                    // preset still fit, open a new column at that preset and re-apply
-                    // the uniform width to every column so the layout stays coherent.
-                    // If even the narrowest preset wouldn't fit, fall back to stacking
-                    // (new row landscape / new column portrait — same as
-                    // `new-window-placement "stack"`) so the new window still appears.
+                    // With `disable-carousel`, the workspace can't scroll, so all
+                    // columns have to fit in the area between the fixed-side panels.
+                    // We pick a uniform width for N+1 columns: the widest viable
+                    // preset that fits, or — when even the narrowest preset wouldn't
+                    // fit — a computed sub-preset width so the columns shrink to stay
+                    // within the screen. The carousel never grows past the inset area.
                     let disabled = self.options.layout.disable_carousel;
                     let disabled_fit_preset = if disabled && !self.scrolling.is_empty() {
                         self.disabled_carousel_uniform_preset(self.scrolling.column_count() + 1)
@@ -1022,16 +1088,7 @@ impl<W: LayoutElement> Workspace<W> {
                         None
                     };
 
-                    let stack_under = (rule_stack_ok
-                        || (self.options.layout.new_window_placement == NewWindowPlacement::Stack
-                            && !self.scrolling.is_empty())
-                        || (disabled
-                            && !self.scrolling.is_empty()
-                            && disabled_fit_preset.is_none()))
-                        && landscape;
-                    if stack_under {
-                        self.scrolling.add_tile_below_active(tile, activate);
-                    } else if let Some(preset) = disabled_fit_preset {
+                    if let Some(preset) = disabled_fit_preset {
                         let preset_width = ColumnWidth::from(preset);
                         self.scrolling
                             .add_tile(None, tile, activate, preset_width, is_full_width, None);
@@ -1040,12 +1097,12 @@ impl<W: LayoutElement> Workspace<W> {
                         self.scrolling
                             .add_tile(None, tile, activate, width, is_full_width, None);
                         if disabled {
-                            // First column or portrait stack: still want the uniform
-                            // sizing to apply (a single column will pick the widest
-                            // preset overall).
+                            // First column: still apply the uniform sizing (a single
+                            // column picks the widest preset that fits overall).
                             self.apply_disabled_carousel_widths();
                         }
                     }
+                    self.enforce_min_carousel_span();
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
@@ -1215,6 +1272,7 @@ impl<W: LayoutElement> Workspace<W> {
         // re-apply after the removal so the remaining columns expand to fill.
         // Cheap no-op when the option is off or the carousel is now empty.
         self.apply_disabled_carousel_widths();
+        self.enforce_min_carousel_span();
 
         removed
     }
@@ -1248,6 +1306,8 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
+        self.apply_disabled_carousel_widths();
+        self.enforce_min_carousel_span();
 
         Some(removed)
     }
@@ -1283,6 +1343,8 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
+        self.apply_disabled_carousel_widths();
+        self.enforce_min_carousel_span();
 
         Some(column)
     }
@@ -2103,9 +2165,16 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn toggle_width(&mut self, forwards: bool) {
         if self.floating_is_active.get() {
             self.floating.toggle_window_width(None, forwards);
-        } else {
-            self.scrolling.toggle_width(forwards);
-            self.scrolling.auto_fit_or_center_view_offset();
+            return;
+        }
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => self.fixed_left.toggle_window_width(None, forwards),
+            Some(FixedSide::Right) => self.fixed_right.toggle_window_width(None, forwards),
+            None => {
+                self.scrolling.toggle_width(forwards);
+                self.enforce_min_carousel_span();
+                self.scrolling.auto_fit_or_center_view_offset();
+            }
         }
     }
 
@@ -2115,16 +2184,35 @@ impl<W: LayoutElement> Workspace<W> {
             // to be against the left edge of the working area while it is full-width.
             return;
         }
+        // Strips have content-bound width and no scrolling viewport, so
+        // "full-width" has no meaningful semantics there — leave them alone.
+        if self.active_fixed_side.is_some() {
+            return;
+        }
         self.scrolling.toggle_full_width();
+        self.enforce_min_carousel_span();
         self.scrolling.auto_fit_or_center_view_offset();
     }
 
     pub fn set_column_width(&mut self, change: SizeChange) {
         if self.floating_is_active.get() {
             self.floating.set_window_width(None, change, true);
-        } else {
-            self.scrolling.set_window_width(None, change);
-            self.scrolling.auto_fit_or_center_view_offset();
+            return;
+        }
+        // Route "act on the active column" width changes to whichever layer
+        // currently owns focus. Without this dispatch, keybinds like
+        // `set-column-width "-10%"` / `switch-preset-column-width` quietly
+        // resize the carousel's active column while the user is focused on a
+        // fixed-side window — i.e. the strip "doesn't render smaller" because
+        // the resize was sent to the wrong layer entirely.
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => self.fixed_left.set_window_width(None, change),
+            Some(FixedSide::Right) => self.fixed_right.set_window_width(None, change),
+            None => {
+                self.scrolling.set_window_width(None, change);
+                self.enforce_min_carousel_span();
+                self.scrolling.auto_fit_or_center_view_offset();
+            }
         }
     }
 
@@ -2135,6 +2223,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.set_window_width(window, change),
             WindowLayer::Scrolling => {
                 self.scrolling.set_window_width(window, change);
+                self.enforce_min_carousel_span();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2147,6 +2236,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.set_window_height(window, change),
             WindowLayer::Scrolling => {
                 self.scrolling.set_window_height(window, change);
+                self.enforce_min_carousel_span();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2171,6 +2261,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.toggle_window_width(window, forwards),
             WindowLayer::Scrolling => {
                 self.scrolling.toggle_window_width(window, forwards);
+                self.enforce_min_carousel_span();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2192,7 +2283,15 @@ impl<W: LayoutElement> Workspace<W> {
         if self.floating_is_active.get() {
             return;
         }
+        // Same misdispatch concern as `set_column_width`: when a strip owns
+        // focus, the action would silently grow the carousel's active column.
+        // "Available width" has no clean meaning for a strip (pinned, no
+        // scrolling viewport), so no-op there.
+        if self.active_fixed_side.is_some() {
+            return;
+        }
         self.scrolling.expand_column_to_available_width();
+        self.enforce_min_carousel_span();
         self.scrolling.auto_fit_or_center_view_offset();
     }
 
@@ -2621,6 +2720,10 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn popup_target_rect(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
         if self.floating.has_window(window) {
             self.floating.popup_target_rect(window)
+        } else if self.fixed_left.has_window(window) {
+            self.fixed_left.popup_target_rect(window)
+        } else if self.fixed_right.has_window(window) {
+            self.fixed_right.popup_target_rect(window)
         } else {
             self.scrolling.popup_target_rect(window)
         }
@@ -3045,10 +3148,23 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
-        self.scrolling
-            .refresh(is_active && !self.floating_is_active.get(), is_focused);
+        // Drive the same focus-discrimination as `update_render_elements`:
+        // only the layer that owns focus gets is_active=true, so xdg
+        // `Activated` state lands on the right window. Otherwise apps inside
+        // a strip never see themselves as focused, and the carousel's last
+        // active tile stays marked Activated even after focus moved into a
+        // strip — the "remnant focus" the user can feel when resize commands
+        // route back into the carousel.
+        let tiling_active = is_active && !self.floating_is_active.get();
+        let scrolling_focused = tiling_active && self.active_fixed_side.is_none();
+        let fixed_left_focused = tiling_active && self.active_fixed_side == Some(FixedSide::Left);
+        let fixed_right_focused = tiling_active && self.active_fixed_side == Some(FixedSide::Right);
+
+        self.scrolling.refresh(scrolling_focused, is_focused);
         self.floating
             .refresh(is_active && self.floating_is_active.get(), is_focused);
+        self.fixed_left.refresh(fixed_left_focused, is_focused);
+        self.fixed_right.refresh(fixed_right_focused, is_focused);
     }
 
     pub fn scroll_amount_to_activate(&self, window: &W::Id) -> f64 {
@@ -3128,6 +3244,14 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn view_offset_gesture_begin(&mut self, is_touchpad: bool) {
+        // With `disable-carousel`, the workspace can't pan at all — every
+        // column already fits inside the inset working area. Swallowing the
+        // gesture here (rather than at every input site) means trackpad
+        // swipes / mouse-wheel deltas can't leak a stray view-offset into the
+        // layout that would never settle back to zero.
+        if self.options.layout.disable_carousel {
+            return;
+        }
         self.scrolling.view_offset_gesture_begin(is_touchpad);
     }
 
@@ -3137,19 +3261,31 @@ impl<W: LayoutElement> Workspace<W> {
         timestamp: Duration,
         is_touchpad: bool,
     ) -> Option<bool> {
+        if self.options.layout.disable_carousel {
+            return None;
+        }
         self.scrolling
             .view_offset_gesture_update(delta_x, timestamp, is_touchpad)
     }
 
     pub fn view_offset_gesture_end(&mut self, is_touchpad: Option<bool>) -> bool {
+        if self.options.layout.disable_carousel {
+            return false;
+        }
         self.scrolling.view_offset_gesture_end(is_touchpad)
     }
 
     pub fn dnd_scroll_gesture_begin(&mut self) {
+        if self.options.layout.disable_carousel {
+            return;
+        }
         self.scrolling.dnd_scroll_gesture_begin();
     }
 
     pub fn dnd_scroll_gesture_scroll(&mut self, pos: Point<f64, Logical>, speed: f64) -> bool {
+        if self.options.layout.disable_carousel {
+            return false;
+        }
         let config = &self.options.gestures.dnd_edge_view_scroll;
         let trigger_width = config.trigger_width;
 
@@ -3181,6 +3317,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn dnd_scroll_gesture_end(&mut self) {
+        if self.options.layout.disable_carousel {
+            return;
+        }
         self.scrolling.dnd_scroll_gesture_end();
     }
 

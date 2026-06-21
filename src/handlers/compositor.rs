@@ -23,7 +23,7 @@ use crate::handlers::XDG_ACTIVATION_TOKEN_TIMEOUT;
 use crate::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _};
 use crate::naru::{CastTarget, ClientState, LockState, State};
 use crate::utils::transaction::Transaction;
-use crate::utils::{is_mapped, send_scale_transform};
+use crate::utils::{is_mapped, send_scale_transform, with_toplevel_role};
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped};
 
 impl CompositorHandler for State {
@@ -148,7 +148,27 @@ impl CompositorHandler for State {
                     // The GTK about dialog sets min/max size after the initial configure but
                     // before mapping, so we need to compute open_floating at the last possible
                     // moment, that is here.
-                    let is_floating = rules.compute_open_floating(toplevel);
+                    //
+                    // Same-app auto-floating: look for an existing tile with the same xdg
+                    // app_id in the workspace this window is about to land in (falling back
+                    // to the active workspace if no explicit target was recorded). When such
+                    // a tile exists, `compute_open_floating` floats this one by default —
+                    // unless the rule pinned `open-floating` either way.
+                    let same_app = with_toplevel_role(toplevel, |r| r.app_id.clone())
+                        .and_then(|app| {
+                            let ws = workspace_id
+                                .and_then(|id| {
+                                    self.naru
+                                        .layout
+                                        .workspaces()
+                                        .find(|(_, _, ws)| ws.id() == id)
+                                        .map(|(_, _, ws)| ws)
+                                })
+                                .or_else(|| self.naru.layout.active_workspace());
+                            ws.map(|ws| ws.has_window_with_app_id(&app))
+                        })
+                        .unwrap_or(false);
+                    let is_floating = rules.compute_open_floating(toplevel, same_app);
 
                     // Figure out if we should activate the window.
                     let activate = rules.open_focused.map(|focus| {

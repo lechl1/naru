@@ -18,17 +18,14 @@ pub struct Layout {
     pub default_column_width: Option<PresetSize>,
     pub preset_window_heights: Vec<PresetSize>,
     pub center_focused_column: CenterFocusedColumn,
-    /// Where a newly-opened window is placed relative to the active one. See
-    /// [`NewWindowPlacement`].
-    pub new_window_placement: NewWindowPlacement,
     pub always_center_single_column: bool,
     /// If true, the scrolling carousel is disabled: every workspace's columns
     /// must fit in the area between the fixed-side panels. New windows pick
     /// the widest entry in [`Self::preset_column_widths`] that still leaves
     /// room for all columns (so all columns end up at a uniform width);
     /// windows that would not fit even at the narrowest preset fall back to
-    /// the `new-window-placement "stack"` path (new row on landscape, new
-    /// column on portrait). The per-pixel carousel edge-fade against the
+    /// stacking (new row on landscape, new column on portrait). The
+    /// per-pixel carousel edge-fade against the
     /// fixed-side panels is also skipped — with no scrolling there's no
     /// content to dissolve behind the panels.
     pub disable_carousel: bool,
@@ -48,7 +45,7 @@ pub struct Layout {
     /// `layout { terminal-app-ids "foot" "alacritty" ... }`.
     pub terminal_app_ids: Vec<String>,
     /// Default column width for non-terminal windows on ultrawide outputs (≥ 21:9), used only
-    /// when the global `default-column-width` is unset. Default is 2/5 of the view width.
+    /// when the global `default-column-width` is unset. Default is 1/3 of the view width.
     pub ultrawide_default_column_width: PresetSize,
     /// Default column width for terminal windows (matched against `terminal_app_ids`) on
     /// ultrawide outputs (≥ 21:9), used only when the global `default-column-width` is unset.
@@ -71,7 +68,6 @@ impl Default for Layout {
             ],
             default_column_width: Some(PresetSize::Proportion(0.5)),
             center_focused_column: CenterFocusedColumn::Never,
-            new_window_placement: NewWindowPlacement::default(),
             always_center_single_column: false,
             disable_carousel: false,
             auto_fit_or_center: false,
@@ -86,7 +82,7 @@ impl Default for Layout {
             ],
             background_color: DEFAULT_BACKGROUND_COLOR,
             terminal_app_ids: Vec::new(),
-            ultrawide_default_column_width: PresetSize::Proportion(2. / 5.),
+            ultrawide_default_column_width: PresetSize::Proportion(1. / 3.),
             ultrawide_terminal_column_width: PresetSize::Proportion(1. / 5.),
         }
     }
@@ -113,7 +109,6 @@ impl MergeWith<LayoutPart> for Layout {
             preset_column_widths,
             preset_window_heights,
             center_focused_column,
-            new_window_placement,
             default_column_display,
             struts,
             background_color,
@@ -169,8 +164,6 @@ pub struct LayoutPart {
     pub preset_window_heights: Option<Vec<PresetSize>>,
     #[knuffel(child, unwrap(argument))]
     pub center_focused_column: Option<CenterFocusedColumn>,
-    #[knuffel(child, unwrap(argument))]
-    pub new_window_placement: Option<NewWindowPlacement>,
     #[knuffel(child)]
     pub always_center_single_column: Option<Flag>,
     #[knuffel(child)]
@@ -238,22 +231,6 @@ pub enum CenterFocusedColumn {
     /// Focusing a column will center it if it doesn't fit on the screen together with the
     /// previously focused column.
     OnOverflow,
-}
-
-/// Where a newly-opened window lands relative to the active window. Config
-/// strings: `"stack"` and `"new"`.
-#[derive(knuffel::DecodeScalar, Debug, Default, PartialEq, Eq, Clone, Copy)]
-pub enum NewWindowPlacement {
-    /// Stack the new window with the active one, sized to share the stacking
-    /// axis equally: on a landscape output it opens as a new row directly under
-    /// the active window (in the active column); on a portrait output it opens
-    /// as a new column to the right. The shipped naru config selects this.
-    Stack,
-    /// Open the new window in its own new column to the right of the active
-    /// one, independent of the active window's size. This is the niri default
-    /// and the conservative code default.
-    #[default]
-    New,
 }
 
 impl<S> knuffel::Decode<S> for DefaultPresetSize

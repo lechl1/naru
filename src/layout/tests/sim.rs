@@ -48,7 +48,7 @@
 
 use std::time::Duration;
 
-use naru_config::{FloatOrInt, NewWindowPlacement};
+use naru_config::FloatOrInt;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::{Op, TestWindow, TestWindowParams};
@@ -173,16 +173,6 @@ impl LayoutSim {
         Self::with_options(options)
     }
 
-    /// A fresh simulator whose `new-window-placement` is `"stack"`: a new
-    /// window opens under the active one on landscape outputs and to its right
-    /// on portrait outputs. (The code/`Options` default is `"new"`, so the
-    /// other constructors keep niri's new-column-per-window behaviour.)
-    pub fn new_stack_placement() -> Self {
-        let mut options = Options::default();
-        options.layout.new_window_placement = NewWindowPlacement::Stack;
-        Self::with_options(options)
-    }
-
     pub fn with_options(options: Options) -> Self {
         Self {
             layout: Layout::with_options(Clock::with_time(Duration::ZERO), options),
@@ -225,8 +215,7 @@ impl LayoutSim {
 
     /// Plug in a *portrait* fake output (720×1280 @ scale 1). The built-in
     /// [`add_output`](Self::add_output) is landscape; this one lets a scenario
-    /// exercise orientation-dependent behaviour (e.g. `new-window-placement
-    /// "stack"`, which adds to the right rather than below on portrait).
+    /// exercise orientation-dependent behaviour.
     pub fn add_portrait_output(&mut self, id: usize) {
         use naru_config::OutputName;
         use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
@@ -1165,74 +1154,10 @@ mod tests {
         assert_eq!(sim.active_fixed_side(), Some(FixedSide::Left));
     }
 
-    /// `new-window-placement "stack"` on a landscape output: a second window
-    /// opens *under* the active one — same column, below it, sharing the column
-    /// height equally — and takes focus.
-    #[test]
-    fn stack_placement_opens_new_window_under_active_in_landscape() {
-        let mut sim = LayoutSim::new_stack_placement();
-        sim.add_output(1); // 1280×720 — landscape
-        let a = sim.add_window();
-        let b = sim.add_window();
-        sim.communicate_all();
-        sim.complete_animations();
-        sim.update_render_elements();
-
-        // Both tiled; `b` opened under `a` and took focus.
-        sim.assert_slot(a, WindowLayer::Scrolling);
-        sim.assert_slot(b, WindowLayer::Scrolling);
-        sim.assert_active(Some(b));
-
-        let ga = sim.window_geometry(&a).expect("a geo");
-        let gb = sim.window_geometry(&b).expect("b geo");
-        // Same column ⇒ identical render x.
-        assert!(
-            (ga.loc.x - gb.loc.x).abs() < 1.0,
-            "a and b should share one column (same x): a={ga:?} b={gb:?}",
-        );
-        // `b` is the lower tile.
-        assert!(
-            gb.loc.y > ga.loc.y,
-            "b should open under a (greater y): a.y={} b.y={}",
-            ga.loc.y,
-            gb.loc.y,
-        );
-        // Equal split of the column height.
-        assert!(
-            (ga.size.h - gb.size.h).abs() < 2.0,
-            "stacked tiles should be equal height: a.h={} b.h={}",
-            ga.size.h,
-            gb.size.h,
-        );
-    }
-
-    /// `new-window-placement "stack"` on a *portrait* output adds to the right
-    /// instead of below: the second window opens in a new column.
-    #[test]
-    fn stack_placement_opens_new_column_on_portrait() {
-        let mut sim = LayoutSim::new_stack_placement();
-        sim.add_portrait_output(1); // 720×1280 — portrait
-        let a = sim.add_window();
-        let b = sim.add_window();
-        sim.communicate_all();
-        sim.complete_animations();
-        sim.update_render_elements();
-
-        let ga = sim.window_geometry(&a).expect("a geo");
-        let gb = sim.window_geometry(&b).expect("b geo");
-        assert!(
-            (ga.loc.x - gb.loc.x).abs() > 1.0,
-            "on portrait, stack placement should open b in a new column (different x): \
-             a={ga:?} b={gb:?}",
-        );
-        sim.assert_active(Some(b));
-    }
-
-    /// The conservative code default (`new-window-placement "new"`) keeps
-    /// niri's behaviour: each new window opens in its own column to the right.
+    /// Each new window opens in its own column to the right of the active one.
     #[test]
     fn new_placement_opens_new_window_in_new_column() {
-        let mut sim = LayoutSim::new(); // Options::default() ⇒ "new"
+        let mut sim = LayoutSim::new();
         sim.add_output(1);
         let a = sim.add_window();
         let b = sim.add_window();
@@ -1246,5 +1171,63 @@ mod tests {
             (ga.loc.x - gb.loc.x).abs() > 1.0,
             "default 'new' placement should open b in a separate column: a={ga:?} b={gb:?}",
         );
+    }
+
+    /// With `disable-carousel`, the workspace must never grow wider than the
+    /// screen (minus any fixed side panels). When more windows open than fit at
+    /// even the narrowest preset, every window still gets its own column —
+    /// nothing stacks below the active one — and the columns shrink uniformly so
+    /// the whole carousel stays within the working area.
+    #[test]
+    fn disable_carousel_shrinks_columns_to_fit_instead_of_stacking() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720 — landscape
+
+        // Six columns at the narrowest default preset (1/3 ≈ 426px) plus gaps
+        // would be ~2.6× the 1280px screen, so the fit path has to shrink them.
+        let ids: Vec<usize> = (0..6).map(|_| sim.add_window()).collect();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Nothing stacked: each window is alone in its column.
+        for &id in &ids {
+            assert_eq!(
+                column_occupancy(&sim, id),
+                1,
+                "disable-carousel must not stack windows; window {id} shares a column",
+            );
+        }
+
+        let geos: Vec<_> = ids
+            .iter()
+            .map(|id| sim.window_geometry(id).expect("window geo"))
+            .collect();
+
+        // The carousel content fits within the screen — it never grew beyond it.
+        // (The span is independent of any view scroll offset.)
+        let left = geos.iter().map(|g| g.loc.x).fold(f64::INFINITY, f64::min);
+        let right = geos
+            .iter()
+            .map(|g| g.loc.x + g.size.w)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let screen_w = 1280.0;
+        assert!(
+            right - left <= screen_w + 1.0,
+            "carousel content span {} must fit the {screen_w}px screen: geos={geos:?}",
+            right - left,
+        );
+
+        // Columns shrank uniformly — they all share one width.
+        let w0 = geos[0].size.w;
+        for g in &geos {
+            assert!(
+                (g.size.w - w0).abs() < 1.0,
+                "disable-carousel columns should be uniform width: {} vs {w0}",
+                g.size.w,
+            );
+        }
     }
 }

@@ -1027,6 +1027,16 @@ pub enum ColumnDisplay {
     Tabbed,
 }
 
+/// Which fixed-side panel a window should open in.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub enum OpenInFixedSide {
+    /// Left fixed-side panel.
+    Left,
+    /// Right fixed-side panel.
+    Right,
+}
+
 /// Output actions that naru can perform.
 // Variants in this enum should match the spelling of the ones in naru-config. Most thigs from
 // naru-config should be present here.
@@ -1863,6 +1873,18 @@ impl FromStr for ColumnDisplay {
             "normal" => Ok(Self::Normal),
             "tabbed" => Ok(Self::Tabbed),
             _ => Err(r#"invalid column display, can be "normal" or "tabbed""#),
+        }
+    }
+}
+
+impl FromStr for OpenInFixedSide {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            _ => Err(r#"invalid fixed side, can be "left" or "right""#),
         }
     }
 }

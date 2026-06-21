@@ -105,6 +105,35 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner.is_empty()
     }
 
+    /// Index of the existing column at the strip's inner (carousel-facing)
+    /// edge. For a left strip the inner edge is the *last* column in the
+    /// inner ScrollingSpace; for a right strip it is the *first*. `None`
+    /// when the strip holds no columns. Callers reading an existing column
+    /// use this; callers about to insert a new column at the inner edge
+    /// should use [`Self::inner_edge_insert_idx`] instead.
+    fn inner_edge_idx(&self) -> Option<usize> {
+        let n = self.inner.column_count();
+        if n == 0 {
+            return None;
+        }
+        Some(match self.side {
+            FixedSide::Left => n - 1,
+            FixedSide::Right => 0,
+        })
+    }
+
+    /// Insertion index that places a new column at the strip's inner edge,
+    /// making it the new inner-edge column. For a left strip that's one
+    /// past the current last column; for a right strip it's 0 (push every
+    /// existing column one slot outward). Mirror of
+    /// [`Self::inner_edge_idx`] for the insert-vs-read distinction.
+    fn inner_edge_insert_idx(&self) -> usize {
+        match self.side {
+            FixedSide::Left => self.inner.column_count(),
+            FixedSide::Right => 0,
+        }
+    }
+
     /// Total logical width this strip occupies inside the workspace working
     /// area: sum of column widths plus inter-column gaps. Zero while empty.
     pub fn width(&self) -> f64 {
@@ -173,13 +202,8 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// strip is empty. Used when keyboard focus traverses INTO the strip from
     /// the carousel.
     pub fn focus_innermost(&mut self) -> bool {
-        let n = self.inner.column_count();
-        if n == 0 {
+        let Some(idx) = self.inner_edge_idx() else {
             return false;
-        }
-        let idx = match self.side {
-            FixedSide::Left => n - 1,
-            FixedSide::Right => 0,
         };
         self.inner.set_active_column_idx_static(idx);
         self.repin();
@@ -216,6 +240,18 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// every tile, so a stacked-but-hidden window still counts as present.
     pub fn has_window(&self, window: &W::Id) -> bool {
         self.inner.columns().any(|col| col.contains(window))
+    }
+
+    /// Rect (in workspace-local coordinates) that the inner ScrollingSpace
+    /// would use to unconstrain a popup spawned by `window`. Forwards to the
+    /// inner space: it was constructed with the outer working_area verbatim,
+    /// so its `parent_area.size.h` is the correct vertical span for popup
+    /// flipping/sliding. Without this, `Workspace::popup_target_rect` falls
+    /// through to `scrolling.popup_target_rect`, which returns `None` for any
+    /// strip-hosted window — and the caller's `unwrap()` aborts the
+    /// compositor.
+    pub fn popup_target_rect(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        self.inner.popup_target_rect(id)
     }
 
     /// Remove `window`'s tile from the strip. The caller is responsible for
@@ -401,26 +437,34 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// the carousel should hand the column back to it instead of moving
     /// within the strip.
     pub fn focused_column_is_at_inner_edge(&self) -> bool {
-        let n = self.inner.column_count();
-        if n == 0 {
-            return false;
-        }
-        let active = self.inner.active_column_index();
-        match self.side {
-            FixedSide::Left => active == n - 1,
-            FixedSide::Right => active == 0,
-        }
+        self.inner_edge_idx() == Some(self.inner.active_column_index())
     }
 
     /// Insert a column extracted from the carousel at this strip's inner
     /// (carousel-facing) edge. The new column becomes the focused column
     /// inside the strip.
     pub fn add_column_at_inner_edge(&mut self, column: Column<W>) {
-        let insert_idx = match self.side {
-            FixedSide::Left => self.inner.column_count(),
-            FixedSide::Right => 0,
-        };
+        let insert_idx = self.inner_edge_insert_idx();
         self.inner.add_column(Some(insert_idx), column, false, None);
+        self.inner.set_active_column_idx_static(insert_idx);
+        self.repin();
+    }
+
+    /// Wrap `tile` in a fresh column at the strip's inner (carousel-facing)
+    /// edge. Used by `open-in-fixed-side` to route a newly-opened window
+    /// directly into a fixed-side panel instead of the carousel. Mirrors
+    /// `add_column_at_inner_edge`, but skips having to build a Column up-front
+    /// — `ScrollingSpace::add_tile` does that with the strip's own column-width
+    /// math.
+    pub fn add_tile_at_inner_edge(
+        &mut self,
+        tile: Tile<W>,
+        width: ColumnWidth,
+        is_full_width: bool,
+    ) {
+        let insert_idx = self.inner_edge_insert_idx();
+        self.inner
+            .add_tile(Some(insert_idx), tile, false, width, is_full_width, None);
         self.inner.set_active_column_idx_static(insert_idx);
         self.repin();
     }
@@ -429,14 +473,7 @@ impl<W: LayoutElement> FixedStrip<W> {
     /// to be inserted back into the carousel. Returns `None` if the strip is
     /// empty.
     pub fn remove_innermost_column(&mut self) -> Option<Column<W>> {
-        let n = self.inner.column_count();
-        if n == 0 {
-            return None;
-        }
-        let idx = match self.side {
-            FixedSide::Left => n - 1,
-            FixedSide::Right => 0,
-        };
+        let idx = self.inner_edge_idx()?;
         let column = self.inner.remove_column_by_idx(idx, None);
         self.repin();
         Some(column)
@@ -481,6 +518,14 @@ impl<W: LayoutElement> FixedStrip<W> {
 
     pub fn update_render_elements(&mut self, is_active: bool) {
         self.inner.update_render_elements(is_active);
+    }
+
+    /// Propagate per-tile state (xdg `Activated`, configure throttling, etc.)
+    /// the way the carousel does. Without this the strip's "active" tile never
+    /// gets `set_activated(true)` and apps inside the strip never know they're
+    /// focused — only the carousel ever flipped that flag.
+    pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
+        self.inner.refresh(is_active, is_focused);
     }
 
     pub fn render<R: NaruRenderer>(
