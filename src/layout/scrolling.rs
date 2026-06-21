@@ -166,6 +166,15 @@ pub struct Column<W: LayoutElement> {
     /// Currently selected preset width index.
     preset_width_idx: Option<usize>,
 
+    /// `disable-carousel` only: a shared shrink factor in `(0, 1]` applied to
+    /// the resolved column width so the whole non-scrolling row fits in the
+    /// area between the fixed-side panels. `1.0` means "natural size". It is set
+    /// uniformly across every column by
+    /// [`ScrollingSpace::fit_columns_to_parent`] and never grows a column past
+    /// its natural width. Kept separate from [`Self::width`] so the natural
+    /// width is preserved and restored when space frees up.
+    fit_scale: f64,
+
     /// Whether this column is full-width.
     is_full_width: bool,
 
@@ -2982,7 +2991,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     /// the feature is disabled or the workspace is empty (caller should fall back
     /// to its own default).
     fn compute_auto_fit_or_center_view_offset(&self) -> Option<f64> {
-        if !self.options.layout.auto_fit_or_center {
+        // `disable-carousel` always centers the (non-scrolling) row: with no
+        // scrolling there's no other sensible resting position, and the columns
+        // are sized to fit, so the group is centered with equal slack on both
+        // sides whenever it doesn't fill the area between the panels.
+        if !self.options.layout.auto_fit_or_center && !self.options.layout.disable_carousel {
             return None;
         }
         if self.columns.is_empty() {
@@ -3340,16 +3353,53 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     /// the `disable-carousel` layout option to keep all columns at the same
     /// uniform width so the workspace stays fully visible between the
     /// fixed-side panels. No-op on an empty carousel.
-    pub fn set_all_columns_to_preset(&mut self, preset: PresetSize) {
-        if self.columns.is_empty() {
+    /// In `disable-carousel` mode, size every column at its natural width and,
+    /// when the row would overflow the area between the fixed-side panels, scale
+    /// all columns down by one shared factor so the whole row just fits.
+    ///
+    /// Never scales above `1.0` — a column is never grown past its natural width
+    /// — and the factor is uniform, so the columns' relative proportions are
+    /// preserved (windows resize proportionally, never equally). The factor is
+    /// recomputed from natural widths on every call, so closing or shrinking a
+    /// column lets the rest return toward their natural size. Re-centers the row
+    /// afterwards. No-op when the carousel is enabled or empty.
+    pub fn fit_columns_to_parent(&mut self) {
+        if !self.options.layout.disable_carousel || self.columns.is_empty() {
             return;
         }
-        let change = SizeChange::from(preset);
+        let available = self.working_area.size.w;
+        if available <= 0.0 {
+            return;
+        }
+
+        let gaps = self.options.layout.gaps;
+        let n = self.columns.len();
+        // Gaps sit between columns and are not scaled, so the shrink factor
+        // applies only to the column widths: the columns must fit in whatever
+        // space is left after the inter-column gaps.
+        let gaps_total = gaps * n.saturating_sub(1) as f64;
+        let total_columns: f64 = self
+            .columns
+            .iter()
+            .map(|col| col.natural_width().max(1.0))
+            .sum();
+        let usable = available - gaps_total;
+
+        let factor = if total_columns > usable && usable > 0.0 {
+            usable / total_columns
+        } else {
+            // Everything fits at natural size — never grow to fill; the row is
+            // centered (leaving equal slack on both sides) below.
+            1.0
+        };
+
         for (col, data) in zip(&mut self.columns, &mut self.data) {
-            col.set_column_width(change, None, true);
+            col.set_fit_scale(factor, true);
             cancel_resize_for_column(&mut self.interactive_resize, col);
             data.update(col);
         }
+
+        self.auto_fit_or_center_view_offset();
     }
 
     /// Multiply each column's width by `factor`, in place, preserving the
@@ -4762,6 +4812,7 @@ impl<W: LayoutElement> Column<W> {
             active_tile_idx: 0,
             width,
             preset_width_idx,
+            fit_scale: 1.0,
             is_full_width,
             is_pending_maximized: false,
             is_pending_fullscreen: false,
@@ -5240,6 +5291,29 @@ impl<W: LayoutElement> Column<W> {
         }
     }
 
+    /// The natural (unscaled) resolved width this column wants, before any
+    /// disable-carousel shrink-to-fit factor. Mirrors the width selection in
+    /// [`Self::update_tile_sizes`] but without `fit_scale` or min/max clamping.
+    fn natural_width(&self) -> f64 {
+        let width = if self.is_full_width {
+            ColumnWidth::Proportion(1.)
+        } else {
+            self.width
+        };
+        self.resolve_column_width(width)
+    }
+
+    /// Set the disable-carousel shrink factor and resize tiles to match. No-op
+    /// when the factor is unchanged, so it's cheap to call after every layout
+    /// change.
+    fn set_fit_scale(&mut self, scale: f64, animate: bool) {
+        if self.fit_scale == scale {
+            return;
+        }
+        self.fit_scale = scale;
+        self.update_tile_sizes(animate);
+    }
+
     fn update_tile_sizes(&mut self, animate: bool) {
         self.update_tile_sizes_with_transaction(animate, Transaction::new());
     }
@@ -5314,7 +5388,12 @@ impl<W: LayoutElement> Column<W> {
         let working_size = self.working_area.size;
         let extra_size = self.extra_size();
 
-        let width = self.resolve_column_width(width);
+        // `fit_scale` is the disable-carousel shrink-to-fit factor (1.0 in every
+        // other mode). Applying it here — the single point that turns the
+        // desired `ColumnWidth` into pixels — means the shrink flows through to
+        // both the tile sizes computed below and the cached column width, while
+        // `self.width` stays the natural width.
+        let width = self.resolve_column_width(width) * self.fit_scale;
         let width = f64::max(f64::min(width, max_width), min_width);
         let max_tile_height = working_size.h - self.options.layout.gaps * 2. - extra_size.h;
 

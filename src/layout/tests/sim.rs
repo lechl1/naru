@@ -49,6 +49,7 @@
 use std::time::Duration;
 
 use naru_config::FloatOrInt;
+use naru_ipc::SizeChange;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::{Op, TestWindow, TestWindowParams};
@@ -1174,10 +1175,10 @@ mod tests {
     }
 
     /// With `disable-carousel`, the workspace must never grow wider than the
-    /// screen (minus any fixed side panels). When more windows open than fit at
-    /// even the narrowest preset, every window still gets its own column —
-    /// nothing stacks below the active one — and the columns shrink uniformly so
-    /// the whole carousel stays within the working area.
+    /// screen (minus any fixed side panels). When more windows open than fit,
+    /// every window still gets its own column — nothing stacks below the active
+    /// one — and the columns shrink so the whole carousel stays within the
+    /// working area.
     #[test]
     fn disable_carousel_shrinks_columns_to_fit_instead_of_stacking() {
         let mut options = Options::default();
@@ -1185,9 +1186,9 @@ mod tests {
         let mut sim = LayoutSim::with_options(options);
         sim.add_output(1); // 1280×720 — landscape
 
-        // Six columns at the narrowest default preset (1/3 ≈ 426px) plus gaps
-        // would be ~2.6× the 1280px screen, so the fit path has to shrink them.
-        let ids: Vec<usize> = (0..6).map(|_| sim.add_window()).collect();
+        // Fifteen columns at their ~100px natural width plus gaps run well past
+        // the 1280px screen, so the fit path has to shrink them.
+        let ids: Vec<usize> = (0..15).map(|_| sim.add_window()).collect();
         sim.communicate_all();
         sim.complete_animations();
         sim.update_render_elements();
@@ -1220,14 +1221,150 @@ mod tests {
             right - left,
         );
 
-        // Columns shrank uniformly — they all share one width.
+        // These windows all open at the same natural width, so the single
+        // shared shrink factor leaves them equal — equal here because the
+        // inputs were equal, not because the fit equalizes them (see
+        // `disable_carousel_shrinks_proportionally_not_equally`).
         let w0 = geos[0].size.w;
         for g in &geos {
             assert!(
                 (g.size.w - w0).abs() < 1.0,
-                "disable-carousel columns should be uniform width: {} vs {w0}",
+                "equal-natural columns should stay equal after the shared shrink: {} vs {w0}",
                 g.size.w,
             );
         }
+    }
+
+    /// When the columns fit, they keep their natural width (never grown to fill)
+    /// and the row is centered with equal slack on both sides of the screen.
+    #[test]
+    fn disable_carousel_keeps_natural_width_and_centers_when_fitting() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // One window fits, so it sits at its natural width.
+        let a = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let natural = sim.window_geometry(&a).expect("a geo").size.w;
+
+        // Two windows still fit (2 × natural + gap < 1280), so neither shrinks.
+        let b = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let ga = sim.window_geometry(&a).expect("a geo");
+        let gb = sim.window_geometry(&b).expect("b geo");
+        assert!(
+            (ga.size.w - natural).abs() < 1.0 && (gb.size.w - natural).abs() < 1.0,
+            "fitting windows must keep natural width (never grown): a={} b={} natural={natural}",
+            ga.size.w,
+            gb.size.w,
+        );
+
+        // The pair is centered: equal slack left and right.
+        let screen_w = 1280.0;
+        let left = ga.loc.x.min(gb.loc.x);
+        let right = (ga.loc.x + ga.size.w).max(gb.loc.x + gb.size.w);
+        let left_gap = left;
+        let right_gap = screen_w - right;
+        assert!(
+            left_gap > 1.0,
+            "the windows should not fill the screen (there must be slack to center): left_gap={left_gap}",
+        );
+        assert!(
+            (left_gap - right_gap).abs() < 1.0,
+            "row must be centered: left_gap={left_gap} right_gap={right_gap}",
+        );
+    }
+
+    /// Closing windows lets the survivors return toward their natural width:
+    /// the shrink factor is recomputed from natural widths each time, so a row
+    /// that was shrunk to fit many columns is *not* left permanently small.
+    #[test]
+    fn disable_carousel_restores_natural_width_after_closing_windows() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1);
+
+        let a = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let natural = sim.window_geometry(&a).expect("a geo").size.w;
+
+        // Open enough windows that the row overflows the screen and has to
+        // shrink (13 more × the ~100px natural width + gaps > 1280).
+        let extra: Vec<usize> = (0..13).map(|_| sim.add_window()).collect();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        assert!(
+            sim.window_geometry(&a).expect("a geo").size.w < natural - 1.0,
+            "columns should have shrunk below natural width while crowded",
+        );
+
+        // Close them again — the survivor recovers its natural width.
+        for id in extra {
+            sim.close_window(id);
+        }
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let restored = sim.window_geometry(&a).expect("a geo").size.w;
+        assert!(
+            (restored - natural).abs() < 1.0,
+            "width should return to natural after closing the crowd: {restored} vs {natural}",
+        );
+    }
+
+    /// Overflowing columns shrink by one shared factor, preserving their
+    /// relative proportions — a wide column stays proportionally wider than a
+    /// narrow one rather than being equalized.
+    #[test]
+    fn disable_carousel_shrinks_proportionally_not_equally() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1);
+
+        // Column A wide (≈2/3), column B narrow (≈1/3): a ~2:1 natural ratio.
+        let a = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(66.0)));
+        let b = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(33.0)));
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let ratio_natural = sim.window_geometry(&a).expect("a geo").size.w
+            / sim.window_geometry(&b).expect("b geo").size.w;
+        assert!(
+            ratio_natural > 1.3,
+            "test setup should give A a clearly larger natural width than B: ratio={ratio_natural}",
+        );
+
+        // Crowd the row so the shared shrink-to-fit kicks in.
+        let _c = sim.add_window();
+        let _d = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let wa = sim.window_geometry(&a).expect("a geo").size.w;
+        let wb = sim.window_geometry(&b).expect("b geo").size.w;
+        let ratio_shrunk = wa / wb;
+        assert!(
+            (ratio_shrunk - ratio_natural).abs() < 0.05,
+            "shrink must preserve proportions: ratio {ratio_shrunk} vs natural {ratio_natural}",
+        );
+        assert!(
+            ratio_shrunk > 1.3,
+            "columns must not be equalized by the shrink: a={wa} b={wb}",
+        );
     }
 }

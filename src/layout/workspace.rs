@@ -529,70 +529,18 @@ impl<W: LayoutElement> Workspace<W> {
         area
     }
 
-    /// In `disable-carousel` mode, returns a uniform column width for `n`
-    /// columns that is guaranteed to fit between the fixed-side panels
-    /// (accounting for inter-column gaps): the widest entry in
-    /// `preset_column_widths` that fits, or — when even the narrowest preset
-    /// wouldn't fit (or none are configured) — a computed sub-preset
-    /// proportion so the columns shrink to stay on screen. This is what keeps
-    /// the workspace from ever growing past the screen minus the side panels.
+    /// Re-fit the carousel after a layout change (add / close / resize / move).
     ///
-    /// Returns `None` only in degenerate cases (`n == 0`, or no usable width
-    /// between the panels at all).
-    fn disabled_carousel_uniform_preset(&self, n: usize) -> Option<PresetSize> {
-        if n == 0 {
-            return None;
-        }
-        let available = self.carousel_parent_area().size.w;
-        let gaps = self.options.layout.gaps;
-        let usable = available - (n.saturating_sub(1)) as f64 * gaps;
-        if usable <= 0. || available <= gaps {
-            return None;
-        }
-        let per_column = usable / n as f64;
-
-        let mut best: Option<(PresetSize, f64)> = None;
-        for &preset in &self.options.layout.preset_column_widths {
-            // Logical column width the preset would resolve to. Mirrors
-            // `resolve_preset_size` without the per-tile border math — that's
-            // good enough for the fit check, since the carousel-disabled path
-            // applies the same preset uniformly to every column.
-            let w = match preset {
-                PresetSize::Proportion(p) => (available - gaps) * p - gaps,
-                PresetSize::Fixed(f) => f64::from(f),
-            };
-            if w <= per_column && best.as_ref().is_none_or(|&(_, bw)| w > bw) {
-                best = Some((preset, w));
-            }
-        }
-
-        // No configured preset fits `n` columns. Fall back to the proportion
-        // whose resolved width is exactly `per_column`, so the columns shrink
-        // uniformly to fill — but never exceed — the inset area. Inverts the
-        // proportion branch of the fit formula above.
-        Some(best.map(|(p, _)| p).unwrap_or_else(|| {
-            let p = (per_column + gaps) / (available - gaps);
-            PresetSize::Proportion(p.clamp(f64::MIN_POSITIVE, 1.0))
-        }))
-    }
-
-    /// In `disable-carousel` mode, push the uniform "widest width that fits
-    /// all current columns" down to every column. Called after any column
-    /// add/remove so the resting layout stays fully visible between the
-    /// fixed-side panels — shrinking the columns when needed so the carousel
-    /// never overflows the inset area. No-op when the option is off or when
-    /// the carousel is empty.
-    fn apply_disabled_carousel_widths(&mut self) {
-        if !self.options.layout.disable_carousel {
-            return;
-        }
-        let n = self.scrolling.column_count();
-        if n == 0 {
-            return;
-        }
-        if let Some(preset) = self.disabled_carousel_uniform_preset(n) {
-            self.scrolling.set_all_columns_to_preset(preset);
-        }
+    /// Runs both mode-specific resizers; each is a no-op outside its mode, so
+    /// callers can invoke this unconditionally and get the right behavior:
+    /// - `disable-carousel`: shrink every column proportionally so the row fits
+    ///   between the fixed-side panels, never growing past natural width, and
+    ///   re-center it (see [`ScrollingSpace::fit_columns_to_parent`]).
+    /// - scrolling carousel: grow the columns up to the minimum visible span
+    ///   (see [`Self::grow_to_min_carousel_span`]).
+    fn refit_carousel(&mut self) {
+        self.scrolling.fit_columns_to_parent();
+        self.grow_to_min_carousel_span();
     }
 
     /// Floor on how much of the workspace the carousel must visually occupy.
@@ -609,7 +557,7 @@ impl<W: LayoutElement> Workspace<W> {
     ///   - the carousel already meets the floor, or
     ///   - the carousel can't grow further without overflowing the inset area
     ///     (i.e. fixed-side panels eat the working area down to the floor).
-    fn enforce_min_carousel_span(&mut self) {
+    fn grow_to_min_carousel_span(&mut self) {
         if self.options.layout.disable_carousel {
             return;
         }
@@ -1072,37 +1020,18 @@ impl<W: LayoutElement> Workspace<W> {
                         self.floating_is_active = FloatingActive::Yes;
                     }
                 } else {
-                    // Every new window opens in a fresh column to the right of the
-                    // active one, independent of the active window's size.
+                    // Every new window opens in a fresh column to the right of
+                    // the active one, at its natural width, independent of the
+                    // active window's size.
                     //
-                    // With `disable-carousel`, the workspace can't scroll, so all
-                    // columns have to fit in the area between the fixed-side panels.
-                    // We pick a uniform width for N+1 columns: the widest viable
-                    // preset that fits, or — when even the narrowest preset wouldn't
-                    // fit — a computed sub-preset width so the columns shrink to stay
-                    // within the screen. The carousel never grows past the inset area.
-                    let disabled = self.options.layout.disable_carousel;
-                    let disabled_fit_preset = if disabled && !self.scrolling.is_empty() {
-                        self.disabled_carousel_uniform_preset(self.scrolling.column_count() + 1)
-                    } else {
-                        None
-                    };
-
-                    if let Some(preset) = disabled_fit_preset {
-                        let preset_width = ColumnWidth::from(preset);
-                        self.scrolling
-                            .add_tile(None, tile, activate, preset_width, is_full_width, None);
-                        self.apply_disabled_carousel_widths();
-                    } else {
-                        self.scrolling
-                            .add_tile(None, tile, activate, width, is_full_width, None);
-                        if disabled {
-                            // First column: still apply the uniform sizing (a single
-                            // column picks the widest preset that fits overall).
-                            self.apply_disabled_carousel_widths();
-                        }
-                    }
-                    self.enforce_min_carousel_span();
+                    // With `disable-carousel` the workspace can't scroll, so
+                    // `refit_carousel` then shrinks every column by one shared
+                    // proportional factor if they'd overflow the area between the
+                    // fixed-side panels — never growing any column past its
+                    // natural width — and re-centers the row.
+                    self.scrolling
+                        .add_tile(None, tile, activate, width, is_full_width, None);
+                    self.refit_carousel();
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
@@ -1268,11 +1197,10 @@ impl<W: LayoutElement> Workspace<W> {
 
         self.update_focus_floating_tiling_after_removing(from_floating);
 
-        // In disable-carousel mode the uniform width depends on column count;
-        // re-apply after the removal so the remaining columns expand to fill.
-        // Cheap no-op when the option is off or the carousel is now empty.
-        self.apply_disabled_carousel_widths();
-        self.enforce_min_carousel_span();
+        // In disable-carousel mode the remaining columns return toward their
+        // natural width after a removal (the shrink factor is recomputed from
+        // scratch). Cheap no-op when the option is off or the carousel is empty.
+        self.refit_carousel();
 
         removed
     }
@@ -1306,8 +1234,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.apply_disabled_carousel_widths();
-        self.enforce_min_carousel_span();
+        self.refit_carousel();
 
         Some(removed)
     }
@@ -1343,8 +1270,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.apply_disabled_carousel_widths();
-        self.enforce_min_carousel_span();
+        self.refit_carousel();
 
         Some(column)
     }
@@ -2172,7 +2098,7 @@ impl<W: LayoutElement> Workspace<W> {
             Some(FixedSide::Right) => self.fixed_right.toggle_window_width(None, forwards),
             None => {
                 self.scrolling.toggle_width(forwards);
-                self.enforce_min_carousel_span();
+                self.refit_carousel();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2190,7 +2116,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.toggle_full_width();
-        self.enforce_min_carousel_span();
+        self.refit_carousel();
         self.scrolling.auto_fit_or_center_view_offset();
     }
 
@@ -2210,7 +2136,7 @@ impl<W: LayoutElement> Workspace<W> {
             Some(FixedSide::Right) => self.fixed_right.set_window_width(None, change),
             None => {
                 self.scrolling.set_window_width(None, change);
-                self.enforce_min_carousel_span();
+                self.refit_carousel();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2223,7 +2149,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.set_window_width(window, change),
             WindowLayer::Scrolling => {
                 self.scrolling.set_window_width(window, change);
-                self.enforce_min_carousel_span();
+                self.refit_carousel();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2236,7 +2162,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.set_window_height(window, change),
             WindowLayer::Scrolling => {
                 self.scrolling.set_window_height(window, change);
-                self.enforce_min_carousel_span();
+                self.refit_carousel();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2261,7 +2187,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.toggle_window_width(window, forwards),
             WindowLayer::Scrolling => {
                 self.scrolling.toggle_window_width(window, forwards);
-                self.enforce_min_carousel_span();
+                self.refit_carousel();
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2291,7 +2217,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.expand_column_to_available_width();
-        self.enforce_min_carousel_span();
+        self.refit_carousel();
         self.scrolling.auto_fit_or_center_view_offset();
     }
 
