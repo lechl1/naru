@@ -215,7 +215,7 @@ impl CompositorHandler for State {
                     // The mapped pre-commit hook deals with dma-bufs on its own.
                     self.remove_default_dmabuf_pre_commit_hook(surface);
                     let hook = add_mapped_toplevel_pre_commit_hook(toplevel);
-                    let mapped = {
+                    let mut mapped = {
                         let config = self.naru.config.borrow();
                         Mapped::new(window, rules, hook, &config)
                     };
@@ -239,6 +239,25 @@ impl CompositorHandler for State {
                             .as_mut()
                             .and_then(|sm| sm.take_pending_for_app(&id))
                     });
+
+                    // Capture the saved placement up front: `mapped` is consumed
+                    // by `add_window` below, and we need the placement both before
+                    // (to steer side-panel routing) and after (to restore size).
+                    let saved_placement =
+                        saved_entry.as_ref().map(|e| e.placement.clone());
+
+                    // Side-panel restore: pin the respawned window to the panel it
+                    // last occupied via the same `open-in-fixed-side` path that
+                    // window-rules use. Placement reads this when the window maps.
+                    if let Some(crate::session::Placement::SidePanel { side, .. }) =
+                        &saved_placement
+                    {
+                        let side = match side {
+                            crate::session::PanelSide::Left => naru_ipc::OpenInFixedSide::Left,
+                            crate::session::PanelSide::Right => naru_ipc::OpenInFixedSide::Right,
+                        };
+                        mapped.set_open_in_fixed_side(Some(side));
+                    }
 
                     // Phase 3.6: route to the saved workspace when we recorded a
                     // named workspace and that name still exists. Per-output
@@ -279,18 +298,29 @@ impl CompositorHandler for State {
                     );
                     let output = output.cloned();
 
-                    // Phase 3.7: post-add column-index move. Best-effort only —
-                    // `move_column_to_index` operates on the focused column, so we
-                    // gate on `ActivateWindow::Yes` to avoid moving an unrelated
-                    // column when the new window doesn't actually take focus
-                    // (`Smart` and `No` paths). If the saved column index is out
-                    // of bounds for the target workspace, the layout clamps it.
-                    if matches!(activate, crate::layout::ActivateWindow::Yes) {
-                        if let Some(crate::session::Placement::Tiled { column_index, .. }) =
-                            saved_entry.as_ref().map(|e| e.placement.clone())
-                        {
-                            self.naru.layout.move_column_to_index(column_index);
+                    // Post-add placement restore: column index, then exact size.
+                    match &saved_placement {
+                        Some(crate::session::Placement::Tiled {
+                            column_index,
+                            width,
+                            height,
+                            ..
+                        }) => {
+                            // Column-index move is best-effort: `move_column_to_index`
+                            // acts on the focused column, so gate on `ActivateWindow::Yes`
+                            // to avoid moving an unrelated column when the new window
+                            // doesn't take focus. An out-of-bounds index is clamped.
+                            if matches!(activate, crate::layout::ActivateWindow::Yes) {
+                                self.naru.layout.move_column_to_index(*column_index);
+                            }
+                            self.restore_window_size(&window, *width, *height);
                         }
+                        Some(crate::session::Placement::SidePanel { width, height, .. }) => {
+                            // The window is already parked in its strip via the
+                            // open-in-fixed-side override set before add_window.
+                            self.restore_window_size(&window, *width, *height);
+                        }
+                        Some(crate::session::Placement::Floating { .. }) | None => {}
                     }
 
                     // Session-restore: window appearing changes what we'd persist.
@@ -603,6 +633,28 @@ delegate_compositor!(State);
 delegate_shm!(State);
 
 impl State {
+    /// Restore a window's saved logical size (session-restore). A zero dimension
+    /// means "wasn't captured / let the layout decide" and is skipped. Works for
+    /// both carousel and fixed-side windows — `set_window_*` routes by the
+    /// window's current layer.
+    fn restore_window_size(
+        &mut self,
+        id: &smithay::desktop::Window,
+        width: f64,
+        height: f64,
+    ) {
+        if width > 0.0 {
+            self.naru
+                .layout
+                .set_window_width(Some(id), naru_ipc::SizeChange::SetFixed(width.round() as i32));
+        }
+        if height > 0.0 {
+            self.naru
+                .layout
+                .set_window_height(Some(id), naru_ipc::SizeChange::SetFixed(height.round() as i32));
+        }
+    }
+
     pub fn add_default_dmabuf_pre_commit_hook(&mut self, surface: &WlSurface) {
         if !surface.is_alive() {
             error!("tried to add dmabuf pre-commit hook for a dead surface");

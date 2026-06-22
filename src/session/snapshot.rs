@@ -30,11 +30,12 @@
 
 use std::path::PathBuf;
 
+use crate::layout::fixed_strip::FixedSide;
 use crate::layout::workspace::Workspace as LayoutWorkspace;
 use crate::layout::LayoutElement;
 use crate::naru::Naru;
 use crate::session::state::{
-    Placement, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION,
+    PanelSide, Placement, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION,
 };
 use crate::window::Mapped;
 
@@ -45,6 +46,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
         let output = mon.map(|m| m.output_name().clone());
         let workspace = workspace_ref_for(ws, ws_idx);
 
+        // Carousel + floating windows.
         for (tile, layout) in ws.tiles_with_ipc_layouts() {
             let mapped = tile.window();
             let app_id = match mapped.app_id() {
@@ -52,7 +54,8 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 _ => continue,
             };
 
-            let placement = placement_from_ipc_layout(&layout);
+            let (w, h) = window_size(mapped);
+            let placement = placement_from_ipc_layout(&layout, w, h);
 
             windows.push(WindowEntry {
                 app_id,
@@ -63,11 +66,49 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 placement,
             });
         }
+
+        // Fixed-side panel windows — not covered by the carousel iterator.
+        for (side, col_idx, tile_idx, tile) in ws.fixed_side_tiles() {
+            let mapped = tile.window();
+            let app_id = match mapped.app_id() {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            };
+
+            let (w, h) = window_size(mapped);
+            windows.push(WindowEntry {
+                app_id,
+                title: None,
+                cwd: mapped.session_cwd().map(PathBuf::from),
+                output: output.clone(),
+                workspace: workspace.clone(),
+                placement: Placement::SidePanel {
+                    side: panel_side_for(side),
+                    column_index: col_idx,
+                    tile_index: tile_idx,
+                    width: w,
+                    height: h,
+                },
+            });
+        }
     }
 
     SessionState {
         version: SCHEMA_VERSION,
         windows,
+    }
+}
+
+/// The window's current logical size, as `(width, height)` floats.
+fn window_size(mapped: &Mapped) -> (f64, f64) {
+    let size = mapped.size();
+    (size.w as f64, size.h as f64)
+}
+
+fn panel_side_for(side: FixedSide) -> PanelSide {
+    match side {
+        FixedSide::Left => PanelSide::Left,
+        FixedSide::Right => PanelSide::Right,
     }
 }
 
@@ -78,7 +119,7 @@ fn workspace_ref_for(ws: &LayoutWorkspace<Mapped>, ws_idx: usize) -> WorkspaceRe
     }
 }
 
-fn placement_from_ipc_layout(layout: &naru_ipc::WindowLayout) -> Placement {
+fn placement_from_ipc_layout(layout: &naru_ipc::WindowLayout, width: f64, height: f64) -> Placement {
     if let Some((col, til)) = layout.pos_in_scrolling_layout {
         // IPC layout indices are 1-based to match user-facing actions; our
         // serialized form is 0-based for closer alignment with the underlying Vec
@@ -87,17 +128,19 @@ fn placement_from_ipc_layout(layout: &naru_ipc::WindowLayout) -> Placement {
         Placement::Tiled {
             column_index: col.saturating_sub(1),
             tile_index: til.saturating_sub(1),
+            width,
+            height,
             is_fullscreen: false,
             is_maximized: false,
         }
     } else {
-        // Floating window. Real geometry capture is deferred to a follow-up —
-        // see module-level docs.
+        // Floating window. Logical-pixel position capture (x/y) is still deferred
+        // — the IPC WindowLayout doesn't surface it — but width/height are real.
         Placement::Floating {
             x: 0.0,
             y: 0.0,
-            width: 0.0,
-            height: 0.0,
+            width,
+            height,
             is_fullscreen: false,
         }
     }

@@ -367,6 +367,17 @@ impl Mapped {
         true
     }
 
+    /// Force the resolved `open-in-fixed-side` rule for this window.
+    ///
+    /// Used by session-restore to steer a respawned window back into the
+    /// fixed-side panel it occupied last session, without requiring the user to
+    /// have authored a matching window-rule. Placement consults this resolved
+    /// value once when the window first maps; a later rules recompute may
+    /// overwrite it, but by then placement has already happened.
+    pub fn set_open_in_fixed_side(&mut self, side: Option<naru_ipc::OpenInFixedSide>) {
+        self.rules.open_in_fixed_side = side;
+    }
+
     pub fn recompute_window_rules_if_needed(
         &mut self,
         rules: &[WindowRule],

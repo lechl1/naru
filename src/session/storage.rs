@@ -165,6 +165,8 @@ mod tests {
                 placement: Placement::Tiled {
                     column_index: 0,
                     tile_index: 0,
+                    width: 0.0,
+                    height: 0.0,
                     is_fullscreen: false,
                     is_maximized: false,
                 },

@@ -60,6 +60,8 @@ fn tiled(col: usize, tile: usize) -> Placement {
     Placement::Tiled {
         column_index: col,
         tile_index: tile,
+        width: 0.0,
+        height: 0.0,
         is_fullscreen: false,
         is_maximized: false,
     }

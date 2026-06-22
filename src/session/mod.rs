@@ -28,5 +28,5 @@ pub use cwd::{cwd_for_surface, read_cwd_for_pid};
 pub use manager::SessionManager;
 pub use restore::{resolve_launch_argv, restore_apps};
 pub use snapshot::build_from_naru;
-pub use state::{Placement, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION};
+pub use state::{Placement, PanelSide, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION};
 pub use storage::{default_state_path, load, save_atomic};

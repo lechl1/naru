@@ -2695,6 +2695,25 @@ impl<W: LayoutElement> Workspace<W> {
         floating.chain(scrolling)
     }
 
+    /// Tiles parked in the fixed-side panels, paired with their side and their
+    /// 0-based (column, tile) position within that strip. Used by session-restore
+    /// to persist side-panel placement, which the carousel-oriented
+    /// [`tiles_with_ipc_layouts`](Self::tiles_with_ipc_layouts) does not cover.
+    pub(crate) fn fixed_side_tiles(&self) -> Vec<(FixedSide, usize, usize, &Tile<W>)> {
+        let mut out = Vec::new();
+        for (side, strip) in [
+            (FixedSide::Left, &self.fixed_left),
+            (FixedSide::Right, &self.fixed_right),
+        ] {
+            for (col_idx, col) in strip.columns().enumerate() {
+                for (tile_idx, (tile, _pos)) in col.tiles().enumerate() {
+                    out.push((side, col_idx, tile_idx, tile));
+                }
+            }
+        }
+        out
+    }
+
     pub fn active_window_visual_rectangle(&self) -> Option<Rectangle<f64, Logical>> {
         if self.floating_is_active.get() {
             self.floating.active_window_visual_rectangle()

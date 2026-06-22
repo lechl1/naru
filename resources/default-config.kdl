@@ -297,14 +297,17 @@ spawn-at-startup "waybar"
 // To run a shell command (with variables, pipes, etc.), use spawn-sh-at-startup:
 // spawn-sh-at-startup "qs -c ~/source/qs/MyAwesomeShell"
 
-// Session restore: persist the set of open windows + their layout positions across
-// compositor restarts, and respawn them on next startup. Off by default.
+// Session restore: persist the set of open windows + their placement (carousel
+// column/tile or fixed-side panel), size, and working directory across compositor
+// restarts, and respawn + re-place them on next startup. Off by default.
 //
 // Each `launch-command` maps a window's xdg `app_id` to the argv used to respawn
 // that window. The literal "%s" is substituted with the captured working directory
-// of the original window (read from /proc/<pid>/cwd at map time). If cwd capture
-// fails (sandboxed client, dead pid), "%s" is dropped from the argv. Apps without
-// a matching entry fall back to running their `app_id` as the executable.
+// of the original window (read from /proc/<pid>/cwd at map time). Substitution is
+// substring-based, so both a standalone "%s" and an embedded one like "--cwd=%s"
+// (needed for `flatpak run`) work. If cwd capture fails (sandboxed client, dead
+// pid), the arg containing "%s" is dropped. Apps without a matching entry fall
+// back to running their `app_id` as the executable.
 //
 // User-provided launch-command entries fully replace the built-in list — declare
 // every app you care about, including the ones below if you still want them.
@@ -314,7 +317,9 @@ spawn-at-startup "waybar"
 //     // state-path "/custom/path/to/session.json"
 //     launch-command app-id="org.kde.dolphin" "dolphin" "%s"
 //     launch-command app-id="org.kde.konsole" "konsole" "--workdir" "%s"
-//     launch-command app-id="firefox" "firefox"
+//     // Flatpak apps: use `flatpak run --cwd=DIR` to open in the saved directory.
+//     launch-command app-id="io.gitlab.librewolf-community" "flatpak" "run" "--cwd=%s" "io.gitlab.librewolf-community"
+//     launch-command app-id="com.brave.Browser" "flatpak" "run" "--cwd=%s" "com.brave.Browser"
 // }
 
 hotkey-overlay {

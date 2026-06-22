@@ -33,11 +33,13 @@ use super::state::WindowEntry;
 /// 1. A user-configured `launch-command` matching the entry's `app_id`.
 /// 2. The bare `app_id` itself, used as the executable name.
 ///
-/// `%s` substitution: any argv element exactly equal to the literal string `"%s"` is
-/// replaced with the entry's captured `cwd`. When `cwd` is `None` (unreadable, dead
-/// pid, sandboxed client) the `%s` element is **dropped** rather than substituted with
-/// a sentinel — passing e.g. an empty string or `"/"` to a user app would be worse
-/// than just letting the app start without an explicit cwd argument.
+/// `%s` substitution: the literal `"%s"` is replaced with the entry's captured `cwd`
+/// **anywhere it appears in an argv element**, so both a standalone `"%s"` (e.g.
+/// `dolphin %s`) and an embedded one (e.g. `--cwd=%s`, needed for `flatpak run`) work.
+/// When `cwd` is `None` (unreadable, dead pid, sandboxed client) any element containing
+/// `"%s"` is **dropped** rather than substituted with a sentinel — passing an empty
+/// string or `"/"` to a user app would be worse than letting it start without the
+/// explicit cwd argument.
 pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<String> {
     let template: Vec<String> = config
         .launch_command_for(&entry.app_id)
@@ -52,8 +54,8 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
     template
         .into_iter()
         .filter_map(|arg| {
-            if arg == "%s" {
-                cwd_str.clone()
+            if arg.contains("%s") {
+                cwd_str.as_deref().map(|cwd| arg.replace("%s", cwd))
             } else {
                 Some(arg)
             }
@@ -116,6 +118,8 @@ mod tests {
             placement: Placement::Tiled {
                 column_index: 0,
                 tile_index: 0,
+                width: 0.0,
+                height: 0.0,
                 is_fullscreen: false,
                 is_maximized: false,
             },
@@ -172,6 +176,44 @@ mod tests {
         }]);
         let e = entry_with_cwd("x", Some("/p"));
         assert_eq!(resolve_launch_argv(&e, &c), vec!["x", "/p", "--cwd", "/p"]);
+    }
+
+    #[test]
+    fn resolve_substitutes_embedded_placeholder_for_flatpak() {
+        // Flatpak needs `--cwd=DIR`; the `%s` is embedded in the arg, not standalone.
+        let c = cfg(vec![LaunchCommand {
+            app_id: "com.brave.Browser".into(),
+            command: vec![
+                "flatpak".into(),
+                "run".into(),
+                "--cwd=%s".into(),
+                "com.brave.Browser".into(),
+            ],
+        }]);
+        let e = entry_with_cwd("com.brave.Browser", Some("/home/leo/dl"));
+        assert_eq!(
+            resolve_launch_argv(&e, &c),
+            vec!["flatpak", "run", "--cwd=/home/leo/dl", "com.brave.Browser"]
+        );
+    }
+
+    #[test]
+    fn resolve_drops_embedded_placeholder_when_cwd_missing() {
+        let c = cfg(vec![LaunchCommand {
+            app_id: "com.brave.Browser".into(),
+            command: vec![
+                "flatpak".into(),
+                "run".into(),
+                "--cwd=%s".into(),
+                "com.brave.Browser".into(),
+            ],
+        }]);
+        let e = entry_with_cwd("com.brave.Browser", None);
+        // The whole `--cwd=%s` arg vanishes, leaving a valid bare launch.
+        assert_eq!(
+            resolve_launch_argv(&e, &c),
+            vec!["flatpak", "run", "com.brave.Browser"]
+        );
     }
 
     #[test]

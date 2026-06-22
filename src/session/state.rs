@@ -87,22 +87,54 @@ pub enum WorkspaceRef {
     Index { index: usize },
 }
 
+/// Which fixed-side panel a window sat in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelSide {
+    Left,
+    Right,
+}
+
 /// How a window was positioned within its workspace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Placement {
-    /// Tiled into the scrolling layout at a specific column + tile slot.
+    /// Tiled into the scrolling carousel at a specific column + tile slot.
     Tiled {
         /// 0-based column index from the left of the scrolling row.
         column_index: usize,
         /// 0-based index of the window within its column (relevant when columns
         /// hold multiple stacked windows).
         tile_index: usize,
-        /// Whether the column was at preset width when saved (informational).
+        /// Window width in logical pixels at save time. `0.0` (the default for
+        /// state files written before width capture) means "let the layout pick".
+        #[serde(default)]
+        width: f64,
+        /// Window height in logical pixels at save time. `0.0` means "default".
+        #[serde(default)]
+        height: f64,
         #[serde(default)]
         is_fullscreen: bool,
         #[serde(default)]
         is_maximized: bool,
+    },
+    /// Parked in one of the fixed-side panels (left/right strips). These are not
+    /// part of the scrolling carousel; a window is steered back into its panel on
+    /// restore via the same `open-in-fixed-side` path window-rules use.
+    SidePanel {
+        /// Which panel the window was in.
+        side: PanelSide,
+        /// 0-based column index within the strip (outer-to-inner ordering matches
+        /// the strip's own column order).
+        column_index: usize,
+        /// 0-based index of the window within its strip column.
+        tile_index: usize,
+        /// Window width in logical pixels at save time. `0.0` means "default".
+        #[serde(default)]
+        width: f64,
+        /// Window height in logical pixels at save time. `0.0` means "default".
+        #[serde(default)]
+        height: f64,
     },
     /// Free-floating window with explicit logical-pixel geometry.
     Floating {
@@ -143,6 +175,8 @@ mod tests {
                 placement: Placement::Tiled {
                     column_index: 2,
                     tile_index: 0,
+                    width: 800.0,
+                    height: 600.0,
                     is_fullscreen: false,
                     is_maximized: false,
                 },
@@ -184,6 +218,29 @@ mod tests {
     }
 
     #[test]
+    fn side_panel_round_trips() {
+        let entry = WindowEntry {
+            app_id: "org.kde.konsole".into(),
+            title: None,
+            cwd: None,
+            output: None,
+            workspace: WorkspaceRef::Index { index: 0 },
+            placement: Placement::SidePanel {
+                side: PanelSide::Right,
+                column_index: 0,
+                tile_index: 1,
+                width: 400.0,
+                height: 720.0,
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"kind\":\"side_panel\""));
+        assert!(json.contains("\"side\":\"right\""));
+        let back: WindowEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
     fn missing_optional_fields_default_on_load() {
         // Older format that didn't yet have `is_maximized` should still parse.
         let json = r#"{
@@ -201,10 +258,15 @@ mod tests {
             Placement::Tiled {
                 is_fullscreen,
                 is_maximized,
+                width,
+                height,
                 ..
             } => {
                 assert!(!is_fullscreen);
                 assert!(!is_maximized);
+                // Width/height absent in the old format default to 0.0.
+                assert_eq!(*width, 0.0);
+                assert_eq!(*height, 0.0);
             }
             _ => panic!("expected Tiled"),
         }
