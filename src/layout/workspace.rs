@@ -59,6 +59,17 @@ fn is_ultrawide_view(view_size: Size<f64, Logical>) -> bool {
     view_size.w / h >= 21.0 / 9.0
 }
 
+/// Flip a relative size change into its opposite direction (used by
+/// positionally-aware resize to turn a grow step into a shrink step). Absolute
+/// targets have no meaningful opposite, so they're returned unchanged.
+fn negate_size_change(change: SizeChange) -> SizeChange {
+    match change {
+        SizeChange::AdjustFixed(n) => SizeChange::AdjustFixed(-n),
+        SizeChange::AdjustProportion(n) => SizeChange::AdjustProportion(-n),
+        other @ (SizeChange::SetFixed(_) | SizeChange::SetProportion(_)) => other,
+    }
+}
+
 /// When the user hasn't set `default-column-width` in their config, return a sensible default
 /// for ultrawide screens (≥ 21:9, which also covers 32:10): the configurable
 /// `ultrawide_terminal_column_width` (default 1/5) when the window is a terminal (per
@@ -2152,6 +2163,43 @@ impl<W: LayoutElement> Workspace<W> {
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
+    }
+
+    /// Positionally-aware resize of the active column. `toward_right` is true
+    /// when the right arrow was pressed, false for the left arrow. The arrow
+    /// grows the active window when it points toward the screen center and
+    /// shrinks it when it points away — i.e. a window in the left half grows
+    /// with the right arrow, a window in the right half grows with the left
+    /// arrow. `step` is the (positive) magnitude of the resize.
+    pub fn resize_column_positional(&mut self, toward_right: bool, step: SizeChange) {
+        // Which half of the working area does the active window sit in? Fixed
+        // side-panel windows are unambiguously on their respective side; for the
+        // carousel we ask the scrolling layer about the active column's visual
+        // position.
+        let left_of_center = match self.active_fixed_side {
+            Some(FixedSide::Left) => true,
+            Some(FixedSide::Right) => false,
+            None => {
+                if self.floating_is_active.get() {
+                    // Floating windows have no carousel position; fall back to a
+                    // plain grow so the bind still does something sensible.
+                    true
+                } else {
+                    match self.scrolling.active_column_is_left_of_center() {
+                        Some(left) => left,
+                        // Empty workspace — nothing to resize.
+                        None => return,
+                    }
+                }
+            }
+        };
+
+        // The arrow points toward the center (grow) when its direction differs
+        // from the side the window is on; otherwise it points away (shrink).
+        let grow = left_of_center == toward_right;
+        let change = if grow { step } else { negate_size_change(step) };
+
+        self.set_column_width(change);
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {

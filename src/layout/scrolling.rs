@@ -2991,6 +2991,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         Some(col_x + width / 2. - view_x + self.working_area.loc.x)
     }
 
+    /// Whether the active column's visual center sits in the left half of the
+    /// working area. Used by positionally-aware resize to decide whether a given
+    /// arrow grows (points toward the center) or shrinks (points away) the
+    /// column. Returns None when the workspace is empty.
+    pub fn active_column_is_left_of_center(&self) -> Option<bool> {
+        let center_x = self.active_column_visual_center_x()?;
+        let area_center = self.working_area.loc.x + self.working_area.size.w / 2.;
+        Some(center_x < area_center)
+    }
+
     /// Find the column whose visual center-X is closest to `target_x` (in the
     /// same coordinate space as `active_column_visual_center_x`). Returns None
     /// if the workspace is empty.

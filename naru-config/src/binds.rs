@@ -328,6 +328,20 @@ pub enum Action {
     #[knuffel(skip)]
     MaximizeWindowToEdgesById(u64),
     SetColumnWidth(#[knuffel(argument, str)] SizeChange),
+    /// Positionally-aware resize of the active column, bound to the left arrow.
+    ///
+    /// The argument is the resize step (e.g. `"10%"`). The direction is
+    /// interpreted relative to where the active window sits on screen: the left
+    /// arrow points toward the screen center for a window in the right half
+    /// (growing it) and away from center for a window in the left half
+    /// (shrinking it).
+    ResizeColumnPositionalLeft(#[knuffel(argument, str)] SizeChange),
+    /// Positionally-aware resize of the active column, bound to the right arrow.
+    ///
+    /// The argument is the resize step (e.g. `"10%"`). The right arrow points
+    /// toward the screen center for a window in the left half (growing it) and
+    /// away from center for a window in the right half (shrinking it).
+    ResizeColumnPositionalRight(#[knuffel(argument, str)] SizeChange),
     ExpandColumnToAvailableWidth,
     SwitchLayout(#[knuffel(argument, str)] LayoutSwitchTarget),
     ShowHotkeyOverlay,

@@ -1484,4 +1484,100 @@ mod tests {
             );
         }
     }
+
+    /// Positionally-aware resize on a window in the *right* half of the screen:
+    /// the left arrow points toward the center and grows it; the right arrow
+    /// points away and shrinks it.
+    #[test]
+    fn disable_carousel_positional_resize_right_side_window() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // Two modest columns that leave plenty of room to grow before the row
+        // would need to shrink to fit.
+        let _a = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(20.0)));
+        let b = sim.add_window(); // active, rightmost -> sits in the right half
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(20.0)));
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let before = sim.window_geometry(&b).expect("b geo").size.w;
+
+        // Left arrow points toward the center for a right-side window -> grow.
+        sim.layout_mut()
+            .resize_column_positional(false, SizeChange::AdjustProportion(20.0));
+        sim.verify();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let grown = sim.window_geometry(&b).expect("b geo").size.w;
+        assert!(
+            grown > before + 1.0,
+            "left arrow should grow a right-side window: {before} -> {grown}",
+        );
+
+        // Right arrow points away from the center -> shrink.
+        sim.layout_mut()
+            .resize_column_positional(true, SizeChange::AdjustProportion(20.0));
+        sim.verify();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let shrunk = sim.window_geometry(&b).expect("b geo").size.w;
+        assert!(
+            shrunk < grown - 1.0,
+            "right arrow should shrink a right-side window: {grown} -> {shrunk}",
+        );
+    }
+
+    /// The mirror case: a window in the *left* half grows with the right arrow
+    /// (toward center) and shrinks with the left arrow (away from center).
+    #[test]
+    fn disable_carousel_positional_resize_left_side_window() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        let a = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(20.0)));
+        let _b = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(20.0)));
+
+        // Focus the left column so the resize acts on a left-half window.
+        sim.focus_left();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let before = sim.window_geometry(&a).expect("a geo").size.w;
+
+        // Right arrow points toward the center for a left-side window -> grow.
+        sim.layout_mut()
+            .resize_column_positional(true, SizeChange::AdjustProportion(20.0));
+        sim.verify();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let grown = sim.window_geometry(&a).expect("a geo").size.w;
+        assert!(
+            grown > before + 1.0,
+            "right arrow should grow a left-side window: {before} -> {grown}",
+        );
+
+        // Left arrow points away from the center -> shrink.
+        sim.layout_mut()
+            .resize_column_positional(false, SizeChange::AdjustProportion(20.0));
+        sim.verify();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let shrunk = sim.window_geometry(&a).expect("a geo").size.w;
+        assert!(
+            shrunk < grown - 1.0,
+            "left arrow should shrink a left-side window: {grown} -> {shrunk}",
+        );
+    }
 }

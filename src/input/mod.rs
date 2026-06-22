@@ -2137,6 +2137,12 @@ impl State {
                     self.naru.layout.reset_window_height(Some(&window));
                 }
             }
+            Action::ResizeColumnPositionalLeft(change) => {
+                self.naru.layout.resize_column_positional(false, change);
+            }
+            Action::ResizeColumnPositionalRight(change) => {
+                self.naru.layout.resize_column_positional(true, change);
+            }
             Action::ExpandColumnToAvailableWidth => {
                 self.naru.layout.expand_column_to_available_width();
             }

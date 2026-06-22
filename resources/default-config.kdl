@@ -654,6 +654,13 @@ binds {
     Mod+Minus { set-column-width "-10%"; }
     Mod+Equal { set-column-width "+10%"; }
 
+    // Positionally-aware resize: the arrow that points toward the screen center
+    // grows the active window, the one pointing away shrinks it. So a window in
+    // the left half grows with Right and shrinks with Left, and a window in the
+    // right half grows with Left and shrinks with Right.
+    Mod+Shift+Alt+Left  { resize-column-positional-left "10%"; }
+    Mod+Shift+Alt+Right { resize-column-positional-right "10%"; }
+
     // Finer height adjustments when in column with other windows.
     Mod+Shift+Minus { set-window-height "-10%"; }
     Mod+Shift+Equal { set-window-height "+10%"; }

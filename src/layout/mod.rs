@@ -3586,6 +3586,16 @@ impl<W: LayoutElement> Layout<W> {
         workspace.set_column_width(change);
     }
 
+    /// Positionally-aware resize of the active column. `toward_right` is true for
+    /// the right arrow, false for the left arrow; the arrow grows the active
+    /// window when it points toward the screen center and shrinks it otherwise.
+    pub fn resize_column_positional(&mut self, toward_right: bool, step: SizeChange) {
+        let Some(workspace) = self.active_workspace_mut() else {
+            return;
+        };
+        workspace.resize_column_positional(toward_right, step);
+    }
+
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
