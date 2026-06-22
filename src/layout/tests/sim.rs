@@ -1367,4 +1367,121 @@ mod tests {
             "columns must not be equalized by the shrink: a={wa} b={wb}",
         );
     }
+
+    /// Resizing one window must never auto-grow the others. Two wide columns
+    /// overflow and get shrunk by a shared factor; shrinking the active one
+    /// frees enough room that recomputing the fit from scratch would snap the
+    /// bystander back to its (large) natural width. It must not: the shrink
+    /// factor may only decrease on a resize.
+    #[test]
+    fn disable_carousel_does_not_grow_other_columns_when_resizing_smaller() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // Two very wide columns: together they overflow, so the shared factor
+        // shrinks both well below their natural width.
+        let bystander = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(80.0)));
+        let _active = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(80.0)));
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let before = sim.window_geometry(&bystander).expect("bystander geo").size.w;
+
+        // Shrink the active column. Now everything would fit at natural width,
+        // so a from-scratch refit would grow the bystander — but a resize must
+        // never auto-grow the others.
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(10.0)));
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let after = sim.window_geometry(&bystander).expect("bystander geo").size.w;
+
+        assert!(
+            after <= before + 1.0,
+            "resizing one window smaller must not auto-grow the others: bystander {before} -> {after}",
+        );
+    }
+
+    /// Resizing a column must leave the whole row centered (equal slack on both
+    /// sides) — not center the active column. With the active column on the
+    /// right, active-column centering would push the row off-center; row
+    /// centering keeps it balanced.
+    #[test]
+    fn disable_carousel_keeps_row_centered_after_resize() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        let a = sim.add_window();
+        let b = sim.add_window(); // b is active and rightmost
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Resize the active (right) column to a clearly different width.
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(50.0)));
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let ga = sim.window_geometry(&a).expect("a geo");
+        let gb = sim.window_geometry(&b).expect("b geo");
+        let screen_w = 1280.0;
+        let left = ga.loc.x.min(gb.loc.x);
+        let right = (ga.loc.x + ga.size.w).max(gb.loc.x + gb.size.w);
+        let left_gap = left;
+        let right_gap = screen_w - right;
+        assert!(
+            (left_gap - right_gap).abs() < 1.0,
+            "row must stay centered after a resize: left_gap={left_gap} right_gap={right_gap}",
+        );
+    }
+
+    /// A populated fixed-side panel shrinks the carousel's usable width; the
+    /// remaining columns must re-fit into that smaller area so nothing overlaps
+    /// the panel. The fixed-side panels are not part of the carousel, and all
+    /// windows must stay on screen even as a panel eats into the row.
+    #[test]
+    fn disable_carousel_refits_when_a_fixed_panel_shrinks_it() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        options.enable_stacking = true; // fixed-side panels need stacking
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // Enough windows that, once one is parked in a panel, the rest overflow
+        // the reduced area and are forced to shrink to fit it.
+        let ids: Vec<usize> = (0..15).map(|_| sim.add_window()).collect();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Park the active (rightmost) window into the right fixed-side panel.
+        sim.move_window_right_stacked();
+        let parked = *ids.last().unwrap();
+        sim.assert_slot(parked, WindowLayer::FixedRight);
+        sim.communicate_all();
+        // The panel-area re-fit (and its re-centering) is kicked off during the
+        // render pass, so settle animations *after* it, then re-render.
+        sim.update_render_elements();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Every remaining carousel window sits left of the panel: the carousel
+        // re-fit into the space the panel left it, so nothing overlaps.
+        let panel_left = sim.window_geometry(&parked).expect("parked geo").loc.x;
+        for &id in &ids[..ids.len() - 1] {
+            let g = sim.window_geometry(&id).expect("carousel geo");
+            assert!(
+                g.loc.x + g.size.w <= panel_left + 1.0,
+                "carousel window {id} (right edge {}) overlaps the fixed panel at {panel_left}",
+                g.loc.x + g.size.w,
+            );
+        }
+    }
 }

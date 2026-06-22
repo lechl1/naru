@@ -538,8 +538,12 @@ impl<W: LayoutElement> Workspace<W> {
     ///   re-center it (see [`ScrollingSpace::fit_columns_to_parent`]).
     /// - scrolling carousel: grow the columns up to the minimum visible span
     ///   (see [`Self::grow_to_min_carousel_span`]).
-    fn refit_carousel(&mut self) {
-        self.scrolling.fit_columns_to_parent();
+    ///
+    /// `allow_grow` is forwarded to the disable-carousel fit: pass `false` for
+    /// resizes (never auto-grow the other columns) and `true` for removals or
+    /// panel-area changes (let the row recover toward natural width).
+    fn refit_carousel(&mut self, allow_grow: bool) {
+        self.scrolling.fit_columns_to_parent(allow_grow);
         self.grow_to_min_carousel_span();
     }
 
@@ -617,6 +621,13 @@ impl<W: LayoutElement> Workspace<W> {
                 self.scale.fractional_scale(),
                 self.options.clone(),
             );
+            // A fixed-side panel just grew or shrank, changing the carousel's
+            // usable width. Re-fit so every column still fits between the panels
+            // (the panels are not part of the carousel) — shrinking when they
+            // close in, recovering toward natural width (`allow_grow = true`)
+            // when they free space — and re-center the row.
+            self.refit_carousel(true);
+            self.scrolling.auto_fit_or_center_view_offset();
         }
     }
 
@@ -1031,7 +1042,8 @@ impl<W: LayoutElement> Workspace<W> {
                     // natural width — and re-centers the row.
                     self.scrolling
                         .add_tile(None, tile, activate, width, is_full_width, None);
-                    self.refit_carousel();
+                    // Adding a column always shrinks (never grows) to make room.
+                    self.refit_carousel(false);
 
                     if activate {
                         self.floating_is_active = FloatingActive::No;
@@ -1200,7 +1212,7 @@ impl<W: LayoutElement> Workspace<W> {
         // In disable-carousel mode the remaining columns return toward their
         // natural width after a removal (the shrink factor is recomputed from
         // scratch). Cheap no-op when the option is off or the carousel is empty.
-        self.refit_carousel();
+        self.refit_carousel(true);
 
         removed
     }
@@ -1234,7 +1246,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.refit_carousel();
+        self.refit_carousel(true);
 
         Some(removed)
     }
@@ -1270,7 +1282,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.refit_carousel();
+        self.refit_carousel(true);
 
         Some(column)
     }
@@ -2098,7 +2110,7 @@ impl<W: LayoutElement> Workspace<W> {
             Some(FixedSide::Right) => self.fixed_right.toggle_window_width(None, forwards),
             None => {
                 self.scrolling.toggle_width(forwards);
-                self.refit_carousel();
+                self.refit_carousel(false);
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2116,7 +2128,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.toggle_full_width();
-        self.refit_carousel();
+        self.refit_carousel(false);
         self.scrolling.auto_fit_or_center_view_offset();
     }
 
@@ -2136,7 +2148,7 @@ impl<W: LayoutElement> Workspace<W> {
             Some(FixedSide::Right) => self.fixed_right.set_window_width(None, change),
             None => {
                 self.scrolling.set_window_width(None, change);
-                self.refit_carousel();
+                self.refit_carousel(false);
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2149,7 +2161,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.set_window_width(window, change),
             WindowLayer::Scrolling => {
                 self.scrolling.set_window_width(window, change);
-                self.refit_carousel();
+                self.refit_carousel(false);
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2162,7 +2174,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.set_window_height(window, change),
             WindowLayer::Scrolling => {
                 self.scrolling.set_window_height(window, change);
-                self.refit_carousel();
+                self.refit_carousel(false);
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2187,7 +2199,7 @@ impl<W: LayoutElement> Workspace<W> {
             WindowLayer::FixedRight => self.fixed_right.toggle_window_width(window, forwards),
             WindowLayer::Scrolling => {
                 self.scrolling.toggle_window_width(window, forwards);
-                self.refit_carousel();
+                self.refit_carousel(false);
                 self.scrolling.auto_fit_or_center_view_offset();
             }
         }
@@ -2217,7 +2229,7 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.expand_column_to_available_width();
-        self.refit_carousel();
+        self.refit_carousel(false);
         self.scrolling.auto_fit_or_center_view_offset();
     }
 
@@ -3071,6 +3083,23 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
         self.scrolling.update_window(window, serial);
+
+        // The window just committed its assigned size, so its natural column
+        // width is now final. In disable-carousel mode this is the "wait for the
+        // window to be assigned a size" path: a freshly opened (or self-resized)
+        // window may not have had its real width when it was first placed, so
+        // re-fit the row to it now — shrinking to keep everything on screen,
+        // never auto-growing the other columns — and re-center.
+        //
+        // Skip while a mouse-driven interactive resize is in flight: re-fitting
+        // cancels the interactive resize, and that path already keeps the view
+        // centered itself.
+        if self.options.layout.disable_carousel
+            && !self.scrolling.is_interactive_resize_ongoing()
+        {
+            self.refit_carousel(false);
+            self.scrolling.auto_fit_or_center_view_offset();
+        }
     }
 
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {

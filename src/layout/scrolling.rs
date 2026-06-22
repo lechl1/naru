@@ -87,6 +87,16 @@ pub struct ScrollingSpace<W: LayoutElement> {
     /// Scale of the output the space is on (and rounds its sizes to).
     scale: f64,
 
+    /// Last shared shrink factor applied across all columns by
+    /// [`fit_columns_to_parent`](Self::fit_columns_to_parent) in
+    /// `disable-carousel` mode. `1.0` means "natural size". Tracked at the
+    /// space level (rather than read off a column) because, right after a
+    /// column is inserted, the new column still carries `fit_scale == 1.0`
+    /// while the existing ones carry the prior factor — so no single column
+    /// reliably reports the previous *global* scale. Used as the ceiling for
+    /// the never-grow-on-resize clamp.
+    last_fit_scale: f64,
+
     /// Clock for driving animations.
     clock: Clock,
 
@@ -314,6 +324,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             working_area,
             parent_area,
             scale,
+            last_fit_scale: 1.0,
             clock,
             options,
         }
@@ -711,6 +722,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         idx: usize,
         prev_idx: Option<usize>,
     ) -> f64 {
+        // In disable-carousel mode the row never scrolls: every "scroll to a
+        // column" op resolves to the same centered resting position, so
+        // resizing or activating a column can't fight the row centering (which
+        // would otherwise leave the row a little off-center after a resize).
+        if self.options.layout.disable_carousel {
+            if let Some(view_pos) = self.compute_centered_view_pos() {
+                return view_pos - self.column_x(idx);
+            }
+        }
+
         if self.is_centering_focused_column() {
             return self.compute_new_view_offset_for_column_centered(target_x, idx);
         }
@@ -1449,7 +1470,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 let centered = self.is_centering_focused_column();
 
                 let width = self.data[col_idx].width;
-                let offset = if centered {
+                let offset = if let Some(view_pos) = self
+                    .options
+                    .layout
+                    .disable_carousel
+                    .then(|| self.compute_centered_view_pos())
+                    .flatten()
+                {
+                    // disable-carousel keeps the whole row centered during an
+                    // interactive resize, not just the active column.
+                    (view_pos - self.column_x(col_idx)) - self.view_offset.target()
+                } else if centered {
                     // FIXME: when view_offset becomes fractional, this can be made additive too.
                     let new_offset =
                         -(self.working_area.size.w - width) / 2. - self.working_area.loc.x;
@@ -2986,15 +3017,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         Some(best_idx)
     }
 
-    /// Compute the view_offset that `auto_fit_or_center_view_offset` would target
-    /// for the current column set / active column / working area. Returns None if
-    /// the feature is disabled or the workspace is empty (caller should fall back
-    /// to its own default).
-    fn compute_auto_fit_or_center_view_offset(&self) -> Option<f64> {
-        // `disable-carousel` always centers the (non-scrolling) row: with no
-        // scrolling there's no other sensible resting position, and the columns
-        // are sized to fit, so the group is centered with equal slack on both
-        // sides whenever it doesn't fill the area between the panels.
+    /// Absolute resting view position (`view_pos`) that centers the whole column
+    /// row inside the working area, or clamps it to the edges when it overflows.
+    /// Returns None when neither `auto-fit-or-center` nor `disable-carousel` is
+    /// on, or the workspace is empty.
+    ///
+    /// `disable-carousel` always centers the (non-scrolling) row: with no
+    /// scrolling there's no other sensible resting position, and the columns are
+    /// sized to fit, so the group sits centered with equal slack on both sides
+    /// whenever it doesn't fill the area between the panels.
+    fn compute_centered_view_pos(&self) -> Option<f64> {
         if !self.options.layout.auto_fit_or_center && !self.options.layout.disable_carousel {
             return None;
         }
@@ -3010,7 +3042,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // trailing gap; total content extent is that position minus the gap.
         let total_content = self.column_x(self.columns.len()) - gap;
 
-        let new_view_x = if total_content <= working_w {
+        let view_pos = if total_content <= working_w {
             // Fits — center the group inside the working area.
             -working_x - (working_w - total_content) / 2.
         } else {
@@ -3019,9 +3051,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let max_view_x = total_content - working_w - working_x;
             self.target_view_pos().clamp(min_view_x, max_view_x)
         };
+        Some(view_pos)
+    }
 
-        let active_col_x = self.column_x(self.active_column_idx);
-        Some(new_view_x - active_col_x)
+    /// Compute the view_offset that `auto_fit_or_center_view_offset` would target
+    /// for the current column set / active column / working area. Returns None if
+    /// the feature is disabled or the workspace is empty (caller should fall back
+    /// to its own default).
+    fn compute_auto_fit_or_center_view_offset(&self) -> Option<f64> {
+        // view_offset is expressed relative to the active column.
+        let view_pos = self.compute_centered_view_pos()?;
+        Some(view_pos - self.column_x(self.active_column_idx))
     }
 
     /// If `auto-fit-or-center` is enabled in config, recompute the view offset
@@ -3359,11 +3399,24 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     ///
     /// Never scales above `1.0` — a column is never grown past its natural width
     /// — and the factor is uniform, so the columns' relative proportions are
-    /// preserved (windows resize proportionally, never equally). The factor is
-    /// recomputed from natural widths on every call, so closing or shrinking a
-    /// column lets the rest return toward their natural size. Re-centers the row
-    /// afterwards. No-op when the carousel is enabled or empty.
-    pub fn fit_columns_to_parent(&mut self) {
+    /// preserved (windows resize proportionally, never equally).
+    ///
+    /// The total row width is computed *including the inter-column spacing*: the
+    /// columns are shrunk to fit whatever space is left after the gaps, so the
+    /// whole row — columns plus gaps — always fits the area between the
+    /// fixed-side panels (which are not part of the carousel).
+    ///
+    /// `allow_grow` controls whether the factor may rise back toward `1.0`:
+    /// - `true` (window closed, or a fixed-side panel freed space): recompute
+    ///   freely so the remaining columns return toward their natural width.
+    /// - `false` (a resize): the factor may only *decrease* from its current
+    ///   value, so shrinking one window never auto-grows the others. It still
+    ///   shrinks further when a resize would overflow the row, keeping every
+    ///   window on screen.
+    ///
+    /// Re-centers the row afterwards. No-op when the carousel is enabled or
+    /// empty.
+    pub fn fit_columns_to_parent(&mut self, allow_grow: bool) {
         if !self.options.layout.disable_carousel || self.columns.is_empty() {
             return;
         }
@@ -3376,7 +3429,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let n = self.columns.len();
         // Gaps sit between columns and are not scaled, so the shrink factor
         // applies only to the column widths: the columns must fit in whatever
-        // space is left after the inter-column gaps.
+        // space is left after the inter-column gaps. (Total row width =
+        // sum(columns) + gaps; this scales the columns so that total fits
+        // `available`.)
         let gaps_total = gaps * n.saturating_sub(1) as f64;
         let total_columns: f64 = self
             .columns
@@ -3385,13 +3440,22 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             .sum();
         let usable = available - gaps_total;
 
-        let factor = if total_columns > usable && usable > 0.0 {
+        let mut factor = if total_columns > usable && usable > 0.0 {
             usable / total_columns
         } else {
             // Everything fits at natural size — never grow to fill; the row is
             // centered (leaving equal slack on both sides) below.
             1.0
         };
+
+        // Never auto-grow on a resize: clamp the factor so it can only shrink
+        // relative to the last applied one. Closing a window / freeing panel
+        // space passes `allow_grow = true` to skip this and recover toward
+        // natural width.
+        if !allow_grow {
+            factor = factor.min(self.last_fit_scale);
+        }
+        self.last_fit_scale = factor;
 
         for (col, data) in zip(&mut self.columns, &mut self.data) {
             col.set_fit_scale(factor, true);
@@ -3400,6 +3464,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         self.auto_fit_or_center_view_offset();
+    }
+
+    /// Whether a mouse-driven interactive resize is currently in progress. Used
+    /// by the commit path to avoid re-fitting (which would cancel the resize)
+    /// while the user is dragging a window edge.
+    pub fn is_interactive_resize_ongoing(&self) -> bool {
+        self.interactive_resize.is_some()
     }
 
     /// Multiply each column's width by `factor`, in place, preserving the
