@@ -558,11 +558,12 @@ impl<W: LayoutElement> Workspace<W> {
         self.grow_to_min_carousel_span();
     }
 
-    /// Re-fit after a window/column *removal*, deliberately never growing the
-    /// remaining windows.
+    /// Re-fit the carousel without ever growing the existing windows.
     ///
-    /// Per user preference, closing a window must not enlarge the others. That
-    /// means skipping *both* growth paths `refit_carousel` would run:
+    /// Used whenever space is *freed* — a window/column closed, or a fixed-side
+    /// panel shrank/closed and gave the carousel back some width. Per user
+    /// preference, none of those may enlarge the remaining windows, so this
+    /// skips *both* growth paths `refit_carousel` would run:
     /// - the disable-carousel fit is called with `allow_grow = false`, so it
     ///   only ever shrinks (clamped to the last applied scale) — survivors stay
     ///   at their current width and the freed space is left empty, rather than
@@ -570,8 +571,11 @@ impl<W: LayoutElement> Workspace<W> {
     /// - `grow_to_min_carousel_span` (the scrolling-carousel half-screen floor)
     ///   is not called at all, so a lone/narrow survivor is not scaled up.
     ///
-    /// The fit's own view-offset handling still re-centers the row.
-    fn refit_carousel_after_close(&mut self) {
+    /// Shrinking still happens: a *growing* panel that eats carousel width is
+    /// handled by the same `allow_grow = false` fit (the computed factor drops
+    /// below the last one), so windows never overlap an expanding panel. The
+    /// fit's own view-offset handling re-centers the row.
+    fn refit_carousel_no_grow(&mut self) {
         self.scrolling.fit_columns_to_parent(false);
     }
 
@@ -651,10 +655,11 @@ impl<W: LayoutElement> Workspace<W> {
             );
             // A fixed-side panel just grew or shrank, changing the carousel's
             // usable width. Re-fit so every column still fits between the panels
-            // (the panels are not part of the carousel) — shrinking when they
-            // close in, recovering toward natural width (`allow_grow = true`)
-            // when they free space — and re-center the row.
-            self.refit_carousel(true);
+            // (the panels are not part of the carousel) — shrinking when a panel
+            // grows into the carousel. A panel that *frees* space (its window
+            // closed/shrank) must NOT grow the carousel windows, so use the
+            // no-grow fit; the freed space is left empty. Then re-center.
+            self.refit_carousel_no_grow();
             self.scrolling.auto_fit_or_center_view_offset();
         }
     }
@@ -1239,7 +1244,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         // Closing a window must not grow the others: shrink-only fit, no
         // min-span growth. The freed space is left empty.
-        self.refit_carousel_after_close();
+        self.refit_carousel_no_grow();
 
         removed
     }
@@ -1273,7 +1278,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.refit_carousel_after_close();
+        self.refit_carousel_no_grow();
 
         Some(removed)
     }
@@ -1309,7 +1314,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.refit_carousel_after_close();
+        self.refit_carousel_no_grow();
 
         Some(column)
     }
