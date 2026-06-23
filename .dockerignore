@@ -1,0 +1,31 @@
+# Keep the Docker build context tiny and stable.
+#
+# Without this file, `COPY . .` in Dockerfile.alloy / Dockerfile.test ships the
+# entire working tree — dominated by target/ (multiple GB) — on every build.
+# That makes the context transfer huge AND changes the COPY layer's hash on
+# every local `cargo build` (target/ churns constantly), invalidating the
+# cached `RUN cargo build` layer each time. The in-image build uses a BuildKit
+# cache mount at /app/target, so the host's target/ is never needed inside.
+
+# Rust build artifacts — the big one.
+target/
+
+# Version control / project metadata.
+.git/
+.gitignore
+.github/
+
+# Docker files themselves (not needed inside the context).
+Dockerfile.alloy
+Dockerfile.test
+.dockerignore
+
+# insta snapshot work-in-progress files.
+**/*.pending-snap
+**/*.snap.new
+
+# Editor / OS cruft.
+.vscode/
+.idea/
+*.swp
+.DS_Store
