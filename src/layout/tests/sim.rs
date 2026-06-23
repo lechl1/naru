@@ -346,6 +346,23 @@ impl LayoutSim {
         self.layout.verify_invariants();
     }
 
+    /// Drive a full settle cycle to a stable, committed layout.
+    ///
+    /// Some re-fits are kicked off *inside* the render pass — notably the
+    /// fixed-side panel-area sync (`sync_carousel_parent_area`), which only
+    /// notices a panel's width changed when render runs. So a single
+    /// `communicate_all` before render misses the configures that render then
+    /// emits. This renders first (to trigger any render-driven re-fit), then
+    /// commits, finishes animations, and renders again — leaving committed
+    /// geometry. Call it twice when a re-fit is itself one render-cycle delayed
+    /// (a panel resize reflows the carousel on the *next* frame).
+    pub fn settle(&mut self) {
+        self.update_render_elements();
+        self.communicate_all();
+        self.complete_animations();
+        self.update_render_elements();
+    }
+
     // --- shared actions (verified) -------------------------------------------
     //
     // These delegate to the inherent `Layout` methods — the exact entry points
@@ -1635,6 +1652,52 @@ mod tests {
                 g.loc.x + g.size.w,
             );
         }
+    }
+
+    /// Closing a window that lived in a fixed-side panel frees the carousel's
+    /// usable width — but the carousel windows must NOT grow into it. The
+    /// panel-area sync uses the no-grow fit, so survivors keep their (more
+    /// shrunk) width and the reclaimed space is left empty. This extends the
+    /// "closing never enlarges others" rule across the panel boundary.
+    #[test]
+    fn closing_a_panel_window_does_not_grow_the_carousel() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        options.enable_stacking = true; // fixed-side panels need stacking
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // Eight carousel windows fit at their natural width.
+        let ids: Vec<usize> = (0..8).map(|_| sim.add_window()).collect();
+        sim.settle();
+        let survivor = ids[0];
+        let g = *ids.last().unwrap();
+        let natural = sim.window_geometry(&survivor).expect("geo").size.w;
+
+        // Park g into the right panel, then widen the panel so the remaining
+        // carousel columns no longer fit and must shrink. The panel-area reflow
+        // is one render cycle delayed, so settle twice.
+        sim.move_window_right_stacked();
+        sim.assert_slot(g, WindowLayer::FixedRight);
+        sim.set_window_width(g, SizeChange::SetFixed(700));
+        sim.settle();
+        sim.settle();
+        let shrunk = sim.window_geometry(&survivor).expect("geo").size.w;
+        assert!(
+            shrunk < natural - 1.0,
+            "precondition: a wide panel should shrink the carousel ({natural} -> {shrunk})",
+        );
+
+        // Close the panel window. The freed panel space must NOT grow the
+        // carousel survivors — they stay at the shrunk width.
+        sim.close_window(g);
+        sim.settle();
+        sim.settle();
+        let after = sim.window_geometry(&survivor).expect("geo").size.w;
+        assert!(
+            after <= shrunk + 1.0,
+            "closing a panel window must not grow the carousel: {shrunk} -> {after}",
+        );
     }
 
     /// Positionally-aware resize on a window in the *right* half of the screen:
