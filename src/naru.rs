@@ -2264,6 +2264,28 @@ impl Naru {
         }
     }
 
+    /// Respawn the windows persisted from the prior session.
+    ///
+    /// Must be called from `main.rs` *after* `WAYLAND_DISPLAY` (and `DISPLAY` /
+    /// xwayland satellite) have been exported into the process environment, so the
+    /// spawned children inherit the variables they need to connect back to this
+    /// compositor. The pending entries were loaded from disk in
+    /// `SessionManager::new`; they stay in `pending_restore` after this call so the
+    /// `add_window` matcher in `handlers/compositor.rs` can pin each respawned
+    /// window to its saved slot as it maps. No-op when session-restore is disabled.
+    pub fn restore_session_apps(&self) {
+        let Some(sm) = self.session_manager.as_ref() else {
+            return;
+        };
+        let entries: Vec<_> = sm.pending_restore.iter().cloned().collect();
+        info!(
+            "session-restore: WAYLAND_DISPLAY={:?}; respawning {} window(s)",
+            std::env::var_os("WAYLAND_DISPLAY"),
+            entries.len(),
+        );
+        crate::session::restore_apps(&self.config.borrow().session_restore, &entries);
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,
@@ -2528,15 +2550,23 @@ impl Naru {
         // literal below. `SessionManager::new` returns `None` when the feature is
         // off — that's the steady-state for users who haven't opted in.
         let session_manager = crate::session::SessionManager::new(&config.borrow().session_restore);
-
-        // Respawn-on-startup. The pending entries were loaded from disk in
-        // `SessionManager::new`; here we just iterate them and dispatch the
-        // launch-commands. The entries stay in `pending_restore` after this — the
-        // add_window matcher will consume them as the respawned children map.
         if let Some(sm) = session_manager.as_ref() {
-            let entries: Vec<_> = sm.pending_restore.iter().cloned().collect();
-            crate::session::restore_apps(&config.borrow().session_restore, &entries);
+            info!(
+                "session-restore: enabled, {} pending entry/entries loaded from {}",
+                sm.pending_restore.len(),
+                sm.state_path.display(),
+            );
+        } else {
+            debug!("session-restore: disabled (no session manager)");
         }
+
+        // NOTE: respawn-on-startup is intentionally NOT done here. At `Naru::new`
+        // time the Wayland socket name is known but `WAYLAND_DISPLAY` has not yet
+        // been exported into the process environment (`main.rs` does that only
+        // after `State::new` returns). Children spawned now would inherit no
+        // `WAYLAND_DISPLAY` and fail to connect to the compositor. The respawn is
+        // therefore deferred to `Naru::restore_session_apps`, invoked from
+        // `main.rs` once the environment is set up.
 
         let mut naru = Self {
             config,

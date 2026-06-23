@@ -91,7 +91,7 @@ pub fn restore_apps(config: &SessionRestore, entries: &[WindowEntry]) {
             );
             continue;
         }
-        debug!(
+        info!(
             "session-restore: spawning {:?} (cwd={:?})",
             argv, entry.cwd
         );

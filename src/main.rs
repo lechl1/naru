@@ -256,6 +256,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     watcher::setup(&mut state, &config_path, config_includes);
 
+    // Respawn windows from the prior session. Done here — not inside `State::new` —
+    // so that WAYLAND_DISPLAY / DISPLAY have already been exported above; otherwise
+    // the children would have no socket to connect to and fail silently.
+    state.naru.restore_session_apps();
+
     // Spawn commands from cli and auto-start.
     spawn(cli.command, None);
 
