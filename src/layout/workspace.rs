@@ -558,6 +558,23 @@ impl<W: LayoutElement> Workspace<W> {
         self.grow_to_min_carousel_span();
     }
 
+    /// Re-fit after a window/column *removal*, deliberately never growing the
+    /// remaining windows.
+    ///
+    /// Per user preference, closing a window must not enlarge the others. That
+    /// means skipping *both* growth paths `refit_carousel` would run:
+    /// - the disable-carousel fit is called with `allow_grow = false`, so it
+    ///   only ever shrinks (clamped to the last applied scale) — survivors stay
+    ///   at their current width and the freed space is left empty, rather than
+    ///   the row recovering toward natural width;
+    /// - `grow_to_min_carousel_span` (the scrolling-carousel half-screen floor)
+    ///   is not called at all, so a lone/narrow survivor is not scaled up.
+    ///
+    /// The fit's own view-offset handling still re-centers the row.
+    fn refit_carousel_after_close(&mut self) {
+        self.scrolling.fit_columns_to_parent(false);
+    }
+
     /// Floor on how much of the workspace the carousel must visually occupy.
     /// After a column add / close / resize, if the total carousel content extent
     /// drops below `min_fraction × view_extent`, all columns are scaled up
@@ -1220,10 +1237,9 @@ impl<W: LayoutElement> Workspace<W> {
 
         self.update_focus_floating_tiling_after_removing(from_floating);
 
-        // In disable-carousel mode the remaining columns return toward their
-        // natural width after a removal (the shrink factor is recomputed from
-        // scratch). Cheap no-op when the option is off or the carousel is empty.
-        self.refit_carousel(true);
+        // Closing a window must not grow the others: shrink-only fit, no
+        // min-span growth. The freed space is left empty.
+        self.refit_carousel_after_close();
 
         removed
     }
@@ -1257,7 +1273,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.refit_carousel(true);
+        self.refit_carousel_after_close();
 
         Some(removed)
     }
@@ -1293,7 +1309,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_focus_floating_tiling_after_removing(from_floating);
-        self.refit_carousel(true);
+        self.refit_carousel_after_close();
 
         Some(column)
     }

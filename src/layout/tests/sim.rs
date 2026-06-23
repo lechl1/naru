@@ -1398,11 +1398,12 @@ mod tests {
         );
     }
 
-    /// Closing windows lets the survivors return toward their natural width:
-    /// the shrink factor is recomputed from natural widths each time, so a row
-    /// that was shrunk to fit many columns is *not* left permanently small.
+    /// Closing windows must NOT grow the survivors (user preference): a row
+    /// shrunk to fit many columns stays shrunk after the crowd is closed,
+    /// leaving the freed space empty rather than recovering toward natural
+    /// width. The close path uses a shrink-only fit (`allow_grow = false`).
     #[test]
-    fn disable_carousel_restores_natural_width_after_closing_windows() {
+    fn disable_carousel_does_not_grow_survivors_after_closing_windows() {
         let mut options = Options::default();
         options.layout.disable_carousel = true;
         let mut sim = LayoutSim::with_options(options);
@@ -1420,22 +1421,57 @@ mod tests {
         sim.communicate_all();
         sim.complete_animations();
         sim.update_render_elements();
+        let shrunk = sim.window_geometry(&a).expect("a geo").size.w;
         assert!(
-            sim.window_geometry(&a).expect("a geo").size.w < natural - 1.0,
+            shrunk < natural - 1.0,
             "columns should have shrunk below natural width while crowded",
         );
 
-        // Close them again — the survivor recovers its natural width.
+        // Close the crowd — the survivor stays shrunk, it does not grow back.
         for id in extra {
             sim.close_window(id);
         }
         sim.communicate_all();
         sim.complete_animations();
         sim.update_render_elements();
-        let restored = sim.window_geometry(&a).expect("a geo").size.w;
+        let after = sim.window_geometry(&a).expect("a geo").size.w;
         assert!(
-            (restored - natural).abs() < 1.0,
-            "width should return to natural after closing the crowd: {restored} vs {natural}",
+            (after - shrunk).abs() < 1.0,
+            "closing windows must not grow the survivor: {shrunk} -> {after} (natural {natural})",
+        );
+    }
+
+    /// Normal (scrolling) carousel: closing a window must not grow the
+    /// survivors via the min-span floor. Three natural-width columns exceed the
+    /// half-screen floor (so they open ungrown); closing one drops the row
+    /// below the floor, which the old close path would have scaled back up.
+    /// Two columns are left (min-span never grows a lone column anyway), so the
+    /// difference isolates the close-time growth.
+    #[test]
+    fn closing_window_does_not_grow_survivors_via_min_span() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1); // 1280×720 → min-span floor 640px
+
+        let a = sim.add_window();
+        let b = sim.add_window();
+        let c = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let a_before = sim.window_geometry(&a).expect("a geo").size.w;
+        let b_before = sim.window_geometry(&b).expect("b geo").size.w;
+
+        // Close c, leaving a + b. Their combined span is now under the floor,
+        // but neither may be scaled up — the close path skips min-span growth.
+        sim.close_window(c);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let a_after = sim.window_geometry(&a).expect("a geo").size.w;
+        let b_after = sim.window_geometry(&b).expect("b geo").size.w;
+        assert!(
+            a_after <= a_before + 1.0 && b_after <= b_before + 1.0,
+            "closing a window must not grow survivors: a {a_before}->{a_after}, b {b_before}->{b_after}",
         );
     }
 
