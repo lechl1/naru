@@ -310,8 +310,14 @@ impl CompositorHandler for State {
                             // acts on the focused column, so gate on `ActivateWindow::Yes`
                             // to avoid moving an unrelated column when the new window
                             // doesn't take focus. An out-of-bounds index is clamped.
+                            //
+                            // `move_column_to_index` is 1-based (index 1 == first
+                            // column), but the saved `column_index` is 0-based, so
+                            // convert. Without the `+ 1`, every window restored one
+                            // column too far left (and columns 0 and 1 collapsed
+                            // onto the same slot).
                             if matches!(activate, crate::layout::ActivateWindow::Yes) {
-                                self.naru.layout.move_column_to_index(*column_index);
+                                self.naru.layout.move_column_to_index(*column_index + 1);
                             }
                             self.restore_window_size(&window, *width, *height);
                         }

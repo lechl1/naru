@@ -49,7 +49,7 @@
 use std::time::Duration;
 
 use naru_config::FloatOrInt;
-use naru_ipc::SizeChange;
+use naru_ipc::{OpenInFixedSide, SizeChange};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::{Op, TestWindow, TestWindowParams};
@@ -57,6 +57,7 @@ use crate::animation::Clock;
 use crate::layout::fixed_strip::FixedSide;
 use crate::layout::workspace::WindowLayer;
 use crate::layout::{Layout, LayoutElement, Options};
+use crate::window::ResolvedWindowRules;
 
 /// Read-only introspection shared by the fake [`LayoutSim`] and the real
 /// `Layout<Mapped>`. Implemented generically for every `Layout<W>`, so a
@@ -416,6 +417,86 @@ impl LayoutSim {
         self.verify();
     }
 
+    // --- session-restore placement primitives --------------------------------
+    //
+    // These are the exact layout operations the restore matcher in
+    // `handlers/compositor.rs` performs as each respawned window maps:
+    // `move_column_to_index` for tiled-column restore, `set_window_width` /
+    // `set_window_height` (`SizeChange::SetFixed`) for size restore, and
+    // opening a window carrying an `open-in-fixed-side` rule for side-panel
+    // restore. Testing them here exercises the production code path the restore
+    // relies on, without standing up a whole `State`.
+
+    /// Move the active column to `index`, clamped to the column count.
+    ///
+    /// Matches the production `Layout::move_column_to_index`, which is
+    /// **1-based**: `index == 1` is the first column. (Callers restoring a
+    /// 0-based saved index must add 1 — see [`Self::restore_tiled_placement`].)
+    pub fn move_column_to_index(&mut self, index: usize) {
+        self.apply(Op::MoveColumnToIndex(index));
+    }
+
+    /// Set `id`'s width via a [`SizeChange`] (the restore path uses
+    /// [`SizeChange::SetFixed`]).
+    pub fn set_window_width(&mut self, id: usize, change: SizeChange) {
+        self.apply(Op::SetWindowWidth {
+            id: Some(id),
+            change,
+        });
+    }
+
+    /// Set `id`'s height via a [`SizeChange`].
+    pub fn set_window_height(&mut self, id: usize, change: SizeChange) {
+        self.apply(Op::SetWindowHeight {
+            id: Some(id),
+            change,
+        });
+    }
+
+    /// Restore a window's exact size the way `State::restore_window_size` does:
+    /// a fixed width and/or height, each skipped when `0.0` (the "let the
+    /// layout pick" sentinel persisted in older state files).
+    pub fn restore_window_size(&mut self, id: usize, width: f64, height: f64) {
+        if width > 0.0 {
+            self.set_window_width(id, SizeChange::SetFixed(width.round() as i32));
+        }
+        if height > 0.0 {
+            self.set_window_height(id, SizeChange::SetFixed(height.round() as i32));
+        }
+    }
+
+    /// Restore a just-mapped tiled window into its saved slot, mirroring the
+    /// post-`add_window` block in `State` (`handlers/compositor.rs`): focus the
+    /// window, move its column to the saved index, then restore its size.
+    ///
+    /// `column_index` is **0-based** (as persisted in `Placement::Tiled`); the
+    /// `+ 1` converts it to the 1-based [`Self::move_column_to_index`] — the
+    /// exact conversion the compositor must perform. A test that drops the
+    /// `+ 1` reproduces the off-by-one this harness originally surfaced.
+    pub fn restore_tiled_placement(
+        &mut self,
+        id: usize,
+        column_index: usize,
+        width: f64,
+        height: f64,
+    ) {
+        self.focus_window(id);
+        self.move_column_to_index(column_index + 1);
+        self.restore_window_size(id, width, height);
+    }
+
+    /// Open a window carrying an `open-in-fixed-side` rule, mirroring the
+    /// side-panel restore path (which calls `Mapped::set_open_in_fixed_side`
+    /// before `add_window`). Returns its id.
+    pub fn add_window_in_fixed_side(&mut self, side: OpenInFixedSide) -> usize {
+        self.add_window_with(|params| {
+            params.rules = Some(ResolvedWindowRules {
+                open_in_fixed_side: Some(side),
+                ..ResolvedWindowRules::default()
+            });
+        })
+    }
+
     /// Hit-test `pos` (output-local logical coordinates) on `output{output_id}`
     /// through the production `Layout::window_under` — the *mouse* path. This
     /// is deliberately distinct from [`focus_window`], which activates a window
@@ -524,6 +605,41 @@ impl LayoutSim {
             .window_geometry(&id)
             .unwrap_or_else(|| panic!("window {id} has no geometry (not in layout?)"));
         geo.loc.x + geo.size.w
+    }
+
+    /// 0-based column ordinal of a *carousel* (scrolling-layer) window, derived
+    /// from the left-to-right render x order of all carousel columns.
+    ///
+    /// Columns are laid out left-to-right and the view-scroll offset shifts
+    /// every column by the same amount, so the sorted set of distinct column
+    /// x-positions yields a scroll-independent index. Tiles sharing a column
+    /// share an x, so they collapse to one ordinal. Returns `None` if the
+    /// window is not in the carousel (floating or a fixed-side panel).
+    pub fn scrolling_column_index(&self, id: usize) -> Option<usize> {
+        if self.window_slot(&id)? != WindowLayer::Scrolling {
+            return None;
+        }
+        let mut xs: Vec<f64> = self
+            .window_ids()
+            .into_iter()
+            .filter(|w| self.window_slot(w) == Some(WindowLayer::Scrolling))
+            .map(|w| self.window_x(w))
+            .collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).expect("finite column x"));
+        xs.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        let x = self.window_x(id);
+        xs.iter().position(|&cx| (cx - x).abs() < 1.0)
+    }
+
+    /// Convenience: assert a carousel window sits at the expected column index.
+    #[track_caller]
+    pub fn assert_column_index(&self, id: usize, expected: usize) {
+        let got = self.scrolling_column_index(id);
+        assert_eq!(
+            got,
+            Some(expected),
+            "window {id} expected at column {expected}, but index is {got:?}",
+        );
     }
 }
 
@@ -1579,5 +1695,199 @@ mod tests {
             shrunk < grown - 1.0,
             "left arrow should shrink a left-side window: {grown} -> {shrunk}",
         );
+    }
+
+    // --- session-restore placement -------------------------------------------
+    //
+    // The restore matcher (`handlers/compositor.rs`) steers each respawned
+    // window into its saved slot using plain layout operations:
+    // `move_column_to_index` (carousel column), `set_window_width/height` with
+    // `SizeChange::SetFixed` (exact size), and an `open-in-fixed-side` rule on
+    // the mapping window (side panel). These tests pin those primitives so a
+    // regression in the layout surface the restore depends on is caught here,
+    // in the fast layout suite, rather than only end-to-end.
+
+    /// `move_column_to_index` relocates the active carousel column to an exact
+    /// index, sliding the others over — the operation tiled-window restore uses
+    /// to put each respawned window back in its saved column.
+    #[test]
+    fn move_column_to_index_reorders_carousel_columns() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+        let a = sim.add_window(); // column 0
+        let b = sim.add_window(); // column 1
+        let c = sim.add_window(); // column 2
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Precondition: opened left-to-right in their own columns.
+        sim.assert_column_index(a, 0);
+        sim.assert_column_index(b, 1);
+        sim.assert_column_index(c, 2);
+
+        // Move the first column to the end. `move_column_to_index` is 1-based,
+        // so position 3 is the third (last) slot: [a,b,c] -> [b,c,a].
+        sim.focus_window(a);
+        sim.move_column_to_index(3);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        sim.assert_column_index(b, 0);
+        sim.assert_column_index(c, 1);
+        sim.assert_column_index(a, 2);
+    }
+
+    /// An out-of-range index is clamped rather than panicking — restore reads a
+    /// column index from a possibly-stale state file, so it must tolerate an
+    /// index past the current column count.
+    #[test]
+    fn move_column_to_index_clamps_out_of_range() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Ask for column 99 with only two columns present: clamps to the last.
+        sim.focus_window(a);
+        sim.move_column_to_index(99);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        sim.assert_column_index(b, 0);
+        sim.assert_column_index(a, 1);
+    }
+
+    /// `set_window_width/height` with `SizeChange::SetFixed` restores a window
+    /// to an exact logical size. Borders are off by default, so the tile
+    /// geometry equals the window size — the assertion can be tight.
+    #[test]
+    fn restore_window_size_sets_exact_fixed_geometry() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1); // 1280×720
+
+        let a = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Restore to a specific saved width/height, the way
+        // `State::restore_window_size` does.
+        sim.restore_window_size(a, 500.0, 400.0);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let geo = sim.window_geometry(&a).expect("a geo");
+        assert!(
+            (geo.size.w - 500.0).abs() < 1.0,
+            "fixed width should restore to 500, got {}",
+            geo.size.w,
+        );
+        assert!(
+            (geo.size.h - 400.0).abs() < 1.0,
+            "fixed height should restore to 400, got {}",
+            geo.size.h,
+        );
+    }
+
+    /// `restore_window_size` treats `0.0` as "let the layout pick" and leaves
+    /// that dimension untouched — the default for state files written before
+    /// width/height capture existed.
+    #[test]
+    fn restore_window_size_skips_zero_dimensions() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+
+        let a = sim.add_window();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        let natural = sim.window_geometry(&a).expect("a geo");
+
+        // Width 0.0 → keep natural width; height 350 → set it.
+        sim.restore_window_size(a, 0.0, 350.0);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let geo = sim.window_geometry(&a).expect("a geo");
+        assert!(
+            (geo.size.w - natural.size.w).abs() < 1.0,
+            "zero width must leave the natural width untouched: {} vs {}",
+            geo.size.w,
+            natural.size.w,
+        );
+        assert!(
+            (geo.size.h - 350.0).abs() < 1.0,
+            "non-zero height should still be applied, got {}",
+            geo.size.h,
+        );
+    }
+
+    /// A window carrying an `open-in-fixed-side` rule lands directly in the
+    /// matching fixed-side panel on open — the side-panel restore path, which
+    /// sets that rule before `add_window`.
+    #[test]
+    fn open_in_fixed_side_rule_parks_window_in_panel() {
+        let mut sim = LayoutSim::new_stacking(); // panels need stacking
+        sim.add_output(1);
+
+        // A carousel window plus one steered into each panel.
+        let carousel = sim.add_window();
+        let right = sim.add_window_in_fixed_side(OpenInFixedSide::Right);
+        let left = sim.add_window_in_fixed_side(OpenInFixedSide::Left);
+
+        sim.assert_slot(carousel, WindowLayer::Scrolling);
+        sim.assert_slot(right, WindowLayer::FixedRight);
+        sim.assert_slot(left, WindowLayer::FixedLeft);
+    }
+
+    /// End-to-end-ish replay of a session restore's *column placement*. Windows
+    /// respawn and map in saved order; as each maps the matcher steers it into
+    /// its saved (0-based) column — exactly the interleaved add-then-place
+    /// sequence `handlers/compositor.rs` runs. The final column order must
+    /// reproduce the saved layout.
+    ///
+    /// The saved columns ([2, 0, 1]) are a genuine permutation, so this would
+    /// fail under the 0-based/1-based off-by-one that the column-index work
+    /// here uncovered.
+    ///
+    /// Widths are deliberately *not* asserted here: restored windows are
+    /// subject to the same carousel min-span rule as live ones
+    /// (`grow_to_min_carousel_span`), which scales a too-narrow *multi-column*
+    /// row up to fill the screen, so an exact fixed width does not survive a
+    /// multi-window restore. The fixed-size primitive itself is pinned by
+    /// `restore_window_size_sets_exact_fixed_geometry`.
+    #[test]
+    fn session_restore_replay_places_windows_in_saved_columns() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+
+        // Each respawned window's saved 0-based column, in map order.
+        let saved_cols = [2usize, 0, 1];
+
+        // Map each window and immediately restore it into its slot, the way the
+        // first-map matcher does — not all-at-once at the end.
+        let mut ids = Vec::new();
+        for &col in &saved_cols {
+            let id = sim.add_window();
+            sim.communicate_all();
+            sim.restore_tiled_placement(id, col, 0.0, 0.0);
+            sim.communicate_all();
+            sim.complete_animations();
+            sim.update_render_elements();
+            ids.push(id);
+        }
+
+        // Each window landed in its saved column.
+        for (&id, &col) in ids.iter().zip(&saved_cols) {
+            sim.assert_column_index(id, col);
+        }
     }
 }
