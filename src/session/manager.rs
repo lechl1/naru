@@ -266,8 +266,8 @@ mod tests {
             launch_commands: vec![LaunchCommand {
                 app_id: "x".into(),
                 command: vec!["x".into()],
-                cwd_from_child: false,
             }],
+            cwd_from_child: Vec::new(),
         }
     }
 
@@ -329,6 +329,8 @@ mod tests {
                 app_id: "org.kde.konsole".into(),
                 title: None,
                 cwd: Some(PathBuf::from("/home/leo/work")),
+                flatpak_id: None,
+                exec: None,
                 output: None,
                 workspace: WorkspaceRef::Index { index: 0 },
                 placement: Placement::Tiled {

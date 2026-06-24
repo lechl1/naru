@@ -65,6 +65,26 @@ pub struct WindowEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
 
+    /// Flatpak application id (e.g. `"com.brave.Browser"`) when the client is a flatpak
+    /// app, read from its process at save time. `None` for non-flatpak clients.
+    ///
+    /// This is what makes flatpak restore generic: rather than hardcoding a launch
+    /// command per browser, the saved entry remembers it should be relaunched via
+    /// `flatpak run <flatpak_id>`. The toplevel `app_id` (a WM class like
+    /// `brave-browser`) is not the flatpak id, so it can't be used directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatpak_id: Option<String>,
+
+    /// Absolute path to the client's executable (`/proc/<pid>/exe`) for non-flatpak
+    /// clients, captured at save time. `None` when unreadable or for flatpak apps
+    /// (whose exe lives inside the sandbox and isn't launchable from the host).
+    ///
+    /// This generalises native-app restore: the window is relaunched by exec'ing this
+    /// binary in the saved `cwd`, so e.g. a terminal reopens in the right directory
+    /// without any app-specific `--workdir`-style launch command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<String>,
+
     /// Connector name of the output the window was on, e.g. `"DP-1"`. `None` for the
     /// "any output" wildcard at restore time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +188,8 @@ mod tests {
                 app_id: "org.kde.konsole".into(),
                 title: Some("~/work".into()),
                 cwd: Some(PathBuf::from("/home/leo/work")),
+                flatpak_id: None,
+                exec: None,
                 output: Some("DP-1".into()),
                 workspace: WorkspaceRef::Name {
                     name: "code".into(),
@@ -199,6 +221,8 @@ mod tests {
             app_id: "firefox".into(),
             title: None,
             cwd: None,
+            flatpak_id: None,
+            exec: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Floating {
@@ -223,6 +247,8 @@ mod tests {
             app_id: "org.kde.konsole".into(),
             title: None,
             cwd: None,
+            flatpak_id: None,
+            exec: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::SidePanel {

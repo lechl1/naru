@@ -63,11 +63,14 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
 
             let (w, h) = window_size(mapped);
             let placement = placement_from_ipc_layout(&layout, w, h);
+            let (flatpak_id, exec) = launch_info(mapped);
 
             windows.push(WindowEntry {
                 app_id: app_id.clone(),
                 title: None,
                 cwd: resolve_cwd(mapped, &app_id, session_restore),
+                flatpak_id,
+                exec,
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement,
@@ -83,10 +86,13 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
             };
 
             let (w, h) = window_size(mapped);
+            let (flatpak_id, exec) = launch_info(mapped);
             windows.push(WindowEntry {
                 app_id: app_id.clone(),
                 title: None,
                 cwd: resolve_cwd(mapped, &app_id, session_restore),
+                flatpak_id,
+                exec,
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement: Placement::SidePanel {
@@ -111,17 +117,13 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
 /// Default: the cwd captured once at window-map time (`Mapped::session_cwd`), i.e. the
 /// directory the window was *opened in*.
 ///
-/// When the window's `app_id` has a launch-command with `cwd-from-child` set (terminals),
-/// the meaningful cwd lives in the foreground child shell and changes as the user `cd`s,
-/// so it is re-read **fresh here at save time** by descending the client's process tree
-/// via [`read_cwd_from_child`]. If that descent yields nothing (no live child, sandboxed
+/// When the window's `app_id` is in the `cwd-from-child` set (terminals), the meaningful
+/// cwd lives in the foreground child shell and changes as the user `cd`s, so it is
+/// re-read **fresh here at save time** by descending the client's process tree via
+/// [`read_cwd_from_child`]. If that descent yields nothing (no live child, sandboxed
 /// `/proc`, etc.) we fall back to the map-time capture rather than dropping the cwd.
 fn resolve_cwd(mapped: &Mapped, app_id: &str, sr: &SessionRestore) -> Option<PathBuf> {
-    let from_child = sr
-        .launch_command_for(app_id)
-        .is_some_and(|lc| lc.cwd_from_child);
-
-    if from_child {
+    if sr.reads_cwd_from_child(app_id) {
         if let Some(pid) = mapped.credentials().map(|c| c.pid) {
             if let Some(cwd) = crate::session::read_cwd_from_child(pid) {
                 return Some(cwd);
@@ -130,6 +132,19 @@ fn resolve_cwd(mapped: &Mapped, app_id: &str, sr: &SessionRestore) -> Option<Pat
     }
 
     mapped.session_cwd().map(PathBuf::from)
+}
+
+/// Capture how to relaunch a window generically: its flatpak id (if a flatpak app) and
+/// otherwise its executable path. Returns `(flatpak_id, exec)`; for a flatpak app `exec`
+/// is `None` (the exe is inside the sandbox), and for a native app `flatpak_id` is `None`.
+fn launch_info(mapped: &Mapped) -> (Option<String>, Option<String>) {
+    let Some(pid) = mapped.credentials().map(|c| c.pid) else {
+        return (None, None);
+    };
+    if let Some(flatpak_id) = crate::session::read_flatpak_id_for_pid(pid) {
+        return (Some(flatpak_id), None);
+    }
+    (None, crate::session::read_exec_for_pid(pid))
 }
 
 /// The window's current logical size, as `(width, height)` floats.

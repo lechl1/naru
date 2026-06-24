@@ -47,14 +47,13 @@ fn config_with_builtins() -> SessionRestore {
             LaunchCommand {
                 app_id: "org.kde.dolphin".into(),
                 command: vec!["dolphin".into(), "%s".into()],
-                cwd_from_child: false,
             },
             LaunchCommand {
                 app_id: "org.kde.konsole".into(),
                 command: vec!["konsole".into(), "--workdir".into(), "%s".into()],
-                cwd_from_child: true,
             },
         ],
+        cwd_from_child: Vec::new(),
     }
 }
 
@@ -89,6 +88,8 @@ fn entry(
         app_id: app_id.into(),
         title: None,
         cwd: cwd.map(PathBuf::from),
+        flatpak_id: None,
+        exec: None,
         output: None,
         workspace,
         placement,
@@ -240,6 +241,7 @@ fn pending_restore_is_fifo_per_app_id() {
         off: false,
         state_path: Some(path.to_string_lossy().into_owned()),
         launch_commands: vec![],
+        cwd_from_child: Vec::new(),
     };
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
@@ -293,6 +295,7 @@ fn pending_restore_matches_by_cwd_when_available() {
         off: false,
         state_path: Some(path.to_string_lossy().into_owned()),
         launch_commands: vec![],
+        cwd_from_child: Vec::new(),
     };
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
@@ -359,6 +362,7 @@ fn pending_restore_only_pops_matching_app_id() {
         off: false,
         state_path: Some(path.to_string_lossy().into_owned()),
         launch_commands: vec![],
+        cwd_from_child: Vec::new(),
     };
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
@@ -386,6 +390,7 @@ fn manager_starts_empty_when_no_state_file() {
         off: false,
         state_path: Some(path.to_string_lossy().into_owned()),
         launch_commands: vec![],
+        cwd_from_child: Vec::new(),
     };
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
@@ -412,6 +417,7 @@ fn manager_treats_version_mismatch_as_fresh_start() {
         off: false,
         state_path: Some(path.to_string_lossy().into_owned()),
         launch_commands: vec![],
+        cwd_from_child: Vec::new(),
     };
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
@@ -427,6 +433,7 @@ fn off_config_yields_no_manager() {
         off: true,
         state_path: Some("/tmp/should-not-be-touched.json".into()),
         launch_commands: vec![],
+        cwd_from_child: Vec::new(),
     };
     assert!(SessionManager::new(&cfg).is_none());
 }
@@ -476,6 +483,7 @@ fn save_then_reopen_simulates_full_session_cycle() {
         off: false,
         state_path: Some(path.to_string_lossy().into_owned()),
         launch_commands: cfg.launch_commands.clone(),
+        cwd_from_child: Vec::new(),
     };
     let sm = SessionManager::new(&restored_cfg).expect("manager");
 

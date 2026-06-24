@@ -1,9 +1,11 @@
 //! Configuration for the session-restore feature.
 //!
 //! Session restore persists the set of open windows and their layout positions across
-//! compositor restarts. On startup, the saved entries are respawned via per-app-id
-//! launch-command templates (with `%s` substituted by the captured working directory),
-//! and as each new window maps it is steered into its saved slot.
+//! compositor restarts. On startup each saved window is relaunched — generically,
+//! using launch info captured from its process (a flatpak id, or the executable path,
+//! run in the saved working directory) — and steered back into its saved slot as it
+//! maps. `launch-command` entries are an optional per-app-id override for the rare apps
+//! the generic path can't relaunch correctly.
 //!
 //! This is the configuration schema only — the save/restore plumbing lives in the
 //! main crate's `session` module. Disabled by default until the feature stabilises.
@@ -20,33 +22,32 @@ pub struct SessionRestore {
     /// `None` means use the platform default — `$XDG_STATE_HOME/naru/session.json`,
     /// falling back to `$HOME/.local/state/naru/session.json`.
     pub state_path: Option<String>,
-    /// Per-app-id launch-command templates.
+    /// Optional per-app-id launch-command overrides.
     ///
-    /// Each entry maps a window's xdg `app_id` to the argv vector used to respawn it
-    /// at restore time. Any argv element equal to the literal string `"%s"` is
-    /// substituted with the captured working directory of the original window. If the
-    /// cwd was not captured (sandboxed client, dead pid, etc.), `"%s"` is dropped from
-    /// the argv. Apps without a matching entry fall back to spawning the bare `app_id`
-    /// as the executable.
+    /// Restore is generic by default: each window is relaunched from launch info
+    /// captured at save time (flatpak id → `flatpak run <id>`, otherwise the
+    /// executable path), run in the saved working directory. An entry here overrides
+    /// that for a specific `app_id` — the argv is used verbatim, with any element equal
+    /// to the literal `"%s"` replaced by the saved cwd (dropped if no cwd was captured).
+    /// Empty by default; user entries are additive (they don't wipe a built-in list,
+    /// because there isn't one anymore).
     pub launch_commands: Vec<LaunchCommand>,
+    /// App-ids whose working directory should be read from the foreground **child**
+    /// process rather than the client process itself.
+    ///
+    /// Terminal emulators keep their own process cwd at wherever they were launched
+    /// (typically `$HOME`); the directory the user navigated to lives in the child
+    /// shell. For these app-ids the cwd is resolved by descending the process tree and
+    /// read fresh at save time, so a later `cd` is honoured. Defaults to common
+    /// terminals; user values are added to the defaults.
+    pub cwd_from_child: Vec<String>,
 }
 
-/// One per-app-id launch-command template.
+/// One per-app-id launch-command override.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchCommand {
     pub app_id: String,
     pub command: Vec<String>,
-    /// Read the captured working directory from the window's foreground **child**
-    /// process rather than the client process itself.
-    ///
-    /// Terminal emulators (konsole, etc.) keep their own process cwd at wherever they
-    /// were launched (typically `$HOME`); the directory the user actually navigated to
-    /// lives in the child shell. With this set, the cwd is resolved by descending into
-    /// the client's process tree and read **fresh at save time** (so a later `cd` is
-    /// honoured), instead of being captured once at window-map time. Apps where the
-    /// client process holds the meaningful cwd (file managers, editors) should leave
-    /// this off.
-    pub cwd_from_child: bool,
 }
 
 impl Default for SessionRestore {
@@ -55,51 +56,21 @@ impl Default for SessionRestore {
             // Off by default in v1 until restore-on-startup is wired up and tested.
             off: true,
             state_path: None,
-            launch_commands: builtin_launch_commands(),
+            launch_commands: Vec::new(),
+            cwd_from_child: builtin_cwd_from_child(),
         }
     }
 }
 
-/// Built-in launch commands shipped with the compositor.
-///
-/// User-provided `launch-command` entries replace this list wholesale (see `MergeWith`).
-fn builtin_launch_commands() -> Vec<LaunchCommand> {
+/// App-ids that default to reading cwd from their child shell (terminal emulators).
+fn builtin_cwd_from_child() -> Vec<String> {
     vec![
-        LaunchCommand {
-            app_id: "org.kde.dolphin".into(),
-            command: vec!["dolphin".into(), "%s".into()],
-            cwd_from_child: false,
-        },
-        LaunchCommand {
-            app_id: "org.kde.konsole".into(),
-            command: vec!["konsole".into(), "--workdir".into(), "%s".into()],
-            // konsole's own process cwd stays at its launch dir; the live working
-            // directory is the child shell's. Descend to it and re-read at save time.
-            cwd_from_child: true,
-        },
-        // Flatpak browsers: the toplevel xdg app_id is the app's WM class
-        // (`librewolf`, `brave-browser`), NOT the flatpak id — so the launch-command
-        // must be keyed on the WM class while the *command* uses `flatpak run <id>`.
-        // Without an entry, restore falls back to exec'ing the bare app_id, which is
-        // not a real binary, and the window silently never comes back.
-        LaunchCommand {
-            app_id: "librewolf".into(),
-            command: vec![
-                "flatpak".into(),
-                "run".into(),
-                "io.gitlab.librewolf-community".into(),
-            ],
-            cwd_from_child: false,
-        },
-        LaunchCommand {
-            app_id: "brave-browser".into(),
-            command: vec![
-                "flatpak".into(),
-                "run".into(),
-                "com.brave.Browser".into(),
-            ],
-            cwd_from_child: false,
-        },
+        "org.kde.konsole".into(),
+        "org.kde.yakuake".into(),
+        "Alacritty".into(),
+        "kitty".into(),
+        "foot".into(),
+        "org.wezfurlong.wezterm".into(),
     ]
 }
 
@@ -113,14 +84,14 @@ pub struct SessionRestorePart {
     pub state_path: Option<String>,
     #[knuffel(children(name = "launch-command"))]
     pub launch_commands: Vec<LaunchCommandPart>,
+    #[knuffel(child, unwrap(arguments))]
+    pub cwd_from_child: Option<Vec<String>>,
 }
 
 #[derive(knuffel::Decode, Debug, Clone, PartialEq, Eq)]
 pub struct LaunchCommandPart {
     #[knuffel(property(name = "app-id"))]
     pub app_id: String,
-    #[knuffel(property(name = "cwd-from-child"), default)]
-    pub cwd_from_child: bool,
     #[knuffel(arguments)]
     pub command: Vec<String>,
 }
@@ -134,30 +105,34 @@ impl MergeWith<SessionRestorePart> for SessionRestore {
             self.off = false;
         }
         merge_clone_opt!((self, part), state_path);
-        if !part.launch_commands.is_empty() {
-            // User-provided launch-commands fully replace the built-in list. This is
-            // intentional: it lets users disable a built-in mapping (e.g. konsole)
-            // without forcing them to also re-declare the others.
-            self.launch_commands = part
-                .launch_commands
-                .iter()
-                .map(|p| LaunchCommand {
-                    app_id: p.app_id.clone(),
-                    command: p.command.clone(),
-                    cwd_from_child: p.cwd_from_child,
-                })
-                .collect();
+        // User launch-commands are additive overrides — a later entry for an app_id
+        // wins over an earlier one via `launch_command_for`'s find-first semantics.
+        for p in &part.launch_commands {
+            self.launch_commands.push(LaunchCommand {
+                app_id: p.app_id.clone(),
+                command: p.command.clone(),
+            });
+        }
+        // cwd-from-child app-ids are added to the built-in terminal defaults.
+        if let Some(extra) = &part.cwd_from_child {
+            for app_id in extra {
+                if !self.cwd_from_child.iter().any(|a| a == app_id) {
+                    self.cwd_from_child.push(app_id.clone());
+                }
+            }
         }
     }
 }
 
 impl SessionRestore {
-    /// Look up the launch-command template for a given app_id.
-    ///
-    /// Returns `None` if no entry matches; callers should fall back to spawning the
-    /// bare `app_id` as the executable.
+    /// Look up a user-provided launch-command override for `app_id`, if any.
     pub fn launch_command_for(&self, app_id: &str) -> Option<&LaunchCommand> {
         self.launch_commands.iter().find(|lc| lc.app_id == app_id)
+    }
+
+    /// Whether `app_id`'s working directory should be read from its child shell.
+    pub fn reads_cwd_from_child(&self, app_id: &str) -> bool {
+        self.cwd_from_child.iter().any(|a| a == app_id)
     }
 }
 
@@ -166,16 +141,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_include_dolphin_and_konsole() {
+    fn defaults_are_generic() {
         let sr = SessionRestore::default();
         assert!(sr.off, "feature is off by default");
-        assert!(sr.launch_command_for("org.kde.dolphin").is_some());
-        assert!(sr.launch_command_for("org.kde.konsole").is_some());
-        assert!(sr.launch_command_for("does.not.exist").is_none());
+        // No hardcoded launch-commands — restore is generic.
+        assert!(sr.launch_commands.is_empty());
+        // Terminals still default to child-cwd capture.
+        assert!(sr.reads_cwd_from_child("org.kde.konsole"));
+        assert!(!sr.reads_cwd_from_child("org.kde.dolphin"));
     }
 
     #[test]
-    fn user_launch_commands_replace_builtins() {
+    fn user_launch_commands_are_additive_overrides() {
         let mut sr = SessionRestore::default();
         let part = SessionRestorePart {
             off: false,
@@ -183,23 +160,26 @@ mod tests {
             state_path: None,
             launch_commands: vec![LaunchCommandPart {
                 app_id: "firefox".into(),
-                cwd_from_child: false,
                 command: vec!["firefox".into(), "--new-window".into()],
             }],
+            cwd_from_child: None,
         };
         sr.merge_with(&part);
         assert!(!sr.off);
-        assert_eq!(sr.launch_commands.len(), 1);
-        assert_eq!(sr.launch_commands[0].app_id, "firefox");
-        // Built-ins are gone once the user defines any launch-command.
-        assert!(sr.launch_command_for("org.kde.dolphin").is_none());
+        assert_eq!(sr.launch_command_for("firefox").unwrap().command.len(), 2);
     }
 
     #[test]
-    fn empty_user_block_keeps_builtins() {
+    fn user_cwd_from_child_adds_to_defaults() {
         let mut sr = SessionRestore::default();
-        let part = SessionRestorePart::default();
+        let part = SessionRestorePart {
+            cwd_from_child: Some(vec!["my.custom.Terminal".into()]),
+            ..Default::default()
+        };
+        // `on`/`off` absent here; default keeps it off, but cwd-from-child still merges.
         sr.merge_with(&part);
-        assert!(sr.launch_command_for("org.kde.dolphin").is_some());
+        assert!(sr.reads_cwd_from_child("my.custom.Terminal"));
+        // Defaults are preserved.
+        assert!(sr.reads_cwd_from_child("org.kde.konsole"));
     }
 }

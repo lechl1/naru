@@ -22,42 +22,54 @@
 //!   place so the *next* save replaces it atomically; deleting it on restore would
 //!   create a window where a crash mid-startup loses the prior session.
 
+use std::path::Path;
+
 use naru_config::SessionRestore;
 
 use super::state::WindowEntry;
 
 /// Build the argv vector to respawn a saved window.
 ///
-/// Lookup precedence:
+/// Lookup precedence (generic by default — no per-app table):
 ///
-/// 1. A user-configured `launch-command` matching the entry's `app_id`.
-/// 2. The bare `app_id` itself, used as the executable name.
+/// 1. A user-configured `launch-command` override matching the entry's `app_id`.
+/// 2. `flatpak run <flatpak_id>` when the window was a flatpak app (id captured at save).
+/// 3. The captured executable path (native apps), run in the saved cwd by the caller.
+/// 4. The bare `app_id` as a last-resort command name.
 ///
-/// `%s` substitution: the literal `"%s"` is replaced with the entry's captured `cwd`
-/// **anywhere it appears in an argv element**, so both a standalone `"%s"` (e.g.
-/// `dolphin %s`) and an embedded one (e.g. `--cwd=%s`, needed for `flatpak run`) work.
-/// When `cwd` is `None` (unreadable, dead pid, sandboxed client) any element containing
-/// `"%s"` is **dropped** rather than substituted with a sentinel — passing an empty
-/// string or `"/"` to a user app would be worse than letting it start without the
-/// explicit cwd argument.
+/// `%s` substitution applies only to case 1 (user templates): the literal `"%s"` is
+/// replaced with the entry's captured `cwd` anywhere it appears in an argv element, and
+/// any element containing `"%s"` is **dropped** when no cwd was captured rather than
+/// substituted with a sentinel. Cases 2–4 don't need `%s` because the process is spawned
+/// directly in the saved cwd ([`crate::utils::spawning::spawn_with_cwd`]).
 pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<String> {
-    let template: Vec<String> = config
-        .launch_command_for(&entry.app_id)
-        .map(|lc| lc.command.clone())
-        .unwrap_or_else(|| vec![entry.app_id.clone()]);
+    // 1. Explicit user override.
+    if let Some(lc) = config.launch_command_for(&entry.app_id) {
+        return substitute_cwd(&lc.command, entry.cwd.as_deref());
+    }
+    // 2. Flatpak app: relaunch through flatpak.
+    if let Some(flatpak_id) = &entry.flatpak_id {
+        return vec!["flatpak".into(), "run".into(), flatpak_id.clone()];
+    }
+    // 3. Native app: exec the captured binary (spawned in the saved cwd).
+    if let Some(exec) = &entry.exec {
+        return vec![exec.clone()];
+    }
+    // 4. Last resort.
+    vec![entry.app_id.clone()]
+}
 
-    let cwd_str = entry
-        .cwd
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
-
+/// Substitute the saved `cwd` into a user launch-command template's `%s` slots,
+/// dropping any element that still references `%s` when no cwd is available.
+fn substitute_cwd(template: &[String], cwd: Option<&Path>) -> Vec<String> {
+    let cwd_str = cwd.map(|p| p.to_string_lossy().into_owned());
     template
-        .into_iter()
+        .iter()
         .filter_map(|arg| {
             if arg.contains("%s") {
                 cwd_str.as_deref().map(|cwd| arg.replace("%s", cwd))
             } else {
-                Some(arg)
+                Some(arg.clone())
             }
         })
         .collect()
@@ -111,11 +123,13 @@ mod tests {
     use super::*;
     use crate::session::state::{Placement, WorkspaceRef};
 
-    fn entry_with_cwd(app_id: &str, cwd: Option<&str>) -> WindowEntry {
+    fn entry(app_id: &str, cwd: Option<&str>) -> WindowEntry {
         WindowEntry {
             app_id: app_id.into(),
             title: None,
             cwd: cwd.map(PathBuf::from),
+            flatpak_id: None,
+            exec: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Tiled {
@@ -134,104 +148,68 @@ mod tests {
             off: false,
             state_path: None,
             launch_commands: commands,
+            cwd_from_child: Vec::new(),
         }
     }
 
     #[test]
-    fn resolve_substitutes_cwd_into_template() {
-        let c = cfg(vec![LaunchCommand {
-            app_id: "org.kde.konsole".into(),
-            command: vec!["konsole".into(), "--workdir".into(), "%s".into()],
-            cwd_from_child: true,
-        }]);
-        let e = entry_with_cwd("org.kde.konsole", Some("/home/leo/work"));
+    fn resolve_uses_flatpak_id_generically() {
+        // No launch-command needed: a captured flatpak id drives `flatpak run`.
+        let mut e = entry("brave-browser", None);
+        e.flatpak_id = Some("com.brave.Browser".into());
         assert_eq!(
-            resolve_launch_argv(&e, &c),
-            vec!["konsole", "--workdir", "/home/leo/work"]
-        );
-    }
-
-    #[test]
-    fn resolve_drops_placeholder_when_cwd_missing() {
-        let c = cfg(vec![LaunchCommand {
-            app_id: "org.kde.dolphin".into(),
-            command: vec!["dolphin".into(), "%s".into()],
-            cwd_from_child: false,
-        }]);
-        let e = entry_with_cwd("org.kde.dolphin", None);
-        // %s vanishes when cwd is None, leaving just the executable.
-        assert_eq!(resolve_launch_argv(&e, &c), vec!["dolphin"]);
-    }
-
-    #[test]
-    fn resolve_falls_back_to_app_id_when_no_match() {
-        let c = cfg(vec![]);
-        let e = entry_with_cwd("firefox", Some("/home/leo"));
-        // No launch-command for firefox → use "firefox" as the executable.
-        // %s isn't in the template so cwd is unused.
-        assert_eq!(resolve_launch_argv(&e, &c), vec!["firefox"]);
-    }
-
-    #[test]
-    fn resolve_handles_multiple_placeholders() {
-        // Pathological config but valid: multiple %s should all be substituted.
-        let c = cfg(vec![LaunchCommand {
-            app_id: "x".into(),
-            command: vec!["x".into(), "%s".into(), "--cwd".into(), "%s".into()],
-            cwd_from_child: false,
-        }]);
-        let e = entry_with_cwd("x", Some("/p"));
-        assert_eq!(resolve_launch_argv(&e, &c), vec!["x", "/p", "--cwd", "/p"]);
-    }
-
-    #[test]
-    fn resolve_substitutes_embedded_placeholder_for_flatpak() {
-        // Flatpak needs `--cwd=DIR`; the `%s` is embedded in the arg, not standalone.
-        let c = cfg(vec![LaunchCommand {
-            app_id: "com.brave.Browser".into(),
-            command: vec![
-                "flatpak".into(),
-                "run".into(),
-                "--cwd=%s".into(),
-                "com.brave.Browser".into(),
-            ],
-            cwd_from_child: false,
-        }]);
-        let e = entry_with_cwd("com.brave.Browser", Some("/home/leo/dl"));
-        assert_eq!(
-            resolve_launch_argv(&e, &c),
-            vec!["flatpak", "run", "--cwd=/home/leo/dl", "com.brave.Browser"]
-        );
-    }
-
-    #[test]
-    fn resolve_drops_embedded_placeholder_when_cwd_missing() {
-        let c = cfg(vec![LaunchCommand {
-            app_id: "com.brave.Browser".into(),
-            command: vec![
-                "flatpak".into(),
-                "run".into(),
-                "--cwd=%s".into(),
-                "com.brave.Browser".into(),
-            ],
-            cwd_from_child: false,
-        }]);
-        let e = entry_with_cwd("com.brave.Browser", None);
-        // The whole `--cwd=%s` arg vanishes, leaving a valid bare launch.
-        assert_eq!(
-            resolve_launch_argv(&e, &c),
+            resolve_launch_argv(&e, &cfg(vec![])),
             vec!["flatpak", "run", "com.brave.Browser"]
         );
     }
 
     #[test]
-    fn resolve_preserves_non_placeholder_args() {
+    fn resolve_uses_exec_generically() {
+        // A native app reopens via its captured executable; cwd is applied by the
+        // spawner, not the argv, so no `--workdir` is needed.
+        let mut e = entry("org.kde.konsole", Some("/home/leo/work"));
+        e.exec = Some("/usr/bin/konsole".into());
+        assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["/usr/bin/konsole"]);
+    }
+
+    #[test]
+    fn resolve_prefers_flatpak_over_exec() {
+        // If both happen to be set, flatpak wins (the exe path is inside the sandbox).
+        let mut e = entry("brave-browser", None);
+        e.flatpak_id = Some("com.brave.Browser".into());
+        e.exec = Some("/app/brave/brave".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["flatpak", "run", "com.brave.Browser"]
+        );
+    }
+
+    #[test]
+    fn resolve_user_override_wins_over_generic() {
         let c = cfg(vec![LaunchCommand {
-            app_id: "x".into(),
-            command: vec!["x".into(), "--flag".into(), "value".into()],
-            cwd_from_child: false,
+            app_id: "brave-browser".into(),
+            command: vec!["my-brave-wrapper".into(), "%s".into()],
         }]);
-        let e = entry_with_cwd("x", None);
-        assert_eq!(resolve_launch_argv(&e, &c), vec!["x", "--flag", "value"]);
+        let mut e = entry("brave-browser", Some("/dl"));
+        e.flatpak_id = Some("com.brave.Browser".into());
+        // The user override is used, with %s substituted, ignoring the flatpak id.
+        assert_eq!(resolve_launch_argv(&e, &c), vec!["my-brave-wrapper", "/dl"]);
+    }
+
+    #[test]
+    fn resolve_override_drops_placeholder_when_cwd_missing() {
+        let c = cfg(vec![LaunchCommand {
+            app_id: "org.kde.dolphin".into(),
+            command: vec!["dolphin".into(), "%s".into()],
+        }]);
+        let e = entry("org.kde.dolphin", None);
+        assert_eq!(resolve_launch_argv(&e, &c), vec!["dolphin"]);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_app_id_when_nothing_known() {
+        // No override, no flatpak id, no exec → bare app_id as a last resort.
+        let e = entry("firefox", Some("/home/leo"));
+        assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["firefox"]);
     }
 }

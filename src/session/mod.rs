@@ -24,7 +24,10 @@ pub mod snapshot;
 pub mod state;
 pub mod storage;
 
-pub use cwd::{cwd_for_surface, read_cwd_for_pid, read_cwd_from_child};
+pub use cwd::{
+    cwd_for_surface, read_cwd_for_pid, read_cwd_from_child, read_exec_for_pid,
+    read_flatpak_id_for_pid,
+};
 pub use manager::SessionManager;
 pub use restore::{resolve_launch_argv, restore_apps};
 pub use snapshot::build_from_naru;

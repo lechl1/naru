@@ -107,6 +107,55 @@ fn last_child_of(pid: i32) -> Option<i32> {
     contents.split_whitespace().last()?.parse().ok()
 }
 
+/// Read the flatpak application id of process `pid`, if it is a flatpak app.
+///
+/// Flatpak apps carry a `/.flatpak-info` at their sandbox root (`/proc/<pid>/root`)
+/// whose `[Application] name=` is the flatpak id (e.g. `com.brave.Browser`). This is
+/// the generic way to learn how to relaunch a flatpak window — via `flatpak run <id>`
+/// — without hardcoding a table of apps. Returns `None` for non-flatpak processes or
+/// when the file is unreadable.
+pub fn read_flatpak_id_for_pid(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let info = fs::read_to_string(format!("/proc/{pid}/root/.flatpak-info")).ok()?;
+    let mut in_application = false;
+    for line in info.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_application = line == "[Application]";
+            continue;
+        }
+        if in_application {
+            if let Some(name) = line.strip_prefix("name=") {
+                let name = name.trim();
+                if !name.is_empty() {
+                    return Some(name.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read the absolute executable path of process `pid` via `/proc/<pid>/exe`.
+///
+/// Used to relaunch a native (non-flatpak) window generically — exec this binary in
+/// the saved cwd instead of hardcoding a per-app command. Returns `None` when the
+/// target is unreadable, not absolute, or doesn't exist on the host (the latter
+/// rejects sandboxed clients whose exe lives inside their own mount namespace —
+/// those are relaunched via [`read_flatpak_id_for_pid`] instead).
+pub fn read_exec_for_pid(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let target = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    if !target.is_absolute() || !target.exists() {
+        return None;
+    }
+    Some(target.to_string_lossy().into_owned())
+}
+
 /// Read the working directory of the client backing a Wayland surface.
 ///
 /// Composes [`get_credentials_for_surface`] (which exposes the connecting client's

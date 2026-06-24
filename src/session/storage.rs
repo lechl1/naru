@@ -160,6 +160,8 @@ mod tests {
                 app_id: "org.kde.dolphin".into(),
                 title: None,
                 cwd: Some(PathBuf::from("/tmp")),
+                flatpak_id: None,
+                exec: None,
                 output: Some("DP-1".into()),
                 workspace: WorkspaceRef::Index { index: 1 },
                 placement: Placement::Tiled {

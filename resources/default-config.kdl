@@ -301,33 +301,26 @@ spawn-at-startup "waybar"
 // column/tile or fixed-side panel), size, and working directory across compositor
 // restarts, and respawn + re-place them on next startup. Off by default.
 //
-// Each `launch-command` maps a window's xdg `app_id` to the argv used to respawn
-// that window. The literal "%s" is substituted with the captured working directory
-// of the original window (read from /proc/<pid>/cwd at map time). Substitution is
-// substring-based, so both a standalone "%s" and an embedded one like "--cwd=%s"
-// (needed for `flatpak run`) work. If cwd capture fails (sandboxed client, dead
-// pid), the arg containing "%s" is dropped. Apps without a matching entry fall
-// back to running their `app_id` as the executable.
+// Relaunching is generic — no per-app table needed. At save time naru records how to
+// relaunch each window from its process: a flatpak app is remembered by its flatpak
+// id and reopened with `flatpak run <id>`; any other app is reopened by exec'ing its
+// binary. Either way the process is started in the window's saved working directory,
+// so e.g. a terminal comes back in the right folder without any `--workdir` flag.
 //
-// cwd-from-child=true: for terminal emulators, the app's own process cwd stays at
-// its launch directory ($HOME) — the directory you actually `cd`'d into lives in
-// the child shell. Set this to read the cwd from the window's foreground child
-// process instead, re-read fresh at save time so a later `cd` is honoured. Leave
-// it off for file managers / editors, whose own process holds the right cwd.
+// `cwd-from-child` lists app-ids whose working directory should be read from their
+// foreground child process instead of the app's own process — terminal emulators keep
+// their own cwd at $HOME while the directory you `cd`'d into lives in the child shell.
+// Common terminals are included by default; values here are ADDED to that list.
 //
-// User-provided launch-command entries fully replace the built-in list — declare
-// every app you care about, including the ones below if you still want them.
+// `launch-command` is an optional override for an app the generic path gets wrong. The
+// argv is used verbatim, with "%s" replaced by the saved cwd (the arg is dropped if no
+// cwd was captured). User entries are additive — they don't wipe any defaults.
 //
 // session-restore {
 //     on
 //     // state-path "/custom/path/to/session.json"
-//     launch-command app-id="org.kde.dolphin" "dolphin" "%s"
-//     launch-command app-id="org.kde.konsole" cwd-from-child=true "konsole" "--workdir" "%s"
-//     // Flatpak browsers: key on the WM-class app_id (`librewolf`, `brave-browser`),
-//     // which is what the toplevel reports — NOT the flatpak id. The command itself
-//     // launches via `flatpak run <flatpak-id>`.
-//     launch-command app-id="librewolf" "flatpak" "run" "io.gitlab.librewolf-community"
-//     launch-command app-id="brave-browser" "flatpak" "run" "com.brave.Browser"
+//     // cwd-from-child "com.mycompany.MyTerminal"
+//     // launch-command app-id="some.app" "some-wrapper" "--cwd" "%s"
 // }
 
 hotkey-overlay {
