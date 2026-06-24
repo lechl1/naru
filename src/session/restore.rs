@@ -95,7 +95,10 @@ pub fn restore_apps(config: &SessionRestore, entries: &[WindowEntry]) {
             "session-restore: spawning {:?} (cwd={:?})",
             argv, entry.cwd
         );
-        crate::utils::spawning::spawn(argv, None);
+        // Spawn in the saved directory so the respawned process's cwd matches the
+        // saved entry — this is what lets `take_pending_for` pin multi-instance
+        // same-app windows (terminals) back to their specific slot by cwd.
+        crate::utils::spawning::spawn_with_cwd(argv, None, entry.cwd.clone());
     }
 }
 

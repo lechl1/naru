@@ -69,6 +69,17 @@ pub struct Mapped {
     /// unreadable, or the resolved path didn't exist on the host.
     session_cwd: Option<PathBuf>,
 
+    /// The `(column_index, tile_index)` this window should occupy when restored from a
+    /// prior session, or `None` for windows that aren't part of a restore.
+    ///
+    /// Set by the map handler when a newly-mapping window matches a saved `Tiled` entry.
+    /// It is the *deterministic* sort key for restore placement: because restored
+    /// clients map in nondeterministic order (a browser is slower to start than a
+    /// terminal), placing each by an absolute saved index races. Instead each window is
+    /// inserted *relative* to the restore positions of the windows already on its
+    /// workspace, so the final left-to-right order is independent of map timing.
+    restore_pos: Option<(usize, usize)>,
+
     /// Pre-commit hook that we have on all mapped toplevel surfaces.
     pre_commit_hook: HookId,
 
@@ -298,6 +309,7 @@ impl Mapped {
             id: MappedId::next(),
             credentials,
             session_cwd,
+            restore_pos: None,
             pre_commit_hook: hook,
             rules,
             need_to_recompute_rules: false,
@@ -406,6 +418,16 @@ impl Mapped {
     /// construction time. See the field doc on `Mapped::session_cwd`.
     pub fn session_cwd(&self) -> Option<&Path> {
         self.session_cwd.as_deref()
+    }
+
+    /// The saved `(column_index, tile_index)` for restore placement, if this window is
+    /// being restored from a prior session. See the field doc on `Mapped::restore_pos`.
+    pub fn restore_pos(&self) -> Option<(usize, usize)> {
+        self.restore_pos
+    }
+
+    pub fn set_restore_pos(&mut self, pos: Option<(usize, usize)>) {
+        self.restore_pos = pos;
     }
 
     pub fn offscreen_data(&self) -> Ref<'_, Option<OffscreenData>> {

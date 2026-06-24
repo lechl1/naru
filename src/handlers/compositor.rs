@@ -234,10 +234,14 @@ impl CompositorHandler for State {
                     // Session-restore: try to match this newly-mapping window
                     // against a saved entry from the prior session.
                     let saved_entry = mapped.app_id().and_then(|id| {
+                        // Match on cwd as well as app_id: the restored process was
+                        // spawned in its saved directory, so its captured cwd identifies
+                        // *which* saved window this is among same-app instances.
+                        let cwd = mapped.session_cwd();
                         self.naru
                             .session_manager
                             .as_mut()
-                            .and_then(|sm| sm.take_pending_for_app(&id))
+                            .and_then(|sm| sm.take_pending_for(&id, cwd))
                     });
 
                     // Capture the saved placement up front: `mapped` is consumed
@@ -259,6 +263,23 @@ impl CompositorHandler for State {
                         mapped.set_open_in_fixed_side(Some(side));
                     }
 
+                    // Tiled restore: tag the window with its saved (column, tile) slot so
+                    // the post-add placement can position it *relative* to the other
+                    // restored windows — deterministic regardless of the order clients
+                    // happen to map in. Also force activation, because the placement uses
+                    // `move_column_to_index`, which acts on the active column.
+                    let activate = if let Some(crate::session::Placement::Tiled {
+                        column_index,
+                        tile_index,
+                        ..
+                    }) = &saved_placement
+                    {
+                        mapped.set_restore_pos(Some((*column_index, *tile_index)));
+                        ActivateWindow::Yes
+                    } else {
+                        activate
+                    };
+
                     // Phase 3.6: route to the saved workspace when we recorded a
                     // named workspace and that name still exists. Per-output
                     // index-only entries are skipped — workspace indices aren't
@@ -272,7 +293,15 @@ impl CompositorHandler for State {
                             .layout
                             .find_workspace_by_name(name)
                             .map(|(_, ws)| ws.id()),
-                        crate::session::WorkspaceRef::Index { .. } => None,
+                        // Index-only entries: route to the workspace at that per-output
+                        // index if it already exists, else fall through to `target`
+                        // (Auto). Index workspaces are not materialised on demand — see
+                        // `existing_workspace_id_at`; name a workspace for reliable
+                        // cross-restart pinning.
+                        crate::session::WorkspaceRef::Index { index } => self
+                            .naru
+                            .layout
+                            .existing_workspace_id_at(e.output.as_deref(), *index),
                     }) {
                         Some(ws_id) => AddWindowTarget::Workspace(ws_id),
                         None => target,
@@ -302,23 +331,37 @@ impl CompositorHandler for State {
                     match &saved_placement {
                         Some(crate::session::Placement::Tiled {
                             column_index,
+                            tile_index,
                             width,
                             height,
                             ..
                         }) => {
-                            // Column-index move is best-effort: `move_column_to_index`
-                            // acts on the focused column, so gate on `ActivateWindow::Yes`
-                            // to avoid moving an unrelated column when the new window
-                            // doesn't take focus. An out-of-bounds index is clamped.
+                            // Deterministic relative placement: count the restored
+                            // windows already on this window's workspace whose saved
+                            // (column, tile) sorts before ours, and move our column to
+                            // that 1-based slot. This is independent of the order clients
+                            // map in — an *absolute* saved index races, because a window
+                            // saved at column 5 can't land there until the earlier
+                            // columns exist (it would clamp to the rightmost slot and the
+                            // final order would reflect launch timing, not the layout).
                             //
-                            // `move_column_to_index` is 1-based (index 1 == first
-                            // column), but the saved `column_index` is 0-based, so
-                            // convert. Without the `+ 1`, every window restored one
-                            // column too far left (and columns 0 and 1 collapsed
-                            // onto the same slot).
-                            if matches!(activate, crate::layout::ActivateWindow::Yes) {
-                                self.naru.layout.move_column_to_index(*column_index + 1);
-                            }
+                            // `activate` was forced to `Yes` above for tiled restores, so
+                            // `move_column_to_index` (which acts on the active column)
+                            // targets the just-added window. Our own window carries the
+                            // same `restore_pos` but sorts equal, not before, so it is
+                            // never counted.
+                            let key = (*column_index, *tile_index);
+                            let before = output
+                                .as_ref()
+                                .and_then(|out| self.naru.layout.monitor_for_output(out))
+                                .map(|mon| {
+                                    mon.active_workspace_ref()
+                                        .windows()
+                                        .filter(|w| w.restore_pos().is_some_and(|p| p < key))
+                                        .count()
+                                })
+                                .unwrap_or(0);
+                            self.naru.layout.move_column_to_index(before + 1);
                             self.restore_window_size(&window, *width, *height);
                         }
                         Some(crate::session::Placement::SidePanel { width, height, .. }) => {

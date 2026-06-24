@@ -1712,6 +1712,36 @@ impl<W: LayoutElement> Layout<W> {
         Some(&mut mon.workspaces[mon.active_workspace_idx])
     }
 
+    /// Resolve a saved per-output workspace `index` (0-based) to an existing
+    /// workspace's id, for session restore.
+    ///
+    /// `output_name` is the saved connector (e.g. `"DP-1"`); when it matches a current
+    /// monitor the lookup is scoped to that monitor, otherwise it falls back to the
+    /// active monitor. Returns `None` when no workspace exists at that index — the
+    /// caller then falls back to `Auto` rather than inventing one, because this
+    /// compositor's workspaces are dynamic: empty middle workspaces are compacted away,
+    /// so a freshly-created index-2 placeholder wouldn't survive long enough to be a
+    /// stable restore target. Named workspaces are the reliable way to pin a window to
+    /// a specific workspace across restarts.
+    pub fn existing_workspace_id_at(
+        &self,
+        output_name: Option<&str>,
+        index: usize,
+    ) -> Option<WorkspaceId> {
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &self.monitor_set
+        else {
+            return None;
+        };
+        let mon = output_name
+            .and_then(|name| monitors.iter().find(|m| m.output_name().as_str() == name))
+            .unwrap_or(&monitors[*active_monitor_idx]);
+        mon.workspaces.get(index).map(|ws| ws.id())
+    }
+
     pub fn windows_for_output(&self, output: &Output) -> impl Iterator<Item = &W> + '_ {
         let MonitorSet::Normal { monitors, .. } = &self.monitor_set else {
             panic!()

@@ -7,7 +7,7 @@
 //! hangs off the `pending_save_token` field; until then the field stays `None`.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use naru_config::SessionRestore;
@@ -64,8 +64,8 @@ pub struct SessionManager {
 
     /// Saved-window entries from the prior session, awaiting their respawned
     /// counterparts to map. Loaded once at construction; entries are popped via
-    /// [`SessionManager::take_pending_for_app`] when a new mapped window's `app_id`
-    /// matches the front entry for that app.
+    /// [`SessionManager::take_pending_for`] when a new mapped window matches a saved
+    /// entry by `app_id` (and cwd when available).
     ///
     /// Multi-instance match is FIFO over saved-order — the i-th map of `app_id` X
     /// gets paired with the i-th saved entry of `app_id` X. Documented since Phase 2a;
@@ -168,12 +168,29 @@ impl SessionManager {
         }
     }
 
-    /// Pop the front pending entry whose `app_id` matches.
+    /// Pop the pending entry for a newly-mapped window, matching on `app_id` and, when
+    /// possible, `cwd`.
     ///
-    /// "Front" = saved-order — the i-th window of a given app to map after restart
-    /// is paired with the i-th saved entry of that app. Returns `None` if no entry
-    /// matches; callers should treat that as "this is a new window, not a restore."
-    pub fn take_pending_for_app(&mut self, app_id: &str) -> Option<WindowEntry> {
+    /// A restored process is spawned in its saved directory (see
+    /// [`crate::session::restore`]), so a multi-instance app like a terminal carries a
+    /// distinct cwd per window. Preferring an exact `(app_id, cwd)` match pins each
+    /// window back to *its* saved slot regardless of the order clients happen to map
+    /// in — without it, the i-th window to map would grab the i-th saved entry (FIFO),
+    /// shuffling which terminal lands in which column when load times vary.
+    ///
+    /// Falls back to the first `app_id` match (FIFO) when the window has no cwd, or
+    /// none of the remaining entries share it — e.g. single-instance apps whose windows
+    /// all report one process cwd. Returns `None` if no entry matches at all.
+    pub fn take_pending_for(&mut self, app_id: &str, cwd: Option<&Path>) -> Option<WindowEntry> {
+        if let Some(cwd) = cwd {
+            if let Some(pos) = self
+                .pending_restore
+                .iter()
+                .position(|e| e.app_id == app_id && e.cwd.as_deref() == Some(cwd))
+            {
+                return self.pending_restore.remove(pos);
+            }
+        }
         let pos = self
             .pending_restore
             .iter()

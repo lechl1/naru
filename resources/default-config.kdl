@@ -323,9 +323,11 @@ spawn-at-startup "waybar"
 //     // state-path "/custom/path/to/session.json"
 //     launch-command app-id="org.kde.dolphin" "dolphin" "%s"
 //     launch-command app-id="org.kde.konsole" cwd-from-child=true "konsole" "--workdir" "%s"
-//     // Flatpak apps: use `flatpak run --cwd=DIR` to open in the saved directory.
-//     launch-command app-id="io.gitlab.librewolf-community" "flatpak" "run" "--cwd=%s" "io.gitlab.librewolf-community"
-//     launch-command app-id="com.brave.Browser" "flatpak" "run" "--cwd=%s" "com.brave.Browser"
+//     // Flatpak browsers: key on the WM-class app_id (`librewolf`, `brave-browser`),
+//     // which is what the toplevel reports — NOT the flatpak id. The command itself
+//     // launches via `flatpak run <flatpak-id>`.
+//     launch-command app-id="librewolf" "flatpak" "run" "io.gitlab.librewolf-community"
+//     launch-command app-id="brave-browser" "flatpak" "run" "com.brave.Browser"
 // }
 
 hotkey-overlay {

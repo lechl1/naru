@@ -2606,6 +2606,24 @@ mod tests {
                         ],
                         cwd_from_child: true,
                     },
+                    LaunchCommand {
+                        app_id: "librewolf",
+                        command: [
+                            "flatpak",
+                            "run",
+                            "io.gitlab.librewolf-community",
+                        ],
+                        cwd_from_child: false,
+                    },
+                    LaunchCommand {
+                        app_id: "brave-browser",
+                        command: [
+                            "flatpak",
+                            "run",
+                            "com.brave.Browser",
+                        ],
+                        cwd_from_child: false,
+                    },
                 ],
             },
         }

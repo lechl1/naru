@@ -77,6 +77,29 @@ fn builtin_launch_commands() -> Vec<LaunchCommand> {
             // directory is the child shell's. Descend to it and re-read at save time.
             cwd_from_child: true,
         },
+        // Flatpak browsers: the toplevel xdg app_id is the app's WM class
+        // (`librewolf`, `brave-browser`), NOT the flatpak id — so the launch-command
+        // must be keyed on the WM class while the *command* uses `flatpak run <id>`.
+        // Without an entry, restore falls back to exec'ing the bare app_id, which is
+        // not a real binary, and the window silently never comes back.
+        LaunchCommand {
+            app_id: "librewolf".into(),
+            command: vec![
+                "flatpak".into(),
+                "run".into(),
+                "io.gitlab.librewolf-community".into(),
+            ],
+            cwd_from_child: false,
+        },
+        LaunchCommand {
+            app_id: "brave-browser".into(),
+            command: vec![
+                "flatpak".into(),
+                "run".into(),
+                "com.brave.Browser".into(),
+            ],
+            cwd_from_child: false,
+        },
     ]
 }
 

@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
@@ -93,10 +93,51 @@ pub fn spawn_sh(command: String, token: Option<XdgActivationToken>) {
     spawn(vec![String::from("sh"), String::from("-c"), command], token);
 }
 
+/// Like [`spawn`], but runs the child with `cwd` as its working directory.
+///
+/// Used by session restore so a respawned window's process cwd matches the directory
+/// it was saved in. That makes the captured `session_cwd` line up with the saved
+/// entry, which lets multiple instances of the same app (e.g. terminals) be matched
+/// back to their specific saved slot by cwd rather than by map order. A `None` cwd, or
+/// one that no longer exists, falls back to inheriting the compositor's cwd.
+pub fn spawn_with_cwd<T: AsRef<OsStr> + Send + 'static>(
+    command: Vec<T>,
+    token: Option<XdgActivationToken>,
+    cwd: Option<PathBuf>,
+) {
+    let _span = tracy_client::span!();
+
+    if command.is_empty() {
+        return;
+    }
+
+    let cwd = cwd.filter(|p| p.is_dir());
+
+    let res = thread::Builder::new()
+        .name("Command Spawner".to_owned())
+        .spawn(move || {
+            let (command, args) = command.split_first().unwrap();
+            spawn_sync_inner(command, args, token, cwd.as_deref());
+        });
+
+    if let Err(err) = res {
+        warn!("error spawning a thread to spawn the command: {err:?}");
+    }
+}
+
 fn spawn_sync(
     command: impl AsRef<OsStr>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     token: Option<XdgActivationToken>,
+) {
+    spawn_sync_inner(command, args, token, None);
+}
+
+fn spawn_sync_inner(
+    command: impl AsRef<OsStr>,
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    token: Option<XdgActivationToken>,
+    cwd: Option<&Path>,
 ) {
     let _span = tracy_client::span!();
 
@@ -118,6 +159,12 @@ fn spawn_sync(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+
+    // Session restore: run the child in its saved directory (validated to exist by the
+    // caller) so its captured cwd matches the saved entry for slot matching.
+    if let Some(cwd) = cwd {
+        process.current_dir(cwd);
+    }
 
     // Remove RUST_BACKTRACE and RUST_LIB_BACKTRACE from the environment if needed.
     if REMOVE_ENV_RUST_BACKTRACE.load(Ordering::Relaxed) {
