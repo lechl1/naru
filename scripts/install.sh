@@ -91,6 +91,29 @@ if [[ -n "$TARGET_HOME" ]] && command -v plasma-apply-lookandfeel >/dev/null 2>&
     fi
 fi
 
+# Install the helpers the default config's media keys depend on. The binds use
+# swayosd-client (volume/brightness OSD, started via `spawn-at-startup
+# "swayosd-server"`) and playerctl (play/pause/next/prev over MPRIS). Without these
+# the XF86Audio* keys silently do nothing — swayosd-client just errors out that the
+# server name isn't on the bus. Only install what's missing, and only via apt.
+if command -v apt-get >/dev/null 2>&1; then
+    media_pkgs=()
+    command -v swayosd-server >/dev/null 2>&1 || media_pkgs+=(swayosd)
+    command -v playerctl     >/dev/null 2>&1 || media_pkgs+=(playerctl)
+    if [[ ${#media_pkgs[@]} -gt 0 ]]; then
+        echo "Installing media-key helpers: ${media_pkgs[*]}"
+        apt-get update -y
+        # Don't abort the whole install if one package isn't in the user's repos
+        # (e.g. swayosd is only packaged on newer Ubuntu) — warn and continue.
+        apt-get install -y "${media_pkgs[@]}" \
+            || echo "WARNING: could not install ${media_pkgs[*]}; media keys may not work until installed." >&2
+    else
+        echo "Media-key helpers (swayosd, playerctl) already present."
+    fi
+else
+    echo "WARNING: apt-get unavailable; install swayosd + playerctl manually for media keys." >&2
+fi
+
 # Default to SDDM as the display manager — but ONLY if none is configured.
 # naru is just a Wayland session; if you already log in via GDM, LightDM,
 # etc., that's left untouched. We only step in when no display manager is
