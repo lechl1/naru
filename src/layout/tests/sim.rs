@@ -1611,6 +1611,64 @@ mod tests {
         );
     }
 
+    /// A mouse-driven interactive resize must track the cursor even when the
+    /// disable-carousel fit has shrunk the columns below natural width. The
+    /// rendered width is `natural × fit_scale`, but the resize sets the *natural*
+    /// width; if the cursor delta isn't converted back out of `fit_scale`, the
+    /// first motion gets re-scaled and the window snaps to a smaller fixed width
+    /// instead of growing. Regression test for that snap.
+    #[test]
+    fn disable_carousel_interactive_resize_tracks_cursor() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // Two very wide columns overflow, so the shared fit factor shrinks both
+        // well below their natural width (fit_scale < 1) — the regime where the
+        // bug bites.
+        let _a = sim.add_window();
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(80.0)));
+        let b = sim.add_window(); // active, rightmost
+        sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(80.0)));
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let before = sim.window_geometry(&b).expect("b geo").size.w;
+
+        // Drag the right edge 150px to the right.
+        let dx = 150.0;
+        sim.apply(Op::InteractiveResizeBegin {
+            window: b,
+            edges: crate::layout::ResizeEdge::RIGHT,
+        });
+        sim.apply(Op::InteractiveResizeUpdate {
+            window: b,
+            dx,
+            dy: 0.0,
+        });
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let after = sim.window_geometry(&b).expect("b geo").size.w;
+
+        // The window must grow by roughly the cursor delta, not snap to a
+        // smaller scaled width.
+        assert!(
+            after > before,
+            "interactive resize must grow the window, not snap it smaller: {before} -> {after}",
+        );
+        assert!(
+            (after - (before + dx)).abs() < 5.0,
+            "interactive resize must track the cursor (~{}), got {after} (from {before})",
+            before + dx,
+        );
+
+        sim.apply(Op::InteractiveResizeEnd { window: b });
+    }
+
     /// A populated fixed-side panel shrinks the carousel's usable width; the
     /// remaining columns must re-fit into that smaller area so nothing overlaps
     /// the panel. The fixed-side panels are not part of the carousel, and all

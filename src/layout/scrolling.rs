@@ -4442,13 +4442,22 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return false;
         }
 
+        // In disable-carousel mode the rendered tile width is the *natural*
+        // column width times `fit_scale`, while the update path sets the natural
+        // width via `set_column_width(SetFixed(..))`. Capture the natural window
+        // width as the resize base so feeding it straight back is a no-op at zero
+        // delta. Capturing the scaled `window_size()` instead would be re-scaled
+        // on the first motion and snap the window to a smaller fixed width.
+        let natural_col_width = col.natural_width();
+
         let tile = col
             .tiles
             .iter_mut()
             .find(|tile| tile.window().id() == &window)
             .unwrap();
 
-        let original_window_size = tile.window_size();
+        let mut original_window_size = tile.window_size();
+        original_window_size.w = tile.window_width_for_tile_width(natural_col_width);
 
         let resize = InteractiveResize {
             window,
@@ -4497,6 +4506,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
             if is_centering {
                 dx *= 2.;
+            }
+
+            // The cursor delta is in rendered (post-`fit_scale`) space; convert it
+            // back to natural width so the SetFixed below — which sets the natural
+            // column width — tracks the cursor instead of being re-scaled by the
+            // disable-carousel fit. `fit_scale` is 1.0 in every other mode.
+            let fit_scale = col.fit_scale;
+            if fit_scale > 0.0 {
+                dx /= fit_scale;
             }
 
             let window_width = (resize.original_window_size.w + dx).round() as i32;
