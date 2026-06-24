@@ -2252,6 +2252,14 @@ impl Naru {
     /// before it can fire — so without this the last up-to-1 s of layout changes
     /// (and, after a quiet session, potentially the whole arrangement) would
     /// never reach disk. No-op when session-restore is disabled.
+    ///
+    /// This is also the save that captures a terminal's *final* working directory:
+    /// a bare `cd` triggers no layout mutation and therefore no debounced save, so
+    /// the cwd persisted during the session can lag behind reality. `build_from_naru`
+    /// re-reads `cwd-from-child` apps' live cwd here (see `snapshot::resolve_cwd`), and
+    /// because this runs the instant the loop exits — before the process tears down and
+    /// the Wayland sockets close — the client processes and their child shells are still
+    /// alive, so `/proc/<pid>/cwd` is readable.
     pub fn save_session_now(&self) {
         let Some(sm) = self.session_manager.as_ref() else {
             return;
@@ -2556,6 +2564,9 @@ impl Naru {
                 sm.pending_restore.len(),
                 sm.state_path.display(),
             );
+            // Recurring safety-net save: persists cwd changes (terminal `cd`s) that
+            // trigger no layout mutation, so they survive an unclean shutdown.
+            crate::session::SessionManager::schedule_periodic_saves(&event_loop);
         } else {
             debug!("session-restore: disabled (no session manager)");
         }

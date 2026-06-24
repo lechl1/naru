@@ -15,7 +15,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 
 use super::snapshot::build_from_naru;
-use super::state::WindowEntry;
+use super::state::{SessionState, WindowEntry};
 use super::storage::{default_state_path, load, save_atomic};
 
 /// Debounce window: delay between the last `mark_dirty` call and the actual save.
@@ -25,6 +25,17 @@ use super::storage::{default_state_path, load, save_atomic};
 /// behind reality. One second is the same window IPC clients expect for similar
 /// "settled state" reads.
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
+
+/// Interval for the unconditional periodic save.
+///
+/// The debounced save only fires on layout *mutations*; a terminal's working
+/// directory changes when the user `cd`s, which is invisible to the layout and so
+/// never marks the state dirty. Without a periodic re-snapshot, that updated cwd
+/// would only reach disk on a clean shutdown — lost entirely on a crash or power
+/// loss. This timer rebuilds the snapshot every minute (re-reading `cwd-from-child`
+/// apps' live cwd) and writes only when the result differs from the last save, so an
+/// idle session does no disk I/O.
+const PERIODIC_SAVE: Duration = Duration::from_secs(60);
 
 /// Per-process runtime state for session-restore.
 ///
@@ -60,6 +71,13 @@ pub struct SessionManager {
     /// gets paired with the i-th saved entry of `app_id` X. Documented since Phase 2a;
     /// formalized here.
     pub pending_restore: VecDeque<WindowEntry>,
+
+    /// The snapshot most recently written to disk, used to skip redundant writes.
+    ///
+    /// The periodic timer rebuilds the snapshot every [`PERIODIC_SAVE`]; comparing
+    /// against this lets an idle (or layout-stable, cwd-stable) session avoid an
+    /// fsync every minute. `None` until the first successful save.
+    last_saved: Option<SessionState>,
 }
 
 impl SessionManager {
@@ -101,7 +119,53 @@ impl SessionManager {
             dirty: false,
             pending_save_token: None,
             pending_restore,
+            last_saved: None,
         })
+    }
+
+    /// Register the recurring [`PERIODIC_SAVE`] timer on the event loop.
+    ///
+    /// Call once, after the manager is installed on `Naru`. The timer reschedules
+    /// itself on every fire and fetches the live manager from `State` each time, so it
+    /// keeps working across config reloads as long as a manager is present. When
+    /// session-restore is disabled there is no manager and this is never called.
+    pub fn schedule_periodic_saves(loop_handle: &LoopHandle<'static, crate::naru::State>) {
+        let timer = Timer::from_duration(PERIODIC_SAVE);
+        let res = loop_handle.insert_source(timer, |_deadline, _, state| {
+            // Build the snapshot under a read-only borrow before reaching for the
+            // manager's mutable bits, mirroring the debounced-save callback.
+            let snapshot = build_from_naru(&state.naru);
+            if let Some(sm) = state.naru.session_manager.as_mut() {
+                sm.persist_if_changed(snapshot);
+            }
+            TimeoutAction::ToDuration(PERIODIC_SAVE)
+        });
+        if let Err(e) = res {
+            warn!("session-restore: scheduling periodic save timer failed: {e}");
+        }
+    }
+
+    /// Write `snapshot` iff it differs from the last successfully saved state.
+    ///
+    /// Updates the [`Self::last_saved`] change-detection cache and clears the dirty
+    /// flag on a successful write. Returns whether a write actually happened. Save
+    /// errors are logged, not propagated — a failed save must never crash the
+    /// compositor.
+    fn persist_if_changed(&mut self, snapshot: SessionState) -> bool {
+        if self.last_saved.as_ref() == Some(&snapshot) {
+            return false;
+        }
+        match save_atomic(&self.state_path, &snapshot) {
+            Ok(()) => {
+                self.last_saved = Some(snapshot);
+                self.dirty = false;
+                true
+            }
+            Err(e) => {
+                warn!("session-restore: save failed: {e:#}");
+                false
+            }
+        }
     }
 
     /// Pop the front pending entry whose `app_id` matches.
@@ -150,9 +214,7 @@ impl SessionManager {
                 if let Some(sm) = state.naru.session_manager.as_mut() {
                     sm.pending_save_token = None;
                     if sm.take_dirty() {
-                        if let Err(e) = save_atomic(&sm.state_path, &snapshot) {
-                            warn!("session-restore: save failed: {e:#}");
-                        }
+                        sm.persist_if_changed(snapshot);
                     }
                 }
 
@@ -219,6 +281,59 @@ mod tests {
             "state_path {} should end with naru/session.json",
             m.state_path.display(),
         );
+    }
+
+    #[test]
+    fn persist_if_changed_skips_redundant_writes() {
+        use crate::session::state::{Placement, SessionState, WorkspaceRef, SCHEMA_VERSION};
+
+        let path = std::env::temp_dir().join(format!(
+            "naru-persist-test-{}.json",
+            std::process::id()
+        ));
+        let c = cfg(false, path.to_str());
+        let mut m = SessionManager::new(&c).expect("manager");
+
+        let empty = SessionState {
+            version: SCHEMA_VERSION,
+            windows: vec![],
+        };
+        // First write goes through; an identical follow-up is skipped.
+        assert!(m.persist_if_changed(empty.clone()), "first write happens");
+        assert!(
+            !m.persist_if_changed(empty.clone()),
+            "identical snapshot must not rewrite"
+        );
+
+        // A materially different snapshot (one window) writes again.
+        let with_window = SessionState {
+            version: SCHEMA_VERSION,
+            windows: vec![WindowEntry {
+                app_id: "org.kde.konsole".into(),
+                title: None,
+                cwd: Some(PathBuf::from("/home/leo/work")),
+                output: None,
+                workspace: WorkspaceRef::Index { index: 0 },
+                placement: Placement::Tiled {
+                    column_index: 0,
+                    tile_index: 0,
+                    width: 0.0,
+                    height: 0.0,
+                    is_fullscreen: false,
+                    is_maximized: false,
+                },
+            }],
+        };
+        assert!(
+            m.persist_if_changed(with_window.clone()),
+            "changed snapshot writes"
+        );
+        assert!(
+            !m.persist_if_changed(with_window),
+            "same changed snapshot is then skipped"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
