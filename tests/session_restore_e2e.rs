@@ -47,10 +47,12 @@ fn config_with_builtins() -> SessionRestore {
             LaunchCommand {
                 app_id: "org.kde.dolphin".into(),
                 command: vec!["dolphin".into(), "%s".into()],
+                cwd_from_child: false,
             },
             LaunchCommand {
                 app_id: "org.kde.konsole".into(),
                 command: vec!["konsole".into(), "--workdir".into(), "%s".into()],
+                cwd_from_child: true,
             },
         ],
     }

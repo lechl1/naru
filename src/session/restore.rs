@@ -139,6 +139,7 @@ mod tests {
         let c = cfg(vec![LaunchCommand {
             app_id: "org.kde.konsole".into(),
             command: vec!["konsole".into(), "--workdir".into(), "%s".into()],
+            cwd_from_child: true,
         }]);
         let e = entry_with_cwd("org.kde.konsole", Some("/home/leo/work"));
         assert_eq!(
@@ -152,6 +153,7 @@ mod tests {
         let c = cfg(vec![LaunchCommand {
             app_id: "org.kde.dolphin".into(),
             command: vec!["dolphin".into(), "%s".into()],
+            cwd_from_child: false,
         }]);
         let e = entry_with_cwd("org.kde.dolphin", None);
         // %s vanishes when cwd is None, leaving just the executable.
@@ -173,6 +175,7 @@ mod tests {
         let c = cfg(vec![LaunchCommand {
             app_id: "x".into(),
             command: vec!["x".into(), "%s".into(), "--cwd".into(), "%s".into()],
+            cwd_from_child: false,
         }]);
         let e = entry_with_cwd("x", Some("/p"));
         assert_eq!(resolve_launch_argv(&e, &c), vec!["x", "/p", "--cwd", "/p"]);
@@ -189,6 +192,7 @@ mod tests {
                 "--cwd=%s".into(),
                 "com.brave.Browser".into(),
             ],
+            cwd_from_child: false,
         }]);
         let e = entry_with_cwd("com.brave.Browser", Some("/home/leo/dl"));
         assert_eq!(
@@ -207,6 +211,7 @@ mod tests {
                 "--cwd=%s".into(),
                 "com.brave.Browser".into(),
             ],
+            cwd_from_child: false,
         }]);
         let e = entry_with_cwd("com.brave.Browser", None);
         // The whole `--cwd=%s` arg vanishes, leaving a valid bare launch.
@@ -221,6 +226,7 @@ mod tests {
         let c = cfg(vec![LaunchCommand {
             app_id: "x".into(),
             command: vec!["x".into(), "--flag".into(), "value".into()],
+            cwd_from_child: false,
         }]);
         let e = entry_with_cwd("x", None);
         assert_eq!(resolve_launch_argv(&e, &c), vec!["x", "--flag", "value"]);

@@ -309,6 +309,12 @@ spawn-at-startup "waybar"
 // pid), the arg containing "%s" is dropped. Apps without a matching entry fall
 // back to running their `app_id` as the executable.
 //
+// cwd-from-child=true: for terminal emulators, the app's own process cwd stays at
+// its launch directory ($HOME) — the directory you actually `cd`'d into lives in
+// the child shell. Set this to read the cwd from the window's foreground child
+// process instead, re-read fresh at save time so a later `cd` is honoured. Leave
+// it off for file managers / editors, whose own process holds the right cwd.
+//
 // User-provided launch-command entries fully replace the built-in list — declare
 // every app you care about, including the ones below if you still want them.
 //
@@ -316,7 +322,7 @@ spawn-at-startup "waybar"
 //     on
 //     // state-path "/custom/path/to/session.json"
 //     launch-command app-id="org.kde.dolphin" "dolphin" "%s"
-//     launch-command app-id="org.kde.konsole" "konsole" "--workdir" "%s"
+//     launch-command app-id="org.kde.konsole" cwd-from-child=true "konsole" "--workdir" "%s"
 //     // Flatpak apps: use `flatpak run --cwd=DIR` to open in the saved directory.
 //     launch-command app-id="io.gitlab.librewolf-community" "flatpak" "run" "--cwd=%s" "io.gitlab.librewolf-community"
 //     launch-command app-id="com.brave.Browser" "flatpak" "run" "--cwd=%s" "com.brave.Browser"

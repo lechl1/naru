@@ -16,8 +16,10 @@
 //! - **title**: not captured in this phase. The IPC's per-window title is informational,
 //!   and adding the lookup here would require borrowing into XDG toplevel state which
 //!   the snapshot's read-only path shouldn't do.
-//! - **cwd**: read from the cached `Mapped::session_cwd` (captured at construction in
-//!   Phase 2c.1; never re-read).
+//! - **cwd**: by default the cached `Mapped::session_cwd` (captured at construction —
+//!   the directory the window was opened in). For app_ids whose launch-command has
+//!   `cwd-from-child` set (terminals), [`resolve_cwd`] instead re-reads the foreground
+//!   child shell's cwd fresh here at save time, so a later `cd` is persisted.
 //! - **output**: connector name, e.g. `"DP-1"`, from `Monitor::output_name`. `None` for
 //!   windows in the no-outputs stash.
 //! - **workspace**: prefers the user-set name; falls back to the per-monitor index.
@@ -30,6 +32,8 @@
 
 use std::path::PathBuf;
 
+use naru_config::SessionRestore;
+
 use crate::layout::fixed_strip::FixedSide;
 use crate::layout::workspace::Workspace as LayoutWorkspace;
 use crate::layout::LayoutElement;
@@ -41,6 +45,9 @@ use crate::window::Mapped;
 
 pub fn build_from_naru(naru: &Naru) -> SessionState {
     let mut windows = Vec::new();
+
+    let config = naru.config.borrow();
+    let session_restore = &config.session_restore;
 
     for (mon, ws_idx, ws) in naru.layout.workspaces() {
         let output = mon.map(|m| m.output_name().clone());
@@ -58,9 +65,9 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
             let placement = placement_from_ipc_layout(&layout, w, h);
 
             windows.push(WindowEntry {
-                app_id,
+                app_id: app_id.clone(),
                 title: None,
-                cwd: mapped.session_cwd().map(PathBuf::from),
+                cwd: resolve_cwd(mapped, &app_id, session_restore),
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement,
@@ -77,9 +84,9 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
 
             let (w, h) = window_size(mapped);
             windows.push(WindowEntry {
-                app_id,
+                app_id: app_id.clone(),
                 title: None,
-                cwd: mapped.session_cwd().map(PathBuf::from),
+                cwd: resolve_cwd(mapped, &app_id, session_restore),
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement: Placement::SidePanel {
@@ -97,6 +104,32 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
         version: SCHEMA_VERSION,
         windows,
     }
+}
+
+/// Resolve the working directory to persist for a window.
+///
+/// Default: the cwd captured once at window-map time (`Mapped::session_cwd`), i.e. the
+/// directory the window was *opened in*.
+///
+/// When the window's `app_id` has a launch-command with `cwd-from-child` set (terminals),
+/// the meaningful cwd lives in the foreground child shell and changes as the user `cd`s,
+/// so it is re-read **fresh here at save time** by descending the client's process tree
+/// via [`read_cwd_from_child`]. If that descent yields nothing (no live child, sandboxed
+/// `/proc`, etc.) we fall back to the map-time capture rather than dropping the cwd.
+fn resolve_cwd(mapped: &Mapped, app_id: &str, sr: &SessionRestore) -> Option<PathBuf> {
+    let from_child = sr
+        .launch_command_for(app_id)
+        .is_some_and(|lc| lc.cwd_from_child);
+
+    if from_child {
+        if let Some(pid) = mapped.credentials().map(|c| c.pid) {
+            if let Some(cwd) = crate::session::read_cwd_from_child(pid) {
+                return Some(cwd);
+            }
+        }
+    }
+
+    mapped.session_cwd().map(PathBuf::from)
 }
 
 /// The window's current logical size, as `(width, height)` floats.

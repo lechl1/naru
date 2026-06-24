@@ -2595,6 +2595,7 @@ mod tests {
                             "dolphin",
                             "%s",
                         ],
+                        cwd_from_child: false,
                     },
                     LaunchCommand {
                         app_id: "org.kde.konsole",
@@ -2603,6 +2604,7 @@ mod tests {
                             "--workdir",
                             "%s",
                         ],
+                        cwd_from_child: true,
                     },
                 ],
             },

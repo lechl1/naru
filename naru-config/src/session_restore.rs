@@ -36,6 +36,17 @@ pub struct SessionRestore {
 pub struct LaunchCommand {
     pub app_id: String,
     pub command: Vec<String>,
+    /// Read the captured working directory from the window's foreground **child**
+    /// process rather than the client process itself.
+    ///
+    /// Terminal emulators (konsole, etc.) keep their own process cwd at wherever they
+    /// were launched (typically `$HOME`); the directory the user actually navigated to
+    /// lives in the child shell. With this set, the cwd is resolved by descending into
+    /// the client's process tree and read **fresh at save time** (so a later `cd` is
+    /// honoured), instead of being captured once at window-map time. Apps where the
+    /// client process holds the meaningful cwd (file managers, editors) should leave
+    /// this off.
+    pub cwd_from_child: bool,
 }
 
 impl Default for SessionRestore {
@@ -57,10 +68,14 @@ fn builtin_launch_commands() -> Vec<LaunchCommand> {
         LaunchCommand {
             app_id: "org.kde.dolphin".into(),
             command: vec!["dolphin".into(), "%s".into()],
+            cwd_from_child: false,
         },
         LaunchCommand {
             app_id: "org.kde.konsole".into(),
             command: vec!["konsole".into(), "--workdir".into(), "%s".into()],
+            // konsole's own process cwd stays at its launch dir; the live working
+            // directory is the child shell's. Descend to it and re-read at save time.
+            cwd_from_child: true,
         },
     ]
 }
@@ -81,6 +96,8 @@ pub struct SessionRestorePart {
 pub struct LaunchCommandPart {
     #[knuffel(property(name = "app-id"))]
     pub app_id: String,
+    #[knuffel(property(name = "cwd-from-child"), default)]
+    pub cwd_from_child: bool,
     #[knuffel(arguments)]
     pub command: Vec<String>,
 }
@@ -104,6 +121,7 @@ impl MergeWith<SessionRestorePart> for SessionRestore {
                 .map(|p| LaunchCommand {
                     app_id: p.app_id.clone(),
                     command: p.command.clone(),
+                    cwd_from_child: p.cwd_from_child,
                 })
                 .collect();
         }
@@ -142,6 +160,7 @@ mod tests {
             state_path: None,
             launch_commands: vec![LaunchCommandPart {
                 app_id: "firefox".into(),
+                cwd_from_child: false,
                 command: vec!["firefox".into(), "--new-window".into()],
             }],
         };

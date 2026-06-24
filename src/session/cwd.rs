@@ -57,6 +57,56 @@ pub fn read_cwd_for_pid(pid: i32) -> Option<PathBuf> {
     Some(target)
 }
 
+/// Maximum depth to descend when walking a client's process tree looking for the
+/// foreground child whose cwd is meaningful. Terminals are usually one level deep
+/// (konsole → shell); a small cap keeps a pathological `fork()` chain bounded.
+const MAX_CHILD_DEPTH: usize = 8;
+
+/// Read the working directory of a window's foreground **child** process.
+///
+/// Terminal emulators keep their own process cwd at the launch directory; the shell
+/// running inside the window is a child process, and *its* cwd is the directory the
+/// user navigated to. This descends the process tree starting at `pid` — following the
+/// most recently spawned child at each level (the closest approximation to "foreground"
+/// available without the pty's foreground process group) — and returns the cwd of the
+/// deepest descendant whose cwd is readable and valid per [`read_cwd_for_pid`].
+///
+/// Falls back to walking back up the chain (and finally `pid` itself) if a deeper
+/// descendant's cwd can't be read, so a terminal with no live shell still yields
+/// *some* directory rather than `None`.
+pub fn read_cwd_from_child(pid: i32) -> Option<PathBuf> {
+    let chain = descendant_chain(pid);
+    // Deepest-first: prefer the shell/editor over the terminal wrapper, but tolerate a
+    // dead leaf by falling back up the chain.
+    chain.iter().rev().find_map(|&p| read_cwd_for_pid(p))
+}
+
+/// Build the descent chain `[pid, child, grandchild, ...]`, following the last-listed
+/// (most recently spawned) child at each level up to [`MAX_CHILD_DEPTH`].
+fn descendant_chain(pid: i32) -> Vec<i32> {
+    let mut chain = vec![pid];
+    let mut current = pid;
+    for _ in 0..MAX_CHILD_DEPTH {
+        match last_child_of(current) {
+            Some(child) => {
+                chain.push(child);
+                current = child;
+            }
+            None => break,
+        }
+    }
+    chain
+}
+
+/// Read the last entry of `/proc/<pid>/task/<pid>/children` (the kernel's per-task
+/// children list, space-separated pids). Returns `None` if the file is absent
+/// (kernel without `CONFIG_PROC_CHILDREN`), unreadable, or empty.
+fn last_child_of(pid: i32) -> Option<i32> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    let contents = fs::read_to_string(&path).ok()?;
+    contents.split_whitespace().last()?.parse().ok()
+}
+
 /// Read the working directory of the client backing a Wayland surface.
 ///
 /// Composes [`get_credentials_for_surface`] (which exposes the connecting client's
@@ -97,5 +147,55 @@ mod tests {
         let pid = i32::try_from(me).unwrap();
         let cwd = read_cwd_for_pid(pid).expect("self cwd should be readable");
         assert!(cwd.is_absolute());
+    }
+
+    #[test]
+    fn child_descent_leafless_falls_back_to_self() {
+        // The test process may or may not have live children (the test harness can
+        // spawn threads but not necessarily child *processes*). Either way, descending
+        // must yield an absolute path — at worst our own cwd via the chain's root.
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let cwd = read_cwd_from_child(pid).expect("descent should fall back to self cwd");
+        assert!(cwd.is_absolute());
+    }
+
+    #[test]
+    fn child_descent_finds_real_child_cwd() {
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        // Spawn a child that chdir's to /tmp and blocks, so its cwd differs from ours.
+        // /tmp is guaranteed absolute and present on every Linux host the tests run on.
+        let mut child = Command::new("sh")
+            .args(["-c", "cd /tmp && exec sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleeper");
+
+        // Poll briefly for the child's cwd to settle to /tmp (the `cd` + `exec` race).
+        let child_pid = i32::try_from(child.id()).unwrap();
+        let mut found = None;
+        for _ in 0..50 {
+            if let Some(c) = read_cwd_for_pid(child_pid) {
+                if c == Path::new("/tmp") {
+                    found = Some(c);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Descend directly from the child to remove ambiguity about which of the test
+        // runner's many children is "last" (other parallel tests may spawn processes).
+        // A leaf process descends to itself, exercising read_cwd_from_child end-to-end.
+        let descended = read_cwd_from_child(child_pid);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // The child's cwd is /tmp, and descending from it must surface that directory.
+        assert_eq!(found.as_deref(), Some(Path::new("/tmp")));
+        assert_eq!(descended.as_deref(), Some(Path::new("/tmp")));
     }
 }

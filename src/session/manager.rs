@@ -187,6 +187,7 @@ mod tests {
             launch_commands: vec![LaunchCommand {
                 app_id: "x".into(),
                 command: vec!["x".into()],
+                cwd_from_child: false,
             }],
         }
     }
