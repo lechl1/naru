@@ -33,29 +33,39 @@ use super::state::WindowEntry;
 /// Lookup precedence (generic by default — no per-app table):
 ///
 /// 1. A user-configured `launch-command` override matching the entry's `app_id`.
-/// 2. `flatpak run <flatpak_id>` when the window was a flatpak app (id captured at save).
-/// 3. The captured executable path (native apps), run in the saved cwd by the caller.
-/// 4. The bare `app_id` as a last-resort command name.
+/// 2. A captured PWA / site-specific-browser command (from the matching `.desktop`
+///    file's `Exec`; see [`crate::session::desktop`]). Beats the browser launchers
+///    below because those reopen the whole browser instead of the app.
+/// 3. `flatpak run <flatpak_id>` when the window was a flatpak app (id captured at save).
+/// 4. The captured executable path (native apps), run in the saved cwd by the caller.
+/// 5. The bare `app_id` as a last-resort command name.
 ///
 /// `%s` substitution applies only to case 1 (user templates): the literal `"%s"` is
 /// replaced with the entry's captured `cwd` anywhere it appears in an argv element, and
 /// any element containing `"%s"` is **dropped** when no cwd was captured rather than
-/// substituted with a sentinel. Cases 2–4 don't need `%s` because the process is spawned
+/// substituted with a sentinel. Cases 2–5 don't need `%s` because the process is spawned
 /// directly in the saved cwd ([`crate::utils::spawning::spawn_with_cwd`]).
 pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<String> {
     // 1. Explicit user override.
     if let Some(lc) = config.launch_command_for(&entry.app_id) {
         return substitute_cwd(&lc.command, entry.cwd.as_deref());
     }
-    // 2. Flatpak app: relaunch through flatpak.
+    // 2. PWA / site-specific-browser: a captured `.desktop` `Exec` argv. Must beat
+    //    flatpak_id/exec, which would reopen the whole browser instead of the app.
+    if let Some(command) = &entry.command {
+        if !command.is_empty() {
+            return command.clone();
+        }
+    }
+    // 3. Flatpak app: relaunch through flatpak.
     if let Some(flatpak_id) = &entry.flatpak_id {
         return vec!["flatpak".into(), "run".into(), flatpak_id.clone()];
     }
-    // 3. Native app: exec the captured binary (spawned in the saved cwd).
+    // 4. Native app: exec the captured binary (spawned in the saved cwd).
     if let Some(exec) = &entry.exec {
         return vec![exec.clone()];
     }
-    // 4. Last resort.
+    // 5. Last resort.
     vec![entry.app_id.clone()]
 }
 
@@ -130,6 +140,7 @@ mod tests {
             cwd: cwd.map(PathBuf::from),
             flatpak_id: None,
             exec: None,
+            command: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Tiled {
@@ -204,6 +215,51 @@ mod tests {
         }]);
         let e = entry("org.kde.dolphin", None);
         assert_eq!(resolve_launch_argv(&e, &c), vec!["dolphin"]);
+    }
+
+    #[test]
+    fn resolve_uses_captured_pwa_command() {
+        // A PWA window carries the exact `.desktop` Exec argv; it is used verbatim.
+        let mut e = entry("crx_abc", None);
+        e.command = Some(vec![
+            "flatpak".into(),
+            "run".into(),
+            "net.imput.helium".into(),
+            "--app-id=abc".into(),
+        ]);
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["flatpak", "run", "net.imput.helium", "--app-id=abc"]
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_pwa_command_over_flatpak_id() {
+        // The browser's flatpak id would reopen the whole browser, so the captured
+        // per-app command must win.
+        let mut e = entry("crx_abc", None);
+        e.flatpak_id = Some("net.imput.helium".into());
+        e.command = Some(vec![
+            "flatpak".into(),
+            "run".into(),
+            "net.imput.helium".into(),
+            "--app-id=abc".into(),
+        ]);
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["flatpak", "run", "net.imput.helium", "--app-id=abc"]
+        );
+    }
+
+    #[test]
+    fn resolve_user_override_wins_over_pwa_command() {
+        let c = cfg(vec![LaunchCommand {
+            app_id: "crx_abc".into(),
+            command: vec!["my-launcher".into()],
+        }]);
+        let mut e = entry("crx_abc", None);
+        e.command = Some(vec!["flatpak".into(), "run".into(), "x".into()]);
+        assert_eq!(resolve_launch_argv(&e, &c), vec!["my-launcher"]);
     }
 
     #[test]

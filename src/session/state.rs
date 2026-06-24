@@ -85,6 +85,17 @@ pub struct WindowEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<String>,
 
+    /// Fully-resolved relaunch argv captured from the matching `.desktop` file's
+    /// `Exec` line (matched by `StartupWMClass == app_id`) when the window is a
+    /// Chromium site-specific-browser / PWA — e.g. an installed "web app".
+    ///
+    /// PWAs are owned by the browser process, so `flatpak_id`/`exec` would reopen the
+    /// whole browser instead of the app; this carries the exact per-app launch command
+    /// (`flatpak run … --app-id=…`) and takes precedence over them at restore time.
+    /// `None` for every non-PWA window. See [`crate::session::desktop`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+
     /// Connector name of the output the window was on, e.g. `"DP-1"`. `None` for the
     /// "any output" wildcard at restore time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +201,7 @@ mod tests {
                 cwd: Some(PathBuf::from("/home/leo/work")),
                 flatpak_id: None,
                 exec: None,
+                command: None,
                 output: Some("DP-1".into()),
                 workspace: WorkspaceRef::Name {
                     name: "code".into(),
@@ -223,6 +235,7 @@ mod tests {
             cwd: None,
             flatpak_id: None,
             exec: None,
+            command: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Floating {
@@ -249,6 +262,7 @@ mod tests {
             cwd: None,
             flatpak_id: None,
             exec: None,
+            command: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::SidePanel {
@@ -264,6 +278,40 @@ mod tests {
         assert!(json.contains("\"side\":\"right\""));
         let back: WindowEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn pwa_command_round_trips_and_omits_when_none() {
+        let mut entry = WindowEntry {
+            app_id: "crx_abc".into(),
+            title: None,
+            cwd: None,
+            flatpak_id: Some("net.imput.helium".into()),
+            exec: None,
+            command: Some(vec![
+                "flatpak".into(),
+                "run".into(),
+                "net.imput.helium".into(),
+                "--app-id=abc".into(),
+            ]),
+            output: None,
+            workspace: WorkspaceRef::Index { index: 0 },
+            placement: Placement::Floating {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+                is_fullscreen: false,
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"command\""));
+        assert_eq!(serde_json::from_str::<WindowEntry>(&json).unwrap(), entry);
+
+        // None is omitted, not serialized as null.
+        entry.command = None;
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("\"command\""));
     }
 
     #[test]

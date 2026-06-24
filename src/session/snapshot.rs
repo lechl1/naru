@@ -49,6 +49,11 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
     let config = naru.config.borrow();
     let session_restore = &config.session_restore;
 
+    // Index installed `.desktop` files once per snapshot so PWA windows can recover
+    // their exact relaunch command (matched by StartupWMClass == app_id). One dir walk
+    // per save; could be cached in `SessionManager` if save frequency makes it hot.
+    let wm_class_index = crate::session::index_startup_wm_classes();
+
     for (mon, ws_idx, ws) in naru.layout.workspaces() {
         let output = mon.map(|m| m.output_name().clone());
         let workspace = workspace_ref_for(ws, ws_idx);
@@ -71,6 +76,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 cwd: resolve_cwd(mapped, &app_id, session_restore),
                 flatpak_id,
                 exec,
+                command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement,
@@ -93,6 +99,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 cwd: resolve_cwd(mapped, &app_id, session_restore),
                 flatpak_id,
                 exec,
+                command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement: Placement::SidePanel {

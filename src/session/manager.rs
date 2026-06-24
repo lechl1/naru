@@ -331,6 +331,7 @@ mod tests {
                 cwd: Some(PathBuf::from("/home/leo/work")),
                 flatpak_id: None,
                 exec: None,
+                command: None,
                 output: None,
                 workspace: WorkspaceRef::Index { index: 0 },
                 placement: Placement::Tiled {

@@ -162,6 +162,7 @@ mod tests {
                 cwd: Some(PathBuf::from("/tmp")),
                 flatpak_id: None,
                 exec: None,
+                command: None,
                 output: Some("DP-1".into()),
                 workspace: WorkspaceRef::Index { index: 1 },
                 placement: Placement::Tiled {
