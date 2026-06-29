@@ -36,14 +36,17 @@ use super::state::WindowEntry;
 /// 2. A captured PWA / site-specific-browser command (from the matching `.desktop`
 ///    file's `Exec`; see [`crate::session::desktop`]). Beats the browser launchers
 ///    below because those reopen the whole browser instead of the app.
-/// 3. `flatpak run <flatpak_id>` when the window was a flatpak app (id captured at save).
-/// 4. The captured executable path (native apps), run in the saved cwd by the caller.
-/// 5. The bare `app_id` as a last-resort command name.
+/// 3. Konsole: `<konsole> --workdir <cwd>`, so the saved per-window directory is pinned
+///    explicitly rather than left to process-cwd inheritance (which single-instance
+///    forwarding can override).
+/// 4. `flatpak run <flatpak_id>` when the window was a flatpak app (id captured at save).
+/// 5. The captured executable path (native apps), run in the saved cwd by the caller.
+/// 6. The bare `app_id` as a last-resort command name.
 ///
 /// `%s` substitution applies only to case 1 (user templates): the literal `"%s"` is
 /// replaced with the entry's captured `cwd` anywhere it appears in an argv element, and
 /// any element containing `"%s"` is **dropped** when no cwd was captured rather than
-/// substituted with a sentinel. Cases 2–5 don't need `%s` because the process is spawned
+/// substituted with a sentinel. Cases 2–6 don't need `%s` because the process is spawned
 /// directly in the saved cwd ([`crate::utils::spawning::spawn_with_cwd`]).
 pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<String> {
     // 1. Explicit user override.
@@ -57,15 +60,24 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
             return command.clone();
         }
     }
-    // 3. Flatpak app: relaunch through flatpak.
+    // 3. Konsole: pin the saved cwd with `--workdir`. A bare relaunch would rely on
+    //    process-cwd inheritance, which single-instance forwarding into an already-running
+    //    Konsole can override; `--workdir` sets the directory for this window explicitly.
+    if entry.app_id == "org.kde.konsole" {
+        if let Some(cwd) = &entry.cwd {
+            let bin = entry.exec.clone().unwrap_or_else(|| "konsole".into());
+            return vec![bin, "--workdir".into(), cwd.to_string_lossy().into_owned()];
+        }
+    }
+    // 4. Flatpak app: relaunch through flatpak.
     if let Some(flatpak_id) = &entry.flatpak_id {
         return vec!["flatpak".into(), "run".into(), flatpak_id.clone()];
     }
-    // 4. Native app: exec the captured binary (spawned in the saved cwd).
+    // 5. Native app: exec the captured binary (spawned in the saved cwd).
     if let Some(exec) = &entry.exec {
         return vec![exec.clone()];
     }
-    // 5. Last resort.
+    // 6. Last resort.
     vec![entry.app_id.clone()]
 }
 
@@ -177,10 +189,11 @@ mod tests {
     #[test]
     fn resolve_uses_exec_generically() {
         // A native app reopens via its captured executable; cwd is applied by the
-        // spawner, not the argv, so no `--workdir` is needed.
-        let mut e = entry("org.kde.konsole", Some("/home/leo/work"));
-        e.exec = Some("/usr/bin/konsole".into());
-        assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["/usr/bin/konsole"]);
+        // spawner, not the argv, so no `--workdir` is needed. (Konsole has its own
+        // --workdir branch — covered separately — so use a different native app here.)
+        let mut e = entry("org.kde.kate", Some("/home/leo/work"));
+        e.exec = Some("/usr/bin/kate".into());
+        assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["/usr/bin/kate"]);
     }
 
     #[test]
@@ -260,6 +273,36 @@ mod tests {
         let mut e = entry("crx_abc", None);
         e.command = Some(vec!["flatpak".into(), "run".into(), "x".into()]);
         assert_eq!(resolve_launch_argv(&e, &c), vec!["my-launcher"]);
+    }
+
+    #[test]
+    fn resolve_konsole_uses_workdir() {
+        // Konsole relaunch pins the saved cwd via --workdir, using the captured exec.
+        let mut e = entry("org.kde.konsole", Some("/home/leo/work"));
+        e.exec = Some("/usr/bin/konsole".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["/usr/bin/konsole", "--workdir", "/home/leo/work"]
+        );
+    }
+
+    #[test]
+    fn resolve_konsole_without_cwd_falls_through_to_exec() {
+        // No saved cwd → nothing to pin, so the generic exec path applies.
+        let mut e = entry("org.kde.konsole", None);
+        e.exec = Some("/usr/bin/konsole".into());
+        assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["/usr/bin/konsole"]);
+    }
+
+    #[test]
+    fn resolve_user_override_wins_over_konsole_workdir() {
+        let c = cfg(vec![LaunchCommand {
+            app_id: "org.kde.konsole".into(),
+            command: vec!["my-term".into(), "%s".into()],
+        }]);
+        let mut e = entry("org.kde.konsole", Some("/dl"));
+        e.exec = Some("/usr/bin/konsole".into());
+        assert_eq!(resolve_launch_argv(&e, &c), vec!["my-term", "/dl"]);
     }
 
     #[test]

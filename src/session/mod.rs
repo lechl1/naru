@@ -19,6 +19,7 @@
 
 pub mod cwd;
 pub mod desktop;
+pub mod konsole;
 pub mod manager;
 pub mod restore;
 pub mod snapshot;

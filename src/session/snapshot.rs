@@ -41,6 +41,7 @@ use crate::naru::Naru;
 use crate::session::state::{
     PanelSide, Placement, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION,
 };
+use crate::utils::with_toplevel_role;
 use crate::window::Mapped;
 
 pub fn build_from_naru(naru: &Naru) -> SessionState {
@@ -130,8 +131,23 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
 /// [`read_cwd_from_child`]. If that descent yields nothing (no live child, sandboxed
 /// `/proc`, etc.) we fall back to the map-time capture rather than dropping the cwd.
 fn resolve_cwd(mapped: &Mapped, app_id: &str, sr: &SessionRestore) -> Option<PathBuf> {
+    let pid = mapped.credentials().map(|c| c.pid);
+
+    // Konsole is single-process/multi-window: all its windows share one client PID, so
+    // `/proc` can't yield a per-window cwd. Ask Konsole's own D-Bus instead, correlating
+    // this window to its session by title. Falls through to the generic paths on failure.
+    if app_id == "org.kde.konsole" {
+        if let Some(pid) = pid {
+            if let Some(title) = with_toplevel_role(mapped.toplevel(), |role| role.title.clone()) {
+                if let Some(cwd) = crate::session::konsole::cwd_for_window(pid, &title) {
+                    return Some(cwd);
+                }
+            }
+        }
+    }
+
     if sr.reads_cwd_from_child(app_id) {
-        if let Some(pid) = mapped.credentials().map(|c| c.pid) {
+        if let Some(pid) = pid {
             if let Some(cwd) = crate::session::read_cwd_from_child(pid) {
                 return Some(cwd);
             }
