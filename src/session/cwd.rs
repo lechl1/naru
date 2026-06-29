@@ -83,7 +83,7 @@ pub fn read_cwd_from_child(pid: i32) -> Option<PathBuf> {
 
 /// Build the descent chain `[pid, child, grandchild, ...]`, following the last-listed
 /// (most recently spawned) child at each level up to [`MAX_CHILD_DEPTH`].
-fn descendant_chain(pid: i32) -> Vec<i32> {
+pub(crate) fn descendant_chain(pid: i32) -> Vec<i32> {
     let mut chain = vec![pid];
     let mut current = pid;
     for _ in 0..MAX_CHILD_DEPTH {

@@ -29,13 +29,32 @@ use std::path::PathBuf;
 /// `None` on any failure so the caller can fall back to the generic cwd capture.
 #[cfg(feature = "dbus")]
 pub fn cwd_for_window(pid: i32, window_title: &str) -> Option<PathBuf> {
-    let sessions = query_sessions_bounded(pid)?;
-    pick_cwd_by_title(window_title, &sessions)
+    let sessions = query_session_pids_bounded(pid)?;
+    let shell_pid = pick_by_title(window_title, &sessions)?;
+    super::cwd::read_cwd_for_pid(shell_pid)
 }
 
 /// Stub for builds without the `dbus` feature: no D-Bus, so no per-window cwd.
 #[cfg(not(feature = "dbus"))]
 pub fn cwd_for_window(_pid: i32, _window_title: &str) -> Option<PathBuf> {
+    None
+}
+
+/// Best-effort per-window foreground shell pid for a Konsole window.
+///
+/// Konsole's single shared client PID can't be walked per-window, but its D-Bus
+/// sessions each expose `processId()` (the shell). Correlating the window title
+/// to a session (same as [`cwd_for_window`]) yields that window's shell pid —
+/// the starting point for tmux-client detection. `None` on any failure.
+#[cfg(feature = "dbus")]
+pub fn shell_pid_for_window(pid: i32, window_title: &str) -> Option<i32> {
+    let sessions = query_session_pids_bounded(pid)?;
+    pick_by_title(window_title, &sessions)
+}
+
+/// Stub for builds without the `dbus` feature.
+#[cfg(not(feature = "dbus"))]
+pub fn shell_pid_for_window(_pid: i32, _window_title: &str) -> Option<i32> {
     None
 }
 
@@ -45,25 +64,27 @@ pub fn cwd_for_window(_pid: i32, _window_title: &str) -> Option<PathBuf> {
 /// `Naru::update_locked_hint` so a hung Konsole (zbus' own reply timeout is 25 s) can't
 /// stall a save. On timeout the orphaned thread finishes and drops its result harmlessly.
 #[cfg(feature = "dbus")]
-fn query_sessions_bounded(pid: i32) -> Option<Vec<(String, PathBuf)>> {
+fn query_session_pids_bounded(pid: i32) -> Option<Vec<(String, i32)>> {
     use std::sync::mpsc;
     use std::time::Duration;
 
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
-        .name("konsole-cwd-query".to_owned())
+        .name("konsole-session-query".to_owned())
         .spawn(move || {
-            let _ = tx.send(query_sessions(pid));
+            let _ = tx.send(query_session_pids(pid));
         })
         .ok()?;
 
     rx.recv_timeout(Duration::from_millis(200)).ok().flatten()
 }
 
-/// Query `org.kde.konsole-<pid>` for `(displayed_title, cwd)` of every session whose
-/// shell cwd is readable. `None` if the service is unreachable or yields nothing.
+/// Query `org.kde.konsole-<pid>` for `(displayed_title, shell_pid)` of every
+/// session. `None` if the service is unreachable or yields nothing. The shell
+/// pid is the starting point for both per-window cwd (`/proc/<pid>/cwd`) and
+/// tmux-client detection (walking its process tree).
 #[cfg(feature = "dbus")]
-fn query_sessions(pid: i32) -> Option<Vec<(String, PathBuf)>> {
+fn query_session_pids(pid: i32) -> Option<Vec<(String, i32)>> {
     let conn = zbus::blocking::Connection::session().ok()?;
     let service = format!("org.kde.konsole-{pid}");
 
@@ -79,9 +100,7 @@ fn query_sessions(pid: i32) -> Option<Vec<(String, PathBuf)>> {
         let Some(shell_pid) = call_i32(&conn, &service, &path, "processId", &()) else {
             continue;
         };
-        if let Some(cwd) = super::cwd::read_cwd_for_pid(shell_pid) {
-            out.push((title, cwd));
-        }
+        out.push((title, shell_pid));
     }
 
     (!out.is_empty()).then_some(out)
@@ -94,18 +113,18 @@ fn query_sessions(pid: i32) -> Option<Vec<(String, PathBuf)>> {
 /// prefix matches (two windows sharing a title) resolve to the first — FIFO, the same
 /// tie-break the restore matcher uses.
 #[cfg(any(feature = "dbus", test))]
-fn pick_cwd_by_title(window_title: &str, sessions: &[(String, PathBuf)]) -> Option<PathBuf> {
-    if let Some((_, cwd)) = sessions.iter().find(|(t, _)| !t.is_empty() && t == window_title) {
-        return Some(cwd.clone());
+fn pick_by_title<T: Clone>(window_title: &str, sessions: &[(String, T)]) -> Option<T> {
+    if let Some((_, v)) = sessions.iter().find(|(t, _)| !t.is_empty() && t == window_title) {
+        return Some(v.clone());
     }
-    if let Some((_, cwd)) = sessions
+    if let Some((_, v)) = sessions
         .iter()
         .find(|(t, _)| !t.is_empty() && window_title.starts_with(t.as_str()))
     {
-        return Some(cwd.clone());
+        return Some(v.clone());
     }
-    if let [(_, cwd)] = sessions {
-        return Some(cwd.clone());
+    if let [(_, v)] = sessions {
+        return Some(v.clone());
     }
     None
 }
@@ -195,7 +214,7 @@ mod tests {
         ]);
         // The Wayland title carries the " — Konsole" suffix the session title lacks.
         assert_eq!(
-            pick_cwd_by_title("creeper : claude — Konsole", &s),
+            pick_by_title("creeper : claude — Konsole", &s),
             Some(PathBuf::from("/ws/creeper"))
         );
     }
@@ -203,14 +222,14 @@ mod tests {
     #[test]
     fn exact_match_wins() {
         let s = sessions(&[("x", "/a"), ("x : y", "/b")]);
-        assert_eq!(pick_cwd_by_title("x", &s), Some(PathBuf::from("/a")));
+        assert_eq!(pick_by_title("x", &s), Some(PathBuf::from("/a")));
     }
 
     #[test]
     fn single_session_used_when_no_title_match() {
         let s = sessions(&[("anything", "/only")]);
         assert_eq!(
-            pick_cwd_by_title("unrelated title", &s),
+            pick_by_title("unrelated title", &s),
             Some(PathBuf::from("/only"))
         );
     }
@@ -218,14 +237,14 @@ mod tests {
     #[test]
     fn no_match_among_many_is_none() {
         let s = sessions(&[("a", "/a"), ("b", "/b")]);
-        assert_eq!(pick_cwd_by_title("zzz", &s), None);
+        assert_eq!(pick_by_title("zzz", &s), None);
     }
 
     #[test]
     fn ambiguous_prefix_resolves_to_first() {
         let s = sessions(&[("naru : zsh", "/first"), ("naru : zsh", "/second")]);
         assert_eq!(
-            pick_cwd_by_title("naru : zsh — Konsole", &s),
+            pick_by_title("naru : zsh — Konsole", &s),
             Some(PathBuf::from("/first"))
         );
     }
@@ -234,11 +253,11 @@ mod tests {
     fn empty_titles_are_ignored() {
         let s = sessions(&[("", "/blank"), ("creeper", "/ws/creeper")]);
         assert_eq!(
-            pick_cwd_by_title("creeper — Konsole", &s),
+            pick_by_title("creeper — Konsole", &s),
             Some(PathBuf::from("/ws/creeper"))
         );
         // A blank-title session must not match an empty-prefix.
-        assert_eq!(pick_cwd_by_title("", &s), None);
+        assert_eq!(pick_by_title("", &s), None);
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub mod restore;
 pub mod snapshot;
 pub mod state;
 pub mod storage;
+pub mod tmux;
 
 pub use cwd::{
     cwd_for_surface, read_cwd_for_pid, read_cwd_from_child, read_exec_for_pid,

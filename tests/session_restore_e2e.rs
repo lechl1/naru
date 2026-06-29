@@ -90,6 +90,8 @@ fn entry(
         cwd: cwd.map(PathBuf::from),
         flatpak_id: None,
         exec: None,
+        command: None,
+        tmux_session: None,
         output: None,
         workspace,
         placement,

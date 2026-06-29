@@ -60,6 +60,11 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
     // each panel window would be saved once for every workspace on the monitor.
     let mut panels_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // tmux client-pid → session map, queried from the server at most once per
+    // save (lazily, only if a terminal window is encountered). Reused to map
+    // each terminal window to the session it's attached to.
+    let mut tmux_clients: Option<std::collections::HashMap<i32, String>> = None;
+
     for (mon, ws_idx, ws) in naru.layout.workspaces() {
         let output = mon.map(|m| m.output_name().clone());
         let workspace = workspace_ref_for(ws, ws_idx);
@@ -83,6 +88,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 flatpak_id,
                 exec,
                 command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
+                tmux_session: resolve_tmux(mapped, &app_id, session_restore, &mut tmux_clients),
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement,
@@ -114,6 +120,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 flatpak_id,
                 exec,
                 command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
+                tmux_session: resolve_tmux(mapped, &app_id, session_restore, &mut tmux_clients),
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement: Placement::SidePanel {
@@ -168,6 +175,39 @@ fn resolve_cwd(mapped: &Mapped, app_id: &str, sr: &SessionRestore) -> Option<Pat
     }
 
     mapped.session_cwd().map(PathBuf::from)
+}
+
+/// Detect the tmux session a terminal window is attached to, if any.
+///
+/// Only terminals (the `cwd-from-child` set) are considered. The per-window
+/// foreground pid is the window's client pid for normal one-process-per-window
+/// terminals; for Konsole (one shared process for all its windows) it's the
+/// matching session's shell pid from D-Bus. From there
+/// [`tmux::session_for_pid_tree`](crate::session::tmux::session_for_pid_tree)
+/// walks the process tree for a tmux client and maps it to its session via the
+/// `tmux_clients` map (queried from the server at most once per save).
+fn resolve_tmux(
+    mapped: &Mapped,
+    app_id: &str,
+    sr: &SessionRestore,
+    tmux_clients: &mut Option<std::collections::HashMap<i32, String>>,
+) -> Option<String> {
+    if !sr.reads_cwd_from_child(app_id) {
+        return None;
+    }
+    let pid = mapped.credentials().map(|c| c.pid)?;
+
+    // Konsole's shared client pid can't be walked per-window; resolve this
+    // window's shell pid via D-Bus (title correlation) instead.
+    let fg_pid = if app_id == "org.kde.konsole" {
+        let title = with_toplevel_role(mapped.toplevel(), |role| role.title.clone())?;
+        crate::session::konsole::shell_pid_for_window(pid, &title)?
+    } else {
+        pid
+    };
+
+    let clients = tmux_clients.get_or_insert_with(crate::session::tmux::client_pid_sessions);
+    crate::session::tmux::session_for_pid_tree(fg_pid, clients)
 }
 
 /// Capture how to relaunch a window generically: its flatpak id (if a flatpak app) and

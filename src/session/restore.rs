@@ -53,6 +53,17 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
     if let Some(lc) = config.launch_command_for(&entry.app_id) {
         return substitute_cwd(&lc.command, entry.cwd.as_deref());
     }
+    // 1b. tmux reattach: a terminal that was running tmux is relaunched reattaching
+    //     to its session (`tmux new-session -A` attaches if it exists, else creates).
+    //     The captured terminal binary runs the tmux command inside itself via the
+    //     common `-e` convention; Konsole also gets `--workdir` for the directory.
+    //     Terminals that don't take `-e` (kitty/foot/wezterm) use a `launch-command`
+    //     override (case 1) instead. Falls through when we can't build a command.
+    if let Some(session) = &entry.tmux_session {
+        if let Some(argv) = tmux_reattach_argv(entry, session) {
+            return argv;
+        }
+    }
     // 2. PWA / site-specific-browser: a captured `.desktop` `Exec` argv. Must beat
     //    flatpak_id/exec, which would reopen the whole browser instead of the app.
     if let Some(command) = &entry.command {
@@ -79,6 +90,33 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
     }
     // 6. Last resort.
     vec![entry.app_id.clone()]
+}
+
+/// Build the argv that relaunches `entry`'s terminal reattaching to its tmux
+/// `session`. The captured terminal binary runs `tmux new-session -A -s <session>`
+/// inside itself. Konsole is invoked as `konsole [--workdir <cwd>] -e tmux …`;
+/// any other terminal as `<exec> -e tmux …` (the common convention). Returns
+/// `None` when there's no binary to run (no captured `exec` for a non-Konsole
+/// terminal), so the caller falls through to a plain relaunch.
+fn tmux_reattach_argv(entry: &WindowEntry, session: &str) -> Option<Vec<String>> {
+    let tmux = crate::session::tmux::reattach_command(session);
+
+    if entry.app_id == "org.kde.konsole" {
+        let bin = entry.exec.clone().unwrap_or_else(|| "konsole".into());
+        let mut argv = vec![bin];
+        if let Some(cwd) = &entry.cwd {
+            argv.push("--workdir".into());
+            argv.push(cwd.to_string_lossy().into_owned());
+        }
+        argv.push("-e".into());
+        argv.extend(tmux);
+        return Some(argv);
+    }
+
+    let exec = entry.exec.clone()?;
+    let mut argv = vec![exec, "-e".into()];
+    argv.extend(tmux);
+    Some(argv)
 }
 
 /// Substitute the saved `cwd` into a user launch-command template's `%s` slots,
@@ -153,6 +191,7 @@ mod tests {
             flatpak_id: None,
             exec: None,
             command: None,
+            tmux_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Tiled {
@@ -310,5 +349,72 @@ mod tests {
         // No override, no flatpak id, no exec → bare app_id as a last resort.
         let e = entry("firefox", Some("/home/leo"));
         assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["firefox"]);
+    }
+
+    #[test]
+    fn resolve_konsole_tmux_reattaches_with_workdir() {
+        // Konsole that was running tmux reopens via --workdir + -e tmux attach-or-create.
+        let mut e = entry("org.kde.konsole", Some("/home/leo/work"));
+        e.exec = Some("/usr/bin/konsole".into());
+        e.tmux_session = Some("dev".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec![
+                "/usr/bin/konsole",
+                "--workdir",
+                "/home/leo/work",
+                "-e",
+                "tmux",
+                "new-session",
+                "-A",
+                "-s",
+                "dev",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_konsole_tmux_without_cwd_omits_workdir() {
+        let mut e = entry("org.kde.konsole", None);
+        e.exec = Some("/usr/bin/konsole".into());
+        e.tmux_session = Some("dev".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["/usr/bin/konsole", "-e", "tmux", "new-session", "-A", "-s", "dev"]
+        );
+    }
+
+    #[test]
+    fn resolve_generic_terminal_tmux_uses_dash_e() {
+        // A non-Konsole terminal reattaches via its captured binary + `-e`.
+        let mut e = entry("Alacritty", Some("/ws"));
+        e.exec = Some("/usr/bin/alacritty".into());
+        e.tmux_session = Some("work".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["/usr/bin/alacritty", "-e", "tmux", "new-session", "-A", "-s", "work"]
+        );
+    }
+
+    #[test]
+    fn resolve_user_override_wins_over_tmux() {
+        // An explicit launch-command is honored even when a tmux session was captured.
+        let c = cfg(vec![LaunchCommand {
+            app_id: "Alacritty".into(),
+            command: vec!["my-term".into()],
+        }]);
+        let mut e = entry("Alacritty", None);
+        e.exec = Some("/usr/bin/alacritty".into());
+        e.tmux_session = Some("work".into());
+        assert_eq!(resolve_launch_argv(&e, &c), vec!["my-term"]);
+    }
+
+    #[test]
+    fn resolve_tmux_without_exec_falls_through() {
+        // No captured binary for a non-Konsole terminal → can't build a reattach
+        // command, so fall through to the normal (here: app_id) path.
+        let mut e = entry("Alacritty", None);
+        e.tmux_session = Some("work".into());
+        assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["Alacritty"]);
     }
 }

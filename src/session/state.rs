@@ -96,6 +96,17 @@ pub struct WindowEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
 
+    /// Name of the tmux session this terminal window was attached to, captured at
+    /// save time. `None` for non-terminal windows and terminals not running tmux.
+    ///
+    /// tmux sessions live in the tmux *server*, independent of the terminal, so
+    /// this is captured terminal-agnostically (walk the terminal's process tree
+    /// for the tmux client, then ask the server which session it's on). On
+    /// restore the captured terminal is relaunched reattaching to it via
+    /// `tmux new-session -A -s <name>` (attach-or-create). See [`crate::session::tmux`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session: Option<String>,
+
     /// Connector name of the output the window was on, e.g. `"DP-1"`. `None` for the
     /// "any output" wildcard at restore time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +213,7 @@ mod tests {
                 flatpak_id: None,
                 exec: None,
                 command: None,
+                tmux_session: None,
                 output: Some("DP-1".into()),
                 workspace: WorkspaceRef::Name {
                     name: "code".into(),
@@ -236,6 +248,7 @@ mod tests {
             flatpak_id: None,
             exec: None,
             command: None,
+            tmux_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Floating {
@@ -263,6 +276,7 @@ mod tests {
             flatpak_id: None,
             exec: None,
             command: None,
+            tmux_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::SidePanel {
@@ -294,6 +308,7 @@ mod tests {
                 "net.imput.helium".into(),
                 "--app-id=abc".into(),
             ]),
+            tmux_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Floating {
@@ -312,6 +327,38 @@ mod tests {
         entry.command = None;
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("\"command\""));
+    }
+
+    #[test]
+    fn tmux_session_round_trips_and_omits_when_none() {
+        let mut entry = WindowEntry {
+            app_id: "org.kde.konsole".into(),
+            title: None,
+            cwd: None,
+            flatpak_id: None,
+            exec: Some("/usr/bin/konsole".into()),
+            command: None,
+            tmux_session: Some("work".into()),
+            output: None,
+            workspace: WorkspaceRef::Index { index: 0 },
+            placement: Placement::Tiled {
+                column_index: 0,
+                tile_index: 0,
+                width: 0.0,
+                height: 0.0,
+                is_fullscreen: false,
+                is_maximized: false,
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"tmux_session\":\"work\""));
+        assert_eq!(serde_json::from_str::<WindowEntry>(&json).unwrap(), entry);
+
+        // Omitted (not null) when there's no tmux session.
+        entry.tmux_session = None;
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("tmux_session"));
+        assert_eq!(serde_json::from_str::<WindowEntry>(&json).unwrap().tmux_session, None);
     }
 
     #[test]

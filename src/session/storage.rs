@@ -163,6 +163,7 @@ mod tests {
                 flatpak_id: None,
                 exec: None,
                 command: None,
+                tmux_session: None,
                 output: Some("DP-1".into()),
                 workspace: WorkspaceRef::Index { index: 1 },
                 placement: Placement::Tiled {

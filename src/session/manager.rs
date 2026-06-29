@@ -361,6 +361,7 @@ mod tests {
                 flatpak_id: None,
                 exec: None,
                 command: None,
+                tmux_session: None,
                 output: None,
                 workspace: WorkspaceRef::Index { index: 0 },
                 placement: Placement::Tiled {
