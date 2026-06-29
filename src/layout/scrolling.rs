@@ -30,6 +30,34 @@ use crate::window::ResolvedWindowRules;
 /// Amount of touchpad movement to scroll the view for the width of one working area.
 const VIEW_GESTURE_WORKING_AREA_MOVEMENT: f64 = 1200.;
 
+/// A snapshot of a column's width-defining state, used to restore a column to its
+/// previous width after it was temporarily grown to host a window being moved through it.
+#[derive(Debug, Clone, Copy)]
+struct WidthSnapshot {
+    width: ColumnWidth,
+    is_full_width: bool,
+    preset_width_idx: Option<usize>,
+}
+
+/// Tracks a window's width as it is moved across columns, so the window keeps its size
+/// and the columns it passes through are grown to fit and then restored.
+///
+/// Created when a window first starts moving (and re-created when a *different* window is
+/// moved); cleared when window focus changes (see the `focus_*` methods). The moves
+/// themselves carry focus with the window, so they don't clear it.
+#[derive(Debug)]
+struct MoveSizeMemory<W: LayoutElement> {
+    /// The window being carried.
+    window: W::Id,
+    /// Its rendered window-width (px) at the start of the move sequence — the size to
+    /// preserve as it travels.
+    carried_width: f64,
+    /// The pre-arrival width of the column the carried window most recently grew into, to
+    /// restore when the window leaves it. `None` when the current host wasn't grown by us
+    /// (it was already wide enough), so there's nothing to restore.
+    host_prior: Option<WidthSnapshot>,
+}
+
 /// A scrollable-tiling space for windows.
 #[derive(Debug)]
 pub struct ScrollingSpace<W: LayoutElement> {
@@ -44,6 +72,19 @@ pub struct ScrollingSpace<W: LayoutElement> {
 
     /// Ongoing interactive resize.
     interactive_resize: Option<InteractiveResize<W>>,
+
+    /// Tracks the size of a window being moved across columns, so it keeps its width and
+    /// the columns it passes through grow to fit then restore. Persists across a sequence
+    /// of moves of the same window; cleared on focus change. See [`MoveSizeMemory`].
+    move_size: Option<MoveSizeMemory<W>>,
+
+    /// Set while a cross-column move (consume/expel) is mid-flight. The move
+    /// re-activates columns internally — transiently landing focus on a tile
+    /// that isn't the carried window — which would otherwise trip the
+    /// focus-change clear in [`Self::activate_column_with_anim_config`] and drop
+    /// [`Self::move_size`] before the move finishes. While this is set, that
+    /// clear is suppressed so tracking survives the move's own activations.
+    in_window_move: bool,
 
     /// Offset of the view computed from the active column.
     ///
@@ -316,6 +357,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             data: Vec::new(),
             active_column_idx: 0,
             interactive_resize: None,
+            move_size: None,
+            in_window_move: false,
             view_offset: ViewOffset::Static(0.),
             activate_prev_column_on_removal: None,
             view_offset_to_restore: None,
@@ -902,6 +945,24 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     fn activate_column_with_anim_config(&mut self, idx: usize, config: naru_config::Animation) {
+        // End move-size tracking when focus moves to a *different* window. A window move
+        // re-activates the moved window itself (so the id still matches and tracking
+        // survives the move), but any other focus change — focus-left/right, clicking a
+        // different window — lands on a different active window and clears it. Checked
+        // before the early-return so same-column re-activations are covered too.
+        if !self.in_window_move {
+            if let Some(ms) = &self.move_size {
+                let now_focused = self
+                    .columns
+                    .get(idx)
+                    .and_then(|c| c.tiles.get(c.active_tile_idx))
+                    .map(|t| t.window().id());
+                if now_focused != Some(&ms.window) {
+                    self.move_size = None;
+                }
+            }
+        }
+
         if self.active_column_idx == idx
             // During a DnD scroll, animate even when activating the same window, for DnD hold.
             && (self.columns.is_empty() || !self.view_offset.is_dnd_scroll())
@@ -2458,6 +2519,82 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         true
     }
 
+    /// Begin (or continue) tracking the width of a window being moved across columns.
+    ///
+    /// Captures the window's current width the first time it moves; a continuation move of
+    /// the same window keeps the originally-captured width so the window's size is
+    /// preserved across the whole sequence. Moving a *different* window starts fresh.
+    fn note_window_move(&mut self, source_col_idx: usize, source_tile_idx: usize) {
+        let tile = &self.columns[source_col_idx].tiles[source_tile_idx];
+        let window = tile.window().id().clone();
+        let carried_width = tile.window_size().w;
+        // Continuation of the same window keeps its originally-captured width; a different
+        // window (or no tracking yet) starts fresh.
+        let is_continuation = matches!(&self.move_size, Some(ms) if ms.window == window);
+        // The move's own column re-activations must not trip the focus-change
+        // clear; `end_window_move` lifts this once the move finishes.
+        self.in_window_move = true;
+        if !is_continuation {
+            self.move_size = Some(MoveSizeMemory {
+                window,
+                carried_width,
+                host_prior: None,
+            });
+        }
+    }
+
+    /// Grow `col_idx` to the carried window width if it's currently narrower (never
+    /// shrink), snapshotting its prior width so it can be restored when the window leaves.
+    /// The carried window is the last tile in the column (it was just added there).
+    fn grow_host_to_carried(&mut self, col_idx: usize) {
+        let Some(carried) = self.move_size.as_ref().map(|ms| ms.carried_width) else {
+            return;
+        };
+        let tile_idx = self.columns[col_idx].tiles.len() - 1;
+        // Compare in column-width terms using the column's resolved (synchronous) width.
+        // The just-added tile's `window_size()` may not reflect the new column yet, and
+        // relying on it could shrink a wider column — this must only ever grow.
+        let needed = self.columns[col_idx].tiles[tile_idx].tile_width_for_window_width(carried);
+        let current = self.columns[col_idx].natural_width();
+        if needed <= current + 1.0 {
+            return;
+        }
+        let snapshot = self.columns[col_idx].width_snapshot();
+        if let Some(ms) = self.move_size.as_mut() {
+            ms.host_prior = Some(snapshot);
+        }
+        self.columns[col_idx].set_column_width(
+            SizeChange::SetFixed(carried.round() as i32),
+            Some(tile_idx),
+            true,
+        );
+        self.data[col_idx].update(&self.columns[col_idx]);
+    }
+
+    /// Restore `col_idx`'s width from the host snapshot, if the carried window had grown
+    /// it. Called when the window leaves the column it was hosted in.
+    fn restore_host_width(&mut self, col_idx: usize) {
+        let snapshot = self.move_size.as_mut().and_then(|ms| ms.host_prior.take());
+        if let Some(snapshot) = snapshot {
+            self.columns[col_idx].restore_width_snapshot(&snapshot);
+            self.data[col_idx].update(&self.columns[col_idx]);
+        }
+    }
+
+    /// Set `col_idx` (the carried window's own freshly-created column) to exactly the
+    /// carried width, so an expelled window is restored to its remembered size.
+    fn set_carried_column_width(&mut self, col_idx: usize) {
+        let Some(carried) = self.move_size.as_ref().map(|ms| ms.carried_width) else {
+            return;
+        };
+        self.columns[col_idx].set_column_width(
+            SizeChange::SetFixed(carried.round() as i32),
+            Some(0),
+            true,
+        );
+        self.data[col_idx].update(&self.columns[col_idx]);
+    }
+
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
         if self.columns.is_empty() {
             return;
@@ -2493,6 +2630,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
             // Move into adjacent column.
             let target_column_idx = source_col_idx - 1;
+            self.note_window_move(source_col_idx, source_tile_idx);
 
             let offset = if self.active_column_idx <= source_col_idx {
                 // Tiles to the right animate from the following column.
@@ -2531,12 +2669,20 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
             let new_tile = target_column.tiles.last_mut().unwrap();
             new_tile.animate_move_from(offset);
+
+            // Preserve the moved window's size: grow the column it joined to fit it.
+            self.grow_host_to_carried(target_column_idx);
         } else {
             // Move out of column.
             let mut offset = Point::from((source_column.render_offset().x, 0.));
+            self.note_window_move(source_col_idx, source_tile_idx);
 
             let removed =
                 self.remove_tile_by_idx(source_col_idx, source_tile_idx, Transaction::new(), None);
+
+            // The window is leaving this column; restore it if we'd grown it to host the
+            // window (the column still sits at source_col_idx after the removal).
+            self.restore_host_width(source_col_idx);
 
             // We're inserting into the source column position.
             let target_column_idx = source_col_idx;
@@ -2563,7 +2709,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let new_col = &mut self.columns[target_column_idx];
             offset += prev_off - new_col.tile_offset(0);
             new_col.tiles[0].animate_move_from(offset);
+
+            // The expelled window keeps its remembered size in its own new column.
+            self.set_carried_column_width(target_column_idx);
         }
+        // The move (and its internal column re-activations) has finished, so
+        // re-enable the focus-change clear for `move_size`.
+        self.in_window_move = false;
     }
 
     pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
@@ -2604,6 +2756,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
             // Move into adjacent column.
             let target_column_idx = source_col_idx;
+            self.note_window_move(source_col_idx, source_tile_idx);
 
             offset.x += cur_x - self.column_x(source_col_idx + 1);
             offset.x -= self.columns[source_col_idx + 1].render_offset().x;
@@ -2626,12 +2779,21 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
             let new_tile = target_column.tiles.last_mut().unwrap();
             new_tile.animate_move_from(offset);
+
+            // Preserve the moved window's size: grow the column it joined to fit it.
+            self.grow_host_to_carried(target_column_idx);
         } else {
             // Move out of column.
+            self.note_window_move(source_col_idx, source_tile_idx);
+
             let prev_width = self.data[source_col_idx].width;
 
             let removed =
                 self.remove_tile_by_idx(source_col_idx, source_tile_idx, Transaction::new(), None);
+
+            // The window is leaving this column; restore it if we'd grown it to host the
+            // window (the column still sits at source_col_idx after the removal).
+            self.restore_host_width(source_col_idx);
 
             let target_column_idx = source_col_idx + 1;
 
@@ -2655,7 +2817,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let new_col = &mut self.columns[target_column_idx];
             offset += prev_off - new_col.tile_offset(0);
             new_col.tiles[0].animate_move_from(offset);
+
+            // The expelled window keeps its remembered size in its own new column.
+            self.set_carried_column_width(target_column_idx);
         }
+        // The move (and its internal column re-activations) has finished, so
+        // re-enable the focus-change clear for `move_size`.
+        self.in_window_move = false;
     }
 
     pub fn consume_into_column(&mut self) {
@@ -5439,6 +5607,24 @@ impl<W: LayoutElement> Column<W> {
             self.width
         };
         self.resolve_column_width(width)
+    }
+
+    /// Snapshot the column's width-defining state so it can be restored later (used by
+    /// move-size tracking when a column is temporarily grown to host a moving window).
+    fn width_snapshot(&self) -> WidthSnapshot {
+        WidthSnapshot {
+            width: self.width,
+            is_full_width: self.is_full_width,
+            preset_width_idx: self.preset_width_idx,
+        }
+    }
+
+    /// Restore a width previously captured by [`Self::width_snapshot`] and resize tiles.
+    fn restore_width_snapshot(&mut self, snap: &WidthSnapshot) {
+        self.width = snap.width;
+        self.is_full_width = snap.is_full_width;
+        self.preset_width_idx = snap.preset_width_idx;
+        self.update_tile_sizes(true);
     }
 
     /// Set the disable-carousel shrink factor and resize tiles to match. No-op

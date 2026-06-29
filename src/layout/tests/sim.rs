@@ -2026,6 +2026,128 @@ mod tests {
         );
     }
 
+    /// Moving a window into a *narrower* column grows that column to the moved window's
+    /// width so the window keeps its size. (Widths ≥ the half-view min-span floor so the
+    /// carousel's min-span growth doesn't perturb the assertions.)
+    #[test]
+    fn move_window_preserves_width_growing_narrow_target() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1); // 1280×720
+
+        let a = sim.add_window(); // col 0
+        sim.set_window_width(a, SizeChange::SetFixed(700)); // wide
+        let b = sim.add_window(); // col 1
+        sim.set_window_width(b, SizeChange::SetFixed(290)); // narrow
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        assert!((sim.window_geometry(&a).unwrap().size.w - 700.0).abs() < 2.0);
+
+        // Move the wide window right, into the narrow column.
+        sim.focus_window(a);
+        sim.apply(Op::ConsumeOrExpelWindowRight { id: None });
+        sim.settle();
+
+        let a_w = sim.window_geometry(&a).unwrap().size.w;
+        let b_w = sim.window_geometry(&b).unwrap().size.w;
+        assert!((a_w - 700.0).abs() < 5.0, "moved window keeps its width ~700, got {a_w}");
+        assert!((b_w - 700.0).abs() < 5.0, "target column grew to host it ~700, got {b_w}");
+    }
+
+    /// Moving a window into a *wider* column never shrinks it (grow-only): the resident
+    /// windows keep their width and the moved window adopts the wider column.
+    #[test]
+    fn move_window_into_wider_column_does_not_shrink_it() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1); // 1280×720
+
+        let a = sim.add_window();
+        let b = sim.add_window();
+        sim.settle();
+
+        sim.set_window_width(a, SizeChange::SetFixed(300)); // moved window: narrow
+        sim.set_window_width(b, SizeChange::SetFixed(800)); // target: wider
+        sim.settle();
+
+        sim.focus_window(a);
+        sim.apply(Op::ConsumeOrExpelWindowRight { id: None });
+        sim.settle();
+
+        let b_w = sim.window_geometry(&b).unwrap().size.w;
+        assert!((b_w - 800.0).abs() < 5.0, "wider target must not shrink, got {b_w}");
+    }
+
+    /// Continuing to move the window on restores the width of the column it leaves (which
+    /// was only grown to host the visitor).
+    #[test]
+    fn moving_window_on_restores_left_behind_column() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1); // 1280×720
+
+        let a = sim.add_window(); // col 0
+        let b = sim.add_window(); // col 1
+        let _c = sim.add_window(); // col 2 — keeps total content above the min-span floor
+        sim.settle();
+
+        sim.set_window_width(a, SizeChange::SetFixed(700));
+        sim.set_window_width(b, SizeChange::SetFixed(300));
+        sim.settle();
+
+        // a → into b's column (grows it to 700).
+        sim.focus_window(a);
+        sim.apply(Op::ConsumeOrExpelWindowRight { id: None });
+        sim.settle();
+        assert!((sim.window_geometry(&b).unwrap().size.w - 700.0).abs() < 5.0);
+
+        // Continue: expel a into its own column. The column it leaves snaps back to 300.
+        sim.apply(Op::ConsumeOrExpelWindowRight { id: None });
+        sim.settle();
+
+        let a_w = sim.window_geometry(&a).unwrap().size.w;
+        let b_w = sim.window_geometry(&b).unwrap().size.w;
+        assert!((a_w - 700.0).abs() < 5.0, "moved window keeps ~700 in its own column, got {a_w}");
+        assert!((b_w - 300.0).abs() < 5.0, "left-behind column restored to 300, got {b_w}");
+    }
+
+    /// Changing window focus ends the tracking: a column grown to host a window is no
+    /// longer restored when that window later moves on.
+    #[test]
+    fn focus_change_stops_size_tracking() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1); // 1280×720
+
+        let a = sim.add_window(); // col 0
+        let b = sim.add_window(); // col 1
+        let c = sim.add_window(); // col 2
+        sim.settle();
+
+        sim.set_window_width(a, SizeChange::SetFixed(700));
+        sim.set_window_width(b, SizeChange::SetFixed(300));
+        sim.settle();
+
+        // a → into b's column (grows it to 700).
+        sim.focus_window(a);
+        sim.apply(Op::ConsumeOrExpelWindowRight { id: None });
+        sim.settle();
+
+        // Focus a different window — this ends move-size tracking.
+        sim.focus_window(c);
+        sim.settle();
+
+        // Move a out again. Because tracking was cleared, the column it leaves is NOT
+        // restored to 300 — it keeps the grown width.
+        sim.focus_window(a);
+        sim.apply(Op::ConsumeOrExpelWindowRight { id: None });
+        sim.settle();
+
+        let b_w = sim.window_geometry(&b).unwrap().size.w;
+        assert!(
+            (b_w - 700.0).abs() < 5.0,
+            "focus change stops tracking, so the left-behind column is not restored \
+             (stays ~700), got {b_w}",
+        );
+    }
+
     /// `restore_window_size` treats `0.0` as "let the layout pick" and leaves
     /// that dimension untouched — the default for state files written before
     /// width/height capture existed.
