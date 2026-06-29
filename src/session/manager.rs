@@ -362,6 +362,7 @@ mod tests {
                 exec: None,
                 command: None,
                 tmux_session: None,
+                claude_session: None,
                 output: None,
                 workspace: WorkspaceRef::Index { index: 0 },
                 placement: Placement::Tiled {

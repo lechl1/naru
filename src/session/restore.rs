@@ -64,6 +64,19 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
             return argv;
         }
     }
+    // 1c. Claude Code resume: a terminal that was running `claude` directly reopens
+    //     running `claude --resume <id>` so the conversation continues. Captured
+    //     only when *not* under tmux (a claude inside tmux lives under the tmux
+    //     server, restored by the reattach above), so the two never compete;
+    //     ordering tmux first is belt-and-suspenders. Falls through when we can't
+    //     build a command (no captured binary for a non-Konsole terminal).
+    if let Some(session_id) = &entry.claude_session {
+        if let Some(argv) =
+            terminal_exec_argv(entry, crate::session::claude::resume_command(session_id))
+        {
+            return argv;
+        }
+    }
     // 2. PWA / site-specific-browser: a captured `.desktop` `Exec` argv. Must beat
     //    flatpak_id/exec, which would reopen the whole browser instead of the app.
     if let Some(command) = &entry.command {
@@ -95,13 +108,19 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
 /// Build the argv that relaunches `entry`'s terminal reattaching to its tmux
 /// session. The captured terminal binary runs `tmux [<socket>] new-session -A -s
 /// <session>` inside itself (the socket flags are carried in `attach` so restore
-/// reaches the same server). Konsole is invoked as `konsole [--workdir <cwd>] -e
-/// tmux …`; any other terminal as `<exec> -e tmux …` (the common convention).
-/// Returns `None` when there's no binary to run (no captured `exec` for a
-/// non-Konsole terminal), so the caller falls through to a plain relaunch.
+/// reaches the same server). Returns `None` when there's no binary to run, so the
+/// caller falls through to a plain relaunch.
 fn tmux_reattach_argv(entry: &WindowEntry, attach: &TmuxAttach) -> Option<Vec<String>> {
-    let tmux = crate::session::tmux::reattach_command(attach);
+    terminal_exec_argv(entry, crate::session::tmux::reattach_command(attach))
+}
 
+/// Wrap an in-terminal command (`inner`, e.g. a tmux reattach or `claude --resume`)
+/// in the argv that relaunches `entry`'s terminal running it. Konsole is invoked
+/// as `konsole [--workdir <cwd>] -e <inner>`; any other terminal as `<exec> -e
+/// <inner>` (the common `-e` convention). Terminals that don't take `-e`
+/// (kitty/foot/wezterm) use a `launch-command` override instead. Returns `None`
+/// when there's no binary to run (no captured `exec` for a non-Konsole terminal).
+fn terminal_exec_argv(entry: &WindowEntry, inner: Vec<String>) -> Option<Vec<String>> {
     if entry.app_id == "org.kde.konsole" {
         let bin = entry.exec.clone().unwrap_or_else(|| "konsole".into());
         let mut argv = vec![bin];
@@ -110,13 +129,13 @@ fn tmux_reattach_argv(entry: &WindowEntry, attach: &TmuxAttach) -> Option<Vec<St
             argv.push(cwd.to_string_lossy().into_owned());
         }
         argv.push("-e".into());
-        argv.extend(tmux);
+        argv.extend(inner);
         return Some(argv);
     }
 
     let exec = entry.exec.clone()?;
     let mut argv = vec![exec, "-e".into()];
-    argv.extend(tmux);
+    argv.extend(inner);
     Some(argv)
 }
 
@@ -193,6 +212,7 @@ mod tests {
             exec: None,
             command: None,
             tmux_session: None,
+            claude_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Tiled {
@@ -442,6 +462,74 @@ mod tests {
         // command, so fall through to the normal (here: app_id) path.
         let mut e = entry("Alacritty", None);
         e.tmux_session = Some(TmuxAttach::NameOnly("work".into()));
+        assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["Alacritty"]);
+    }
+
+    #[test]
+    fn resolve_konsole_claude_resumes_with_workdir() {
+        // Konsole that was running claude reopens via --workdir + -e claude --resume.
+        let mut e = entry("org.kde.konsole", Some("/home/leo/work"));
+        e.exec = Some("/usr/bin/konsole".into());
+        e.claude_session = Some("abc-123".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec![
+                "/usr/bin/konsole",
+                "--workdir",
+                "/home/leo/work",
+                "-e",
+                "claude",
+                "--resume",
+                "abc-123",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_generic_terminal_claude_uses_dash_e() {
+        // A non-Konsole terminal resumes via its captured binary + `-e`.
+        let mut e = entry("Alacritty", Some("/ws"));
+        e.exec = Some("/usr/bin/alacritty".into());
+        e.claude_session = Some("sess-42".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["/usr/bin/alacritty", "-e", "claude", "--resume", "sess-42"]
+        );
+    }
+
+    #[test]
+    fn resolve_tmux_wins_over_claude() {
+        // Should both ever be set, tmux reattach takes precedence (a claude inside
+        // tmux is restored by reattaching the live session, not a fresh --resume).
+        let mut e = entry("Alacritty", Some("/ws"));
+        e.exec = Some("/usr/bin/alacritty".into());
+        e.tmux_session = Some(TmuxAttach::NameOnly("work".into()));
+        e.claude_session = Some("sess-42".into());
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["/usr/bin/alacritty", "-e", "tmux", "new-session", "-A", "-s", "work"]
+        );
+    }
+
+    #[test]
+    fn resolve_user_override_wins_over_claude() {
+        // An explicit launch-command is honored even when a claude session was captured.
+        let c = cfg(vec![LaunchCommand {
+            app_id: "Alacritty".into(),
+            command: vec!["my-term".into()],
+        }]);
+        let mut e = entry("Alacritty", None);
+        e.exec = Some("/usr/bin/alacritty".into());
+        e.claude_session = Some("sess-42".into());
+        assert_eq!(resolve_launch_argv(&e, &c), vec!["my-term"]);
+    }
+
+    #[test]
+    fn resolve_claude_without_exec_falls_through() {
+        // No captured binary for a non-Konsole terminal → can't build a resume
+        // command, so fall through to the app_id path.
+        let mut e = entry("Alacritty", None);
+        e.claude_session = Some("sess-42".into());
         assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["Alacritty"]);
     }
 }

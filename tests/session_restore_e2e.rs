@@ -92,6 +92,7 @@ fn entry(
         exec: None,
         command: None,
         tmux_session: None,
+        claude_session: None,
         output: None,
         workspace,
         placement,

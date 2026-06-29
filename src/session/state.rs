@@ -107,6 +107,17 @@ pub struct WindowEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux_session: Option<TmuxAttach>,
 
+    /// The Claude Code session this terminal window was running, captured at save
+    /// time as the session id (the transcript's `<uuid>`). `None` for non-terminal
+    /// windows, terminals not running `claude`, and `claude` running inside tmux
+    /// (restored by tmux reattach instead).
+    ///
+    /// On restore the captured terminal is relaunched running
+    /// `claude --resume <id>` so the conversation continues. See
+    /// [`crate::session::claude`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session: Option<String>,
+
     /// Connector name of the output the window was on, e.g. `"DP-1"`. `None` for the
     /// "any output" wildcard at restore time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,6 +302,7 @@ mod tests {
                 exec: None,
                 command: None,
                 tmux_session: None,
+                claude_session: None,
                 output: Some("DP-1".into()),
                 workspace: WorkspaceRef::Name {
                     name: "code".into(),
@@ -326,6 +338,7 @@ mod tests {
             exec: None,
             command: None,
             tmux_session: None,
+            claude_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Floating {
@@ -354,6 +367,7 @@ mod tests {
             exec: None,
             command: None,
             tmux_session: None,
+            claude_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::SidePanel {
@@ -386,6 +400,7 @@ mod tests {
                 "--app-id=abc".into(),
             ]),
             tmux_session: None,
+            claude_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Floating {
@@ -416,6 +431,7 @@ mod tests {
             exec: Some("/usr/bin/konsole".into()),
             command: None,
             tmux_session: Some(TmuxAttach::NameOnly("work".into())),
+            claude_session: None,
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Tiled {
@@ -464,6 +480,38 @@ mod tests {
         // An object without socket_args collapses to the default socket.
         let no_args: TmuxAttach = serde_json::from_str(r#"{"session":"work"}"#).unwrap();
         assert_eq!(no_args, TmuxAttach::NameOnly("work".into()));
+    }
+
+    #[test]
+    fn claude_session_round_trips_and_omits_when_none() {
+        let mut entry = WindowEntry {
+            app_id: "org.kde.konsole".into(),
+            title: None,
+            cwd: Some(PathBuf::from("/ws/naru")),
+            flatpak_id: None,
+            exec: Some("/usr/bin/konsole".into()),
+            command: None,
+            tmux_session: None,
+            claude_session: Some("943ab4f3-4d35-4ca7".into()),
+            output: None,
+            workspace: WorkspaceRef::Index { index: 0 },
+            placement: Placement::Tiled {
+                column_index: 0,
+                tile_index: 0,
+                width: 0.0,
+                height: 0.0,
+                is_fullscreen: false,
+                is_maximized: false,
+            },
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"claude_session\":\"943ab4f3-4d35-4ca7\""));
+        assert_eq!(serde_json::from_str::<WindowEntry>(&json).unwrap(), entry);
+
+        // Omitted (not null) when there's no Claude session.
+        entry.claude_session = None;
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("claude_session"));
     }
 
     #[test]

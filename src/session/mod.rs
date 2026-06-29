@@ -17,6 +17,7 @@
 //! as each new window maps it is steered into its saved slot. Existing already-running
 //! clients can NOT be retroactively snapped into saved positions.
 
+pub mod claude;
 pub mod cwd;
 pub mod desktop;
 pub mod konsole;

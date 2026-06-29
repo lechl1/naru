@@ -98,6 +98,20 @@ pub(crate) fn descendant_chain(pid: i32) -> Vec<i32> {
     chain
 }
 
+/// Read `/proc/<pid>/cmdline` as an argv vector (NUL-separated fields). Empty on
+/// any failure. Used to identify a process by its program/arguments when walking a
+/// terminal's [`descendant_chain`] (e.g. the tmux client or `claude` CLI).
+pub(crate) fn read_cmdline(pid: i32) -> Vec<String> {
+    let Ok(bytes) = fs::read(format!("/proc/{pid}/cmdline")) else {
+        return Vec::new();
+    };
+    bytes
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
 /// Read the last entry of `/proc/<pid>/task/<pid>/children` (the kernel's per-task
 /// children list, space-separated pids). Returns `None` if the file is absent
 /// (kernel without `CONFIG_PROC_CHILDREN`), unreadable, or empty.

@@ -80,8 +80,8 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
             let (w, h) = window_size(mapped);
             let placement = placement_from_ipc_layout(&layout, w, h);
             let (flatpak_id, exec) = launch_info(mapped);
-            let (cwd, tmux_session) =
-                resolve_cwd_and_tmux(mapped, &app_id, session_restore, &mut socket_maps);
+            let (cwd, tmux_session, claude_session) =
+                resolve_terminal_state(mapped, &app_id, session_restore, &mut socket_maps);
 
             windows.push(WindowEntry {
                 app_id: app_id.clone(),
@@ -91,6 +91,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 exec,
                 command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
                 tmux_session,
+                claude_session,
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement,
@@ -115,8 +116,8 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
 
             let (w, h) = window_size(mapped);
             let (flatpak_id, exec) = launch_info(mapped);
-            let (cwd, tmux_session) =
-                resolve_cwd_and_tmux(mapped, &app_id, session_restore, &mut socket_maps);
+            let (cwd, tmux_session, claude_session) =
+                resolve_terminal_state(mapped, &app_id, session_restore, &mut socket_maps);
             windows.push(WindowEntry {
                 app_id: app_id.clone(),
                 title: None,
@@ -125,6 +126,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 exec,
                 command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
                 tmux_session,
+                claude_session,
                 output: output.clone(),
                 workspace: workspace.clone(),
                 placement: Placement::SidePanel {
@@ -144,8 +146,8 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
     }
 }
 
-/// Resolve both the working directory and any tmux session for a window, sharing
-/// a single Konsole D-Bus query between them.
+/// Resolve the working directory and any tmux / Claude Code session for a window,
+/// sharing a single Konsole D-Bus query across all three.
 ///
 /// **cwd** — default is the cwd captured once at window-map time
 /// (`Mapped::session_cwd`), i.e. the directory the window was *opened in*. For
@@ -157,16 +159,21 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
 /// [`tmux::session_for_window`] walks the process tree for a tmux client and maps
 /// it to its session (per-socket server queries cached in `socket_maps`).
 ///
+/// **claude** — likewise only terminals; [`claude::session_for_window`] walks the
+/// tree for a `claude` process and resolves its resumable session id. A `claude`
+/// running inside tmux lives under the tmux server (not the terminal's tree), so
+/// the two are naturally mutually exclusive here.
+///
 /// Konsole is single-process/multi-window: all its windows share one client PID,
 /// so `/proc` can't yield per-window data. Its D-Bus exposes a per-session shell
 /// pid (correlated to the window by title); we query it **once** and derive the
-/// cwd (`/proc/<shell>/cwd`) and the tmux foreground pid from that same shell pid.
-fn resolve_cwd_and_tmux(
+/// cwd (`/proc/<shell>/cwd`) and the tmux/claude foreground pid from that same pid.
+fn resolve_terminal_state(
     mapped: &Mapped,
     app_id: &str,
     sr: &SessionRestore,
     socket_maps: &mut crate::session::tmux::SocketMaps,
-) -> (Option<PathBuf>, Option<TmuxAttach>) {
+) -> (Option<PathBuf>, Option<TmuxAttach>, Option<String>) {
     let pid = mapped.credentials().map(|c| c.pid);
 
     if app_id == "org.kde.konsole" {
@@ -178,16 +185,23 @@ fn resolve_cwd_and_tmux(
                     let cwd = crate::session::read_cwd_for_pid(shell_pid)
                         .or_else(|| mapped.session_cwd().map(PathBuf::from));
                     let tmux = crate::session::tmux::session_for_window(shell_pid, socket_maps);
-                    return (cwd, tmux);
+                    let claude = crate::session::claude::session_for_window(shell_pid);
+                    return (cwd, tmux, claude);
                 }
             }
         }
         // D-Bus lookup failed — fall through to the generic process-tree paths.
     }
 
+    let is_terminal = sr.reads_cwd_from_child(app_id);
     (
         resolve_cwd_generic(mapped, app_id, sr),
-        resolve_tmux_generic(mapped, app_id, sr, socket_maps),
+        is_terminal
+            .then(|| pid.and_then(|p| crate::session::tmux::session_for_window(p, socket_maps)))
+            .flatten(),
+        is_terminal
+            .then(|| pid.and_then(crate::session::claude::session_for_window))
+            .flatten(),
     )
 }
 
@@ -203,20 +217,6 @@ fn resolve_cwd_generic(mapped: &Mapped, app_id: &str, sr: &SessionRestore) -> Op
         }
     }
     mapped.session_cwd().map(PathBuf::from)
-}
-
-/// tmux session for a non-Konsole terminal window, walking from its client pid.
-fn resolve_tmux_generic(
-    mapped: &Mapped,
-    app_id: &str,
-    sr: &SessionRestore,
-    socket_maps: &mut crate::session::tmux::SocketMaps,
-) -> Option<TmuxAttach> {
-    if !sr.reads_cwd_from_child(app_id) {
-        return None;
-    }
-    let pid = mapped.credentials().map(|c| c.pid)?;
-    crate::session::tmux::session_for_window(pid, socket_maps)
 }
 
 /// Capture how to relaunch a window generically: its flatpak id (if a flatpak app) and

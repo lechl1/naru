@@ -17,12 +17,11 @@
 //! after a reboot.
 
 use std::collections::HashMap;
-use std::fs;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use super::cwd::descendant_chain;
+use super::cwd::{descendant_chain, read_cmdline};
 use super::state::TmuxAttach;
 
 /// Per-socket cache of `client_pid → session_name` maps, so each distinct tmux
@@ -94,18 +93,6 @@ fn socket_args_from_argv(argv: &[String]) -> Vec<String> {
         }
     }
     Vec::new()
-}
-
-/// Read `/proc/<pid>/cmdline` as an argv vector (NUL-separated). Empty on failure.
-fn read_cmdline(pid: i32) -> Vec<String> {
-    let Ok(bytes) = fs::read(format!("/proc/{pid}/cmdline")) else {
-        return Vec::new();
-    };
-    bytes
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect()
 }
 
 /// Query a tmux server for every attached client's pid and the session it is on.
