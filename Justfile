@@ -81,10 +81,30 @@ build:
 test:
     cargo test --workspace --exclude naru-visual-tests
 
-# Install system-wide. Depends on `build` (docker buildx), then runs
-# scripts/install.sh under sudo to drop /usr/bin/naru, the session files,
-# and the systemd units in place. It also defaults the Plasma theme to
-# Breeze Dark and the display manager to SDDM *only when neither is already
-# set* — existing, working choices are never overridden.
-install: build
+# scripts/install.sh under sudo drops /usr/bin/naru, the session files, and
+# the systemd units in place. It also defaults the Plasma theme to Breeze
+# Dark and the display manager to SDDM *only when neither is already set* —
+# existing, working choices are never overridden.
+#
+# The sudo password is prompted up front (before the slow docker build) so
+# the install does not stall at a password prompt minutes later. A
+# background keep-alive refreshes the sudo timestamp for the duration of the
+# build, so the privileged step still runs without re-prompting even if the
+# build outlasts sudo's default credential timeout.
+#
+# Install system-wide: build (docker buildx), then install under sudo.
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Prompt for / validate the sudo password before doing any slow work.
+    sudo -v
+
+    # Keep the sudo timestamp warm until this recipe exits, so the install
+    # step below never re-prompts no matter how long the build takes.
+    ( while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) &
+    keepalive=$!
+    trap 'kill "$keepalive" 2>/dev/null || true' EXIT
+
+    just build
     sudo ./scripts/install.sh

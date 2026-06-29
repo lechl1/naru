@@ -139,6 +139,48 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
+# Default the SDDM login-screen theme to KDE Plasma's default — Breeze — but
+# ONLY when SDDM is the active login manager AND no theme is already set.
+# Same fill-the-gap philosophy as the display-manager default above: an
+# existing, working theme choice (e.g. a distro's own login theme) is never
+# overridden.
+WANT_SDDM_THEME="breeze"
+if command -v systemctl >/dev/null 2>&1 \
+    && [[ "$(systemctl show -p Id --value display-manager.service 2>/dev/null || true)" == "sddm.service" ]]; then
+
+    # Find the active [Theme] Current= across SDDM's whole config search path
+    # (vendor dir, then /etc/sddm.conf, then /etc/sddm.conf.d — later files
+    # win). We only care whether *any* of them sets a non-empty value.
+    current_theme=""
+    for f in /usr/lib/sddm/sddm.conf.d/*.conf /etc/sddm.conf /etc/sddm.conf.d/*.conf; do
+        [[ -r "$f" ]] || continue
+        v="$(awk -F= '
+            /^[[:space:]]*\[/ { section = $0 }
+            section ~ /\[Theme\]/ && $1 ~ /^[[:space:]]*Current[[:space:]]*$/ {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); val = $2
+            }
+            END { print val }
+        ' "$f")"
+        [[ -n "$v" ]] && current_theme="$v"
+    done
+
+    if [[ -n "$current_theme" ]] && [[ -d "/usr/share/sddm/themes/$current_theme" ]]; then
+        echo "SDDM theme '$current_theme' is set and installed — leaving it."
+    elif [[ ! -d "/usr/share/sddm/themes/$WANT_SDDM_THEME" ]]; then
+        echo "WARNING: SDDM theme '$WANT_SDDM_THEME' is not installed; skipping login-theme default." >&2
+    else
+        echo "No SDDM theme set (${current_theme:-unset}); defaulting to $WANT_SDDM_THEME (KDE Plasma default)."
+        install -d -m 0755 /etc/sddm.conf.d
+        # Low-priority drop-in: the leading 00- sorts before KDE's own
+        # kde_settings.conf, so a later explicit choice from System Settings
+        # still overrides this default rather than being shadowed by it.
+        cat > /etc/sddm.conf.d/00-naru-sddm-theme.conf <<EOF
+[Theme]
+Current=$WANT_SDDM_THEME
+EOF
+    fi
+fi
+
 echo
 echo "Installed:"
 ls -l /usr/bin/naru /usr/bin/naru-session 2>/dev/null
