@@ -585,7 +585,11 @@ impl<W: LayoutElement> Workspace<W> {
         let min_fraction = if is_uw { 1.0 / 3.0 } else { 1.0 / 2.0 };
         let min_span = view_extent * min_fraction;
 
-        let current = self.scrolling.content_width();
+        // Measure the columns' target layout width, not their cached rendered
+        // width: a window that committed smaller than its column would otherwise
+        // make the row look narrower than it really is and get inflated to the
+        // floor. See [`ScrollingSpace::target_content_width`].
+        let current = self.scrolling.target_content_width();
         if current >= min_span || current <= 0.0 {
             return;
         }

@@ -467,6 +467,25 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         total_col_width + (self.columns.len().saturating_sub(1)) as f64 * gaps
     }
 
+    /// Like [`Self::content_width`], but using each column's *target* width
+    /// (`Column::natural_width`) rather than its cached rendered width.
+    ///
+    /// The cached `data[i].width` follows the window's last *committed* size, so
+    /// a window that committed smaller than its column (e.g. a client that
+    /// hasn't grown into its tile yet) makes `content_width` report less than
+    /// the space the column actually occupies in the row. The carousel's
+    /// min-span floor cares about the columns' layout extent, not the
+    /// momentarily-undersized content, so it uses this instead — otherwise an
+    /// under-committed multi-column row gets spuriously inflated up to the floor.
+    pub fn target_content_width(&self) -> f64 {
+        if self.columns.is_empty() {
+            return 0.0;
+        }
+        let gaps = self.options.layout.gaps;
+        let total: f64 = self.columns.iter().map(|c| c.natural_width()).sum();
+        total + (self.columns.len().saturating_sub(1)) as f64 * gaps
+    }
+
     /// Resets the view offset to a static zero. Used by
     /// [`super::fixed_strip::FixedStrip`] after column insertion to neutralise
     /// any carousel-style scroll target that [`add_column`](Self::add_column)
