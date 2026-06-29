@@ -96,8 +96,8 @@ pub struct WindowEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
 
-    /// Name of the tmux session this terminal window was attached to, captured at
-    /// save time. `None` for non-terminal windows and terminals not running tmux.
+    /// The tmux session this terminal window was attached to, captured at save
+    /// time. `None` for non-terminal windows and terminals not running tmux.
     ///
     /// tmux sessions live in the tmux *server*, independent of the terminal, so
     /// this is captured terminal-agnostically (walk the terminal's process tree
@@ -105,7 +105,7 @@ pub struct WindowEntry {
     /// restore the captured terminal is relaunched reattaching to it via
     /// `tmux new-session -A -s <name>` (attach-or-create). See [`crate::session::tmux`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tmux_session: Option<String>,
+    pub tmux_session: Option<TmuxAttach>,
 
     /// Connector name of the output the window was on, e.g. `"DP-1"`. `None` for the
     /// "any output" wildcard at restore time.
@@ -118,6 +118,83 @@ pub struct WindowEntry {
 
     /// How the window sat within its workspace.
     pub placement: Placement,
+}
+
+/// A tmux session a terminal was attached to, plus how to reach its server.
+///
+/// `socket_args` are the tmux global flags that select a non-default socket
+/// (`["-L", "<label>"]` or `["-S", "<path>"]`); empty for the default socket.
+/// They're captured from the running client so restore reattaches on the same
+/// server, and replayed in front of the `new-session` command.
+///
+/// Serializes compactly — as a bare session-name string on the default socket —
+/// and deserializes from either the string or the full object form, so files
+/// written before custom-socket support still load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum TmuxAttach {
+    /// Default socket: just the session name.
+    NameOnly(String),
+    /// Non-default socket: session name plus the socket-selecting flags.
+    WithSocket {
+        session: String,
+        socket_args: Vec<String>,
+    },
+}
+
+impl TmuxAttach {
+    /// Build from a session name and (possibly empty) socket-selecting flags.
+    pub fn new(session: String, socket_args: Vec<String>) -> Self {
+        if socket_args.is_empty() {
+            Self::NameOnly(session)
+        } else {
+            Self::WithSocket {
+                session,
+                socket_args,
+            }
+        }
+    }
+
+    pub fn session(&self) -> &str {
+        match self {
+            Self::NameOnly(s) => s,
+            Self::WithSocket { session, .. } => session,
+        }
+    }
+
+    pub fn socket_args(&self) -> &[String] {
+        match self {
+            Self::NameOnly(_) => &[],
+            Self::WithSocket { socket_args, .. } => socket_args,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TmuxAttach {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Accept either a bare string (older default-socket form) or the object
+        // form `{ session, socket_args }`.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            NameOnly(String),
+            WithSocket {
+                session: String,
+                #[serde(default)]
+                socket_args: Vec<String>,
+            },
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::NameOnly(session) => TmuxAttach::new(session, Vec::new()),
+            Repr::WithSocket {
+                session,
+                socket_args,
+            } => TmuxAttach::new(session, socket_args),
+        })
+    }
 }
 
 /// Workspace identity. Names are preferred since they survive workspace re-ordering;
@@ -338,7 +415,7 @@ mod tests {
             flatpak_id: None,
             exec: Some("/usr/bin/konsole".into()),
             command: None,
-            tmux_session: Some("work".into()),
+            tmux_session: Some(TmuxAttach::NameOnly("work".into())),
             output: None,
             workspace: WorkspaceRef::Index { index: 0 },
             placement: Placement::Tiled {
@@ -350,8 +427,18 @@ mod tests {
                 is_maximized: false,
             },
         };
+        // Default socket serializes as a bare session-name string.
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"tmux_session\":\"work\""));
+        assert_eq!(serde_json::from_str::<WindowEntry>(&json).unwrap(), entry);
+
+        // A custom socket serializes as the object form and round-trips.
+        entry.tmux_session = Some(TmuxAttach::new(
+            "work".into(),
+            vec!["-L".into(), "ws".into()],
+        ));
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"socket_args\":[\"-L\",\"ws\"]"));
         assert_eq!(serde_json::from_str::<WindowEntry>(&json).unwrap(), entry);
 
         // Omitted (not null) when there's no tmux session.
@@ -359,6 +446,24 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("tmux_session"));
         assert_eq!(serde_json::from_str::<WindowEntry>(&json).unwrap().tmux_session, None);
+    }
+
+    #[test]
+    fn tmux_attach_deserializes_legacy_string_and_object() {
+        // A bare string (pre-custom-socket files) loads as a default-socket attach.
+        let from_str: TmuxAttach = serde_json::from_str("\"work\"").unwrap();
+        assert_eq!(from_str, TmuxAttach::NameOnly("work".into()));
+        assert!(from_str.socket_args().is_empty());
+
+        // The object form carries the socket flags.
+        let from_obj: TmuxAttach =
+            serde_json::from_str(r#"{"session":"work","socket_args":["-S","/tmp/s"]}"#).unwrap();
+        assert_eq!(from_obj.session(), "work");
+        assert_eq!(from_obj.socket_args(), ["-S", "/tmp/s"]);
+
+        // An object without socket_args collapses to the default socket.
+        let no_args: TmuxAttach = serde_json::from_str(r#"{"session":"work"}"#).unwrap();
+        assert_eq!(no_args, TmuxAttach::NameOnly("work".into()));
     }
 
     #[test]

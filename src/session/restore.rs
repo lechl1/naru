@@ -26,7 +26,7 @@ use std::path::Path;
 
 use naru_config::SessionRestore;
 
-use super::state::WindowEntry;
+use super::state::{TmuxAttach, WindowEntry};
 
 /// Build the argv vector to respawn a saved window.
 ///
@@ -59,8 +59,8 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
     //     common `-e` convention; Konsole also gets `--workdir` for the directory.
     //     Terminals that don't take `-e` (kitty/foot/wezterm) use a `launch-command`
     //     override (case 1) instead. Falls through when we can't build a command.
-    if let Some(session) = &entry.tmux_session {
-        if let Some(argv) = tmux_reattach_argv(entry, session) {
+    if let Some(attach) = &entry.tmux_session {
+        if let Some(argv) = tmux_reattach_argv(entry, attach) {
             return argv;
         }
     }
@@ -93,13 +93,14 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
 }
 
 /// Build the argv that relaunches `entry`'s terminal reattaching to its tmux
-/// `session`. The captured terminal binary runs `tmux new-session -A -s <session>`
-/// inside itself. Konsole is invoked as `konsole [--workdir <cwd>] -e tmux …`;
-/// any other terminal as `<exec> -e tmux …` (the common convention). Returns
-/// `None` when there's no binary to run (no captured `exec` for a non-Konsole
-/// terminal), so the caller falls through to a plain relaunch.
-fn tmux_reattach_argv(entry: &WindowEntry, session: &str) -> Option<Vec<String>> {
-    let tmux = crate::session::tmux::reattach_command(session);
+/// session. The captured terminal binary runs `tmux [<socket>] new-session -A -s
+/// <session>` inside itself (the socket flags are carried in `attach` so restore
+/// reaches the same server). Konsole is invoked as `konsole [--workdir <cwd>] -e
+/// tmux …`; any other terminal as `<exec> -e tmux …` (the common convention).
+/// Returns `None` when there's no binary to run (no captured `exec` for a
+/// non-Konsole terminal), so the caller falls through to a plain relaunch.
+fn tmux_reattach_argv(entry: &WindowEntry, attach: &TmuxAttach) -> Option<Vec<String>> {
+    let tmux = crate::session::tmux::reattach_command(attach);
 
     if entry.app_id == "org.kde.konsole" {
         let bin = entry.exec.clone().unwrap_or_else(|| "konsole".into());
@@ -356,7 +357,7 @@ mod tests {
         // Konsole that was running tmux reopens via --workdir + -e tmux attach-or-create.
         let mut e = entry("org.kde.konsole", Some("/home/leo/work"));
         e.exec = Some("/usr/bin/konsole".into());
-        e.tmux_session = Some("dev".into());
+        e.tmux_session = Some(TmuxAttach::NameOnly("dev".into()));
         assert_eq!(
             resolve_launch_argv(&e, &cfg(vec![])),
             vec![
@@ -377,7 +378,7 @@ mod tests {
     fn resolve_konsole_tmux_without_cwd_omits_workdir() {
         let mut e = entry("org.kde.konsole", None);
         e.exec = Some("/usr/bin/konsole".into());
-        e.tmux_session = Some("dev".into());
+        e.tmux_session = Some(TmuxAttach::NameOnly("dev".into()));
         assert_eq!(
             resolve_launch_argv(&e, &cfg(vec![])),
             vec!["/usr/bin/konsole", "-e", "tmux", "new-session", "-A", "-s", "dev"]
@@ -389,10 +390,36 @@ mod tests {
         // A non-Konsole terminal reattaches via its captured binary + `-e`.
         let mut e = entry("Alacritty", Some("/ws"));
         e.exec = Some("/usr/bin/alacritty".into());
-        e.tmux_session = Some("work".into());
+        e.tmux_session = Some(TmuxAttach::NameOnly("work".into()));
         assert_eq!(
             resolve_launch_argv(&e, &cfg(vec![])),
             vec!["/usr/bin/alacritty", "-e", "tmux", "new-session", "-A", "-s", "work"]
+        );
+    }
+
+    #[test]
+    fn resolve_tmux_custom_socket_prepends_flags() {
+        // A session captured on a custom socket reattaches with the same `-L`/`-S`
+        // flags so restore reaches the same tmux server.
+        let mut e = entry("Alacritty", Some("/ws"));
+        e.exec = Some("/usr/bin/alacritty".into());
+        e.tmux_session = Some(TmuxAttach::new(
+            "work".into(),
+            vec!["-L".into(), "ws".into()],
+        ));
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec![
+                "/usr/bin/alacritty",
+                "-e",
+                "tmux",
+                "-L",
+                "ws",
+                "new-session",
+                "-A",
+                "-s",
+                "work",
+            ]
         );
     }
 
@@ -405,7 +432,7 @@ mod tests {
         }]);
         let mut e = entry("Alacritty", None);
         e.exec = Some("/usr/bin/alacritty".into());
-        e.tmux_session = Some("work".into());
+        e.tmux_session = Some(TmuxAttach::NameOnly("work".into()));
         assert_eq!(resolve_launch_argv(&e, &c), vec!["my-term"]);
     }
 
@@ -414,7 +441,7 @@ mod tests {
         // No captured binary for a non-Konsole terminal → can't build a reattach
         // command, so fall through to the normal (here: app_id) path.
         let mut e = entry("Alacritty", None);
-        e.tmux_session = Some("work".into());
+        e.tmux_session = Some(TmuxAttach::NameOnly("work".into()));
         assert_eq!(resolve_launch_argv(&e, &cfg(vec![])), vec!["Alacritty"]);
     }
 }
