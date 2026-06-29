@@ -555,7 +555,12 @@ impl<W: LayoutElement> Workspace<W> {
         if self.options.layout.disable_carousel {
             return;
         }
-        if self.scrolling.column_count() == 0 {
+        // A lone column is the user's explicit width choice — never override it
+        // with the floor (matching the documented "min-span never grows a lone
+        // column" behavior). The floor exists to keep a *multi-column* row from
+        // collapsing into a sliver; a single column resized below it (e.g. via
+        // `set-column-width`) must be honored, not snapped back up.
+        if self.scrolling.column_count() <= 1 {
             return;
         }
 
