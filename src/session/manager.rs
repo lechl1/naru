@@ -37,6 +37,17 @@ const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 /// idle session does no disk I/O.
 const PERIODIC_SAVE: Duration = Duration::from_secs(60);
 
+/// Grace period after startup before session-restore mode ends unconditionally.
+///
+/// During restore, workspaces materialized at saved indices are kept as empty
+/// placeholders so out-of-order window maps still land on the right workspace
+/// (see [`crate::layout::Monitor::restoring`]). The compositor normally ends
+/// restore mode the instant the pending-restore queue drains, but a saved
+/// window whose app was uninstalled or crashed on relaunch never maps — so this
+/// bounded backstop lifts the protection and reclaims unused workspaces even
+/// then. Generous, because some apps (browsers restoring many tabs) map slowly.
+const RESTORE_SETTLE: Duration = Duration::from_secs(60);
+
 /// Per-process runtime state for session-restore.
 ///
 /// Constructed only when the feature is enabled (i.e. `config.session_restore.off ==
@@ -142,6 +153,24 @@ impl SessionManager {
         });
         if let Err(e) = res {
             warn!("session-restore: scheduling periodic save timer failed: {e}");
+        }
+    }
+
+    /// Schedule a one-shot timer that ends session-restore mode after
+    /// [`RESTORE_SETTLE`], as a backstop for placeholder-workspace protection.
+    ///
+    /// Call once at startup when there are pending entries to restore. The
+    /// compositor ends restore mode early when the last pending window maps; this
+    /// guarantees it also ends if some saved windows never reappear. Fires once,
+    /// then drops itself.
+    pub fn schedule_restore_settle(loop_handle: &LoopHandle<'static, crate::naru::State>) {
+        let timer = Timer::from_duration(RESTORE_SETTLE);
+        let res = loop_handle.insert_source(timer, |_deadline, _, state| {
+            state.naru.layout.end_session_restore();
+            TimeoutAction::Drop
+        });
+        if let Err(e) = res {
+            warn!("session-restore: scheduling restore-settle timer failed: {e}");
         }
     }
 

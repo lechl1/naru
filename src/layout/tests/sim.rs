@@ -98,16 +98,28 @@ impl<W: LayoutElement> LayoutModel for Layout<W> {
     }
 
     fn active_window_id(&self) -> Option<W::Id> {
-        self.active_workspace()
-            .and_then(|ws| ws.active_window())
+        // Use the monitor's active window so a focused fixed-side panel window
+        // (monitor-owned) is reported, not just the active workspace's.
+        self.active_monitor_ref()
+            .and_then(|mon| mon.active_window())
             .map(|win| win.id().clone())
     }
 
     fn window_slot(&self, id: &W::Id) -> Option<WindowLayer> {
+        // Fixed-side panels are owned by the monitor now, so consult them first.
+        match self.panel_side_with_window(id) {
+            Some(FixedSide::Left) => return Some(WindowLayer::FixedLeft),
+            Some(FixedSide::Right) => return Some(WindowLayer::FixedRight),
+            None => {}
+        }
         self.workspaces().find_map(|(_, _, ws)| ws.window_slot(id))
     }
 
     fn window_geometry(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        // Panel windows render pinned to the screen (monitor-owned).
+        if let Some((tile, pos)) = self.panel_tile_with_render_position(id) {
+            return Some(Rectangle::new(pos, tile.tile_size()));
+        }
         for (_, _, ws) in self.workspaces() {
             for (tile, pos, _visible) in ws.tiles_with_render_positions() {
                 if tile.window().id() == id {
@@ -119,7 +131,7 @@ impl<W: LayoutElement> LayoutModel for Layout<W> {
     }
 
     fn active_fixed_side(&self) -> Option<FixedSide> {
-        self.active_workspace().and_then(|ws| ws.active_fixed_side())
+        self.layout_active_fixed_side()
     }
 }
 
@@ -1415,12 +1427,12 @@ mod tests {
         );
     }
 
-    /// Closing windows must NOT grow the survivors (user preference): a row
-    /// shrunk to fit many columns stays shrunk after the crowd is closed,
-    /// leaving the freed space empty rather than recovering toward natural
-    /// width. The close path uses a shrink-only fit (`allow_grow = false`).
+    /// Closing windows grows the survivors back toward their preferred width:
+    /// a disable-carousel row shrunk to fit many columns recovers proportionally
+    /// when the crowd is closed, reclaiming the freed space rather than leaving
+    /// it empty. The close path uses a grow-enabled fit (`allow_grow = true`).
     #[test]
-    fn disable_carousel_does_not_grow_survivors_after_closing_windows() {
+    fn disable_carousel_grows_survivors_back_after_closing_windows() {
         let mut options = Options::default();
         options.layout.disable_carousel = true;
         let mut sim = LayoutSim::with_options(options);
@@ -1444,7 +1456,8 @@ mod tests {
             "columns should have shrunk below natural width while crowded",
         );
 
-        // Close the crowd — the survivor stays shrunk, it does not grow back.
+        // Close the crowd — the survivor grows back toward its preferred
+        // (natural) width, reclaiming the freed space.
         for id in extra {
             sim.close_window(id);
         }
@@ -1453,8 +1466,12 @@ mod tests {
         sim.update_render_elements();
         let after = sim.window_geometry(&a).expect("a geo").size.w;
         assert!(
-            (after - shrunk).abs() < 1.0,
-            "closing windows must not grow the survivor: {shrunk} -> {after} (natural {natural})",
+            after > shrunk + 1.0,
+            "closing windows should grow the survivor back: {shrunk} -> {after} (natural {natural})",
+        );
+        assert!(
+            (after - natural).abs() < 1.0,
+            "the lone survivor should return to its natural width: {after} (natural {natural})",
         );
     }
 
@@ -1713,12 +1730,11 @@ mod tests {
     }
 
     /// Closing a window that lived in a fixed-side panel frees the carousel's
-    /// usable width — but the carousel windows must NOT grow into it. The
-    /// panel-area sync uses the no-grow fit, so survivors keep their (more
-    /// shrunk) width and the reclaimed space is left empty. This extends the
-    /// "closing never enlarges others" rule across the panel boundary.
+    /// usable width, and the carousel windows grow back proportionally toward
+    /// their preferred widths to reclaim it. This extends the close-time
+    /// grow-back across the panel boundary.
     #[test]
-    fn closing_a_panel_window_does_not_grow_the_carousel() {
+    fn closing_a_panel_window_grows_the_carousel_back() {
         let mut options = Options::default();
         options.layout.disable_carousel = true;
         options.enable_stacking = true; // fixed-side panels need stacking
@@ -1746,15 +1762,15 @@ mod tests {
             "precondition: a wide panel should shrink the carousel ({natural} -> {shrunk})",
         );
 
-        // Close the panel window. The freed panel space must NOT grow the
-        // carousel survivors — they stay at the shrunk width.
+        // Close the panel window. The freed panel space grows the carousel
+        // survivors back toward their natural width.
         sim.close_window(g);
         sim.settle();
         sim.settle();
         let after = sim.window_geometry(&survivor).expect("geo").size.w;
         assert!(
-            after <= shrunk + 1.0,
-            "closing a panel window must not grow the carousel: {shrunk} -> {after}",
+            after > shrunk + 1.0,
+            "closing a panel window should grow the carousel back: {shrunk} -> {after}",
         );
     }
 
@@ -2046,5 +2062,48 @@ mod tests {
         for (&id, &col) in ids.iter().zip(&saved_cols) {
             sim.assert_column_index(id, col);
         }
+    }
+
+    /// Session restore: a window saved on a per-output workspace *index* must be
+    /// able to land on that workspace even when it doesn't exist yet in the
+    /// freshly-started session — and even when windows map out of order. The old
+    /// behavior resolved only *existing* workspaces, so every window fell back to
+    /// the active workspace (0) and they all piled up there. `begin_session_restore`
+    /// + `materialize_workspace_id_at` create the workspace on demand and protect
+    /// the empty placeholders until restore settles.
+    #[test]
+    fn session_restore_materializes_distinct_workspaces_by_index() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+
+        sim.layout.begin_session_restore();
+
+        // Windows restored in an arbitrary order: index 2 maps first, then 0, then 1.
+        let ws2 = sim
+            .layout
+            .materialize_workspace_id_at(None, 2)
+            .expect("workspace 2 materialized");
+        let ws0 = sim
+            .layout
+            .materialize_workspace_id_at(None, 0)
+            .expect("workspace 0");
+        let ws1 = sim
+            .layout
+            .materialize_workspace_id_at(None, 1)
+            .expect("workspace 1");
+
+        // Each saved index resolved to a *distinct* workspace — nothing collapses
+        // onto the active workspace.
+        assert_ne!(ws0, ws1, "index 0 and 1 must be different workspaces");
+        assert_ne!(ws1, ws2, "index 1 and 2 must be different workspaces");
+        assert_ne!(ws0, ws2, "index 0 and 2 must be different workspaces");
+
+        // Re-resolving the same index is idempotent: a second window saved on that
+        // index joins the first rather than creating yet another workspace.
+        assert_eq!(sim.layout.materialize_workspace_id_at(None, 2), Some(ws2));
+        assert_eq!(sim.layout.materialize_workspace_id_at(None, 0), Some(ws0));
+        assert_eq!(sim.layout.materialize_workspace_id_at(None, 1), Some(ws1));
+
+        sim.layout.end_session_restore();
     }
 }

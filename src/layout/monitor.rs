@@ -4,14 +4,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use naru_config::{CornerRadius, LayoutPart};
+use naru_ipc::SizeChange;
 use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Serial, Size};
 
+use super::fixed_strip::{FixedPanels, FixedSide};
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
-use super::scrolling::{Column, ColumnWidth};
+use super::scrolling::{Column, ColumnWidth, ScrollDirection, ScrollingSpaceRenderElement};
 use super::tile::Tile;
 use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
@@ -31,6 +33,16 @@ use crate::utils::transaction::Transaction;
 use crate::utils::{
     output_size, round_logical_in_physical, round_logical_in_physical_max1, ResizeEdge,
 };
+
+/// Flip a relative size change into its opposite direction (grow ↔ shrink);
+/// absolute targets are unchanged. Mirrors `workspace::negate_size_change`.
+fn negate_size_change_local(change: SizeChange) -> SizeChange {
+    match change {
+        SizeChange::AdjustFixed(n) => SizeChange::AdjustFixed(-n),
+        SizeChange::AdjustProportion(n) => SizeChange::AdjustProportion(-n),
+        other @ (SizeChange::SetFixed(_) | SizeChange::SetProportion(_)) => other,
+    }
+}
 
 /// Amount of touchpad movement to scroll the height of one workspace.
 const WORKSPACE_GESTURE_MOVEMENT: f64 = 300.;
@@ -64,6 +76,10 @@ pub struct Monitor<W: LayoutElement> {
     working_area: Rectangle<f64, Logical>,
     // Must always contain at least one.
     pub(super) workspaces: Vec<Workspace<W>>,
+    /// Fixed-side panels shared across all of this output's workspaces. Owned
+    /// here (not by a workspace) so they render once per output, stay pinned to
+    /// the screen during a workspace switch, and persist across switches.
+    pub(super) panels: FixedPanels<W>,
     /// Index of the currently active workspace.
     pub(super) active_workspace_idx: usize,
     /// ID of the previously active workspace.
@@ -88,6 +104,17 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) options: Rc<Options>,
     /// Layout config overrides for this monitor.
     layout_config: Option<naru_config::LayoutPart>,
+    /// While `true`, empty unnamed workspaces are kept (not compacted away).
+    ///
+    /// Set during session restore so that workspaces materialized at saved
+    /// indices survive as placeholders until the windows that belong on them
+    /// have mapped — restored windows map in an unpredictable order, and
+    /// without this an empty middle placeholder would be reclaimed by
+    /// [`Self::clean_up_workspaces`] (which fires when a workspace-switch
+    /// animation completes) before its window arrives, shifting every index
+    /// below it. Toggled via [`super::Layout::begin_session_restore`] /
+    /// [`super::Layout::end_session_restore`].
+    pub(super) restoring: bool,
 }
 
 #[derive(Debug)]
@@ -327,6 +354,14 @@ impl<W: LayoutElement> Monitor<W> {
         let ws = Workspace::new(output.clone(), clock.clone(), options.clone());
         workspaces.push(ws);
 
+        let panels = FixedPanels::new(
+            view_size,
+            working_area,
+            scale.fractional_scale(),
+            clock.clone(),
+            options.clone(),
+        );
+
         Self {
             output_name: output.name(),
             output,
@@ -334,6 +369,7 @@ impl<W: LayoutElement> Monitor<W> {
             view_size,
             working_area,
             workspaces,
+            panels,
             active_workspace_idx,
             previous_workspace_id: None,
             insert_hint: None,
@@ -346,17 +382,25 @@ impl<W: LayoutElement> Monitor<W> {
             base_options,
             options,
             layout_config,
+            restoring: false,
         }
     }
 
-    pub fn into_workspaces(mut self) -> Vec<Workspace<W>> {
+    /// Consume the monitor, returning its workspaces and its fixed-side panels
+    /// so panel windows survive an output disconnect. Panel windows have their
+    /// output-leave run here (the workspaces do their own in `set_output`).
+    pub fn into_workspaces_and_panels(mut self) -> (Vec<Workspace<W>>, FixedPanels<W>) {
         self.workspaces.retain(|ws| ws.has_windows_or_name());
 
         for ws in &mut self.workspaces {
             ws.set_output(None);
         }
 
-        self.workspaces
+        for win in self.panels.tiles().map(Tile::window) {
+            win.output_leave(&self.output);
+        }
+
+        (self.workspaces, self.panels)
     }
 
     pub fn output(&self) -> &Output {
@@ -396,11 +440,575 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn windows(&self) -> impl Iterator<Item = &W> {
-        self.workspaces.iter().flat_map(|ws| ws.windows())
+        self.workspaces
+            .iter()
+            .flat_map(|ws| ws.windows())
+            .chain(self.panels.tiles().map(Tile::window))
     }
 
     pub fn has_window(&self, window: &W::Id) -> bool {
-        self.windows().any(|win| win.id() == window)
+        self.panels.has_window(window) || self.workspaces.iter().any(|ws| ws.has_window(window))
+    }
+
+    pub fn tiles(&self) -> impl Iterator<Item = &Tile<W>> {
+        self.workspaces
+            .iter()
+            .flat_map(|ws| ws.tiles())
+            .chain(self.panels.tiles())
+    }
+
+    /// Push the monitor's panel inset widths down to every workspace so the
+    /// carousel never overlaps a panel. Call after any panel mutation that can
+    /// change a strip width, and after workspace add/move.
+    fn sync_panel_insets_to_workspaces(&mut self) {
+        let left = self.panels.left_width();
+        let right = self.panels.right_width();
+        for ws in &mut self.workspaces {
+            ws.set_fixed_insets(left, right);
+        }
+    }
+
+    /// Fixed-side panel tiles for session-restore (once per output).
+    pub fn fixed_side_tiles(&self) -> Vec<(FixedSide, usize, usize, &Tile<W>)> {
+        self.panels.fixed_side_tiles()
+    }
+
+    /// Adopt the panels stashed by [`super::MonitorSet::NoOutputs`] (or from a
+    /// disconnected monitor): re-fit them to this output, enter the output for
+    /// each panel window, and push the new insets to the workspaces.
+    pub(super) fn adopt_panels(&mut self, mut panels: FixedPanels<W>) {
+        panels.update_config(
+            self.view_size,
+            self.working_area,
+            self.scale.fractional_scale(),
+            self.options.clone(),
+        );
+        for win in panels.tiles().map(Tile::window) {
+            self.enter_output_for_window(win);
+        }
+        self.panels = panels;
+        self.sync_panel_insets_to_workspaces();
+    }
+
+    /// Remove a fixed-side panel window's tile (running output-leave and
+    /// re-syncing panel insets). `None` if no panel owns it.
+    pub(super) fn remove_panel_tile(
+        &mut self,
+        window: &W::Id,
+        transaction: Transaction,
+    ) -> Option<super::RemovedTile<W>> {
+        let removed = self.panels.remove_tile(window, transaction)?;
+        removed.tile.window().output_leave(&self.output);
+        self.sync_panel_insets_to_workspaces();
+        Some(removed)
+    }
+
+    /// Apply a committed configure-ack to a panel window (re-syncing insets if a
+    /// strip width changed). `true` if a panel owned it.
+    pub(super) fn update_panel_window(&mut self, window: &W::Id, serial: Option<Serial>) -> bool {
+        if self.panels.update_window(window, serial) {
+            self.sync_panel_insets_to_workspaces();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drain another set of panels into ours (used when a non-primary monitor
+    /// disconnects and its panel windows merge into the primary). Window order
+    /// within a panel may change, but no window is dropped.
+    pub(super) fn absorb_panels(&mut self, mut other: FixedPanels<W>) {
+        for side in [FixedSide::Left, FixedSide::Right] {
+            while let Some(column) = other.remove_innermost_column(side) {
+                for (tile, _) in column.tiles() {
+                    self.enter_output_for_window(tile.window());
+                }
+                self.panels.add_column_at_inner_edge(side, column);
+            }
+        }
+        self.sync_panel_insets_to_workspaces();
+    }
+
+    /// The active fixed-side panel that owns focus, if any.
+    pub(super) fn panels_active_fixed_side(&self) -> Option<FixedSide> {
+        self.panels.active_fixed_side()
+    }
+
+    fn active_ws(&mut self) -> &mut Workspace<W> {
+        &mut self.workspaces[self.active_workspace_idx]
+    }
+
+    /// Send a panel-bound window onto this output (scale/transform + enter).
+    /// Workspaces do this for their own windows; the monitor does it for panel
+    /// windows since the panels are owned here.
+    fn enter_output_for_window(&self, window: &W) {
+        window.set_preferred_scale_transform(self.scale, self.output.current_transform());
+        window.output_enter(&self.output);
+    }
+
+    // --- Cross-boundary carousel ↔ panel column moves ------------------------
+
+    pub(super) fn move_active_carousel_column_into_left_strip(&mut self) -> bool {
+        let idx = self.active_workspace_idx;
+        let ws = &mut self.workspaces[idx];
+        if ws.carousel_is_floating_active() {
+            return false;
+        }
+        if ws.carousel_active_column_index() != Some(0) {
+            return false;
+        }
+        let Some(column) = ws.carousel_remove_active_column() else {
+            return false;
+        };
+        self.panels.add_column_at_inner_edge(FixedSide::Left, column);
+        self.panels.set_active_fixed_side(Some(FixedSide::Left));
+        self.sync_panel_insets_to_workspaces();
+        true
+    }
+
+    pub(super) fn move_active_carousel_column_into_right_strip(&mut self) -> bool {
+        let idx = self.active_workspace_idx;
+        let ws = &mut self.workspaces[idx];
+        if ws.carousel_is_floating_active() {
+            return false;
+        }
+        let last_idx = match ws.carousel_column_count().checked_sub(1) {
+            Some(i) => i,
+            None => return false,
+        };
+        if ws.carousel_active_column_index() != Some(last_idx) {
+            return false;
+        }
+        let Some(column) = ws.carousel_remove_active_column() else {
+            return false;
+        };
+        self.panels.add_column_at_inner_edge(FixedSide::Right, column);
+        self.panels.set_active_fixed_side(Some(FixedSide::Right));
+        self.sync_panel_insets_to_workspaces();
+        true
+    }
+
+    pub(super) fn move_active_strip_column_back_to_carousel_left(&mut self) -> bool {
+        if self.panels.active_fixed_side() != Some(FixedSide::Left) {
+            return false;
+        }
+        if !self.panels.focused_column_is_at_inner_edge(FixedSide::Left) {
+            return false;
+        }
+        let Some(column) = self.panels.remove_innermost_column(FixedSide::Left) else {
+            self.panels.set_active_fixed_side(None);
+            return false;
+        };
+        self.active_ws().carousel_add_column_at(0, column);
+        self.panels.set_active_fixed_side(None);
+        self.ensure_trailing_empty_workspace();
+        self.sync_panel_insets_to_workspaces();
+        true
+    }
+
+    pub(super) fn move_active_strip_column_back_to_carousel_right(&mut self) -> bool {
+        if self.panels.active_fixed_side() != Some(FixedSide::Right) {
+            return false;
+        }
+        if !self.panels.focused_column_is_at_inner_edge(FixedSide::Right) {
+            return false;
+        }
+        let Some(column) = self.panels.remove_innermost_column(FixedSide::Right) else {
+            self.panels.set_active_fixed_side(None);
+            return false;
+        };
+        let idx = self.active_ws().carousel_column_count();
+        self.active_ws().carousel_add_column_at(idx, column);
+        self.panels.set_active_fixed_side(None);
+        self.ensure_trailing_empty_workspace();
+        self.sync_panel_insets_to_workspaces();
+        true
+    }
+
+    /// If the active workspace is the last one and now holds a window (e.g. a
+    /// panel column was handed back to its empty carousel), append a fresh
+    /// trailing empty workspace and honour `empty_workspace_above_first`.
+    fn ensure_trailing_empty_workspace(&mut self) {
+        if self.active_workspace_idx == self.workspaces.len() - 1
+            && self.workspaces[self.active_workspace_idx].has_windows_or_name()
+        {
+            self.add_workspace_bottom();
+        }
+        if self.options.layout.empty_workspace_above_first
+            && self.workspaces[0].has_windows_or_name()
+        {
+            self.add_workspace_top();
+        }
+    }
+
+    pub(super) fn move_active_window_within_left_strip(&mut self, to_left: bool) -> bool {
+        if self.panels.active_fixed_side() != Some(FixedSide::Left) {
+            return false;
+        }
+        let moved = self
+            .panels
+            .move_active_neighbor_as_new_row(FixedSide::Left, to_left);
+        self.sync_panel_insets_to_workspaces();
+        moved
+    }
+
+    pub(super) fn move_active_window_within_right_strip(&mut self, to_left: bool) -> bool {
+        if self.panels.active_fixed_side() != Some(FixedSide::Right) {
+            return false;
+        }
+        let moved = self
+            .panels
+            .move_active_neighbor_as_new_row(FixedSide::Right, to_left);
+        self.sync_panel_insets_to_workspaces();
+        moved
+    }
+
+    // --- Panel-aware focus traversal -----------------------------------------
+
+    pub(super) fn focus_left(&mut self) -> bool {
+        let idx = self.active_workspace_idx;
+        match self.panels.active_fixed_side() {
+            Some(FixedSide::Left) => self.panels.focus_left_in_active(),
+            Some(FixedSide::Right) => {
+                if self.panels.focus_left_in_active() {
+                    true
+                } else if !self.workspaces[idx].scrolling_is_empty() {
+                    self.workspaces[idx].carousel_focus_column_last();
+                    self.panels.set_active_fixed_side(None);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                let ws = &mut self.workspaces[idx];
+                if ws.focus_left_in_layer() {
+                    true
+                } else if self.panels.focus_innermost(FixedSide::Left) {
+                    self.panels.set_active_fixed_side(Some(FixedSide::Left));
+                    true
+                } else {
+                    self.workspaces[idx].focus_cross_layer_left()
+                }
+            }
+        }
+    }
+
+    pub(super) fn focus_right(&mut self) -> bool {
+        let idx = self.active_workspace_idx;
+        match self.panels.active_fixed_side() {
+            Some(FixedSide::Right) => self.panels.focus_right_in_active(),
+            Some(FixedSide::Left) => {
+                if self.panels.focus_right_in_active() {
+                    true
+                } else if !self.workspaces[idx].scrolling_is_empty() {
+                    self.workspaces[idx].carousel_focus_column_first();
+                    self.panels.set_active_fixed_side(None);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                let ws = &mut self.workspaces[idx];
+                if ws.focus_right_in_layer() {
+                    true
+                } else if self.panels.focus_innermost(FixedSide::Right) {
+                    self.panels.set_active_fixed_side(Some(FixedSide::Right));
+                    true
+                } else {
+                    self.workspaces[idx].focus_cross_layer_right()
+                }
+            }
+        }
+    }
+
+    pub(super) fn focus_up(&mut self) -> bool {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.focus_up_in_active()
+        } else {
+            self.active_ws().focus_up()
+        }
+    }
+
+    pub(super) fn focus_down(&mut self) -> bool {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.focus_down_in_active()
+        } else {
+            self.active_ws().focus_down()
+        }
+    }
+
+    pub(super) fn focus_down_or_left(&mut self) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.focus_down_in_active();
+        } else {
+            self.active_ws().focus_down_or_left();
+        }
+    }
+
+    pub(super) fn focus_down_or_right(&mut self) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.focus_down_in_active();
+        } else {
+            self.active_ws().focus_down_or_right();
+        }
+    }
+
+    pub(super) fn focus_up_or_left(&mut self) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.focus_up_in_active();
+        } else {
+            self.active_ws().focus_up_or_left();
+        }
+    }
+
+    pub(super) fn focus_up_or_right(&mut self) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.focus_up_in_active();
+        } else {
+            self.active_ws().focus_up_or_right();
+        }
+    }
+
+    pub(super) fn focus_column_first(&mut self) {
+        self.panels.set_active_fixed_side(None);
+        self.active_ws().focus_column_first();
+    }
+
+    pub(super) fn focus_column_last(&mut self) {
+        self.panels.set_active_fixed_side(None);
+        self.active_ws().focus_column_last();
+    }
+
+    pub(super) fn focus_column_right_or_first(&mut self) {
+        if !self.focus_right() {
+            self.focus_column_first();
+        }
+    }
+
+    pub(super) fn focus_column_left_or_last(&mut self) {
+        if !self.focus_left() {
+            self.focus_column_last();
+        }
+    }
+
+    pub(super) fn focus_window_down_or_top(&mut self) {
+        if !self.focus_down() {
+            self.active_ws().focus_window_top();
+        }
+    }
+
+    pub(super) fn focus_window_up_or_bottom(&mut self) {
+        if !self.focus_up() {
+            self.active_ws().focus_window_bottom();
+        }
+    }
+
+    // --- Panel-aware per-window operations -----------------------------------
+    //
+    // Each checks whether a fixed-side panel owns the target (an explicit id, or
+    // — for "active" ops — the active panel) and routes there; otherwise it
+    // delegates to the active workspace's carousel/floating handling.
+
+    pub(super) fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) {
+        if !self.panels.set_fullscreen(window, is_fullscreen) {
+            self.active_ws().set_fullscreen(window, is_fullscreen);
+        }
+        self.sync_panel_insets_to_workspaces();
+    }
+
+    pub(super) fn set_maximized(&mut self, window: &W::Id, maximize: bool) {
+        if !self.panels.set_maximized(window, maximize) {
+            self.active_ws().set_maximized(window, maximize);
+        }
+        self.sync_panel_insets_to_workspaces();
+    }
+
+    pub(super) fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        if self.panel_owns(window) {
+            self.panels.set_window_width(window, change);
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().set_window_width(window, change);
+        }
+    }
+
+    pub(super) fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        if self.panel_owns(window) {
+            self.panels.set_window_height(window, change);
+        } else {
+            self.active_ws().set_window_height(window, change);
+        }
+    }
+
+    pub(super) fn reset_window_height(&mut self, window: Option<&W::Id>) {
+        if self.panel_owns(window) {
+            self.panels.reset_window_height(window);
+        } else {
+            self.active_ws().reset_window_height(window);
+        }
+    }
+
+    pub(super) fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
+        if self.panel_owns(window) {
+            self.panels.toggle_window_width(window, forwards);
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().toggle_window_width(window, forwards);
+        }
+    }
+
+    pub(super) fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
+        if self.panel_owns(window) {
+            self.panels.toggle_window_height(window, forwards);
+        } else {
+            self.active_ws().toggle_window_height(window, forwards);
+        }
+    }
+
+    pub(super) fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
+        if self.panel_owns(window) {
+            self.panels.consume_or_expel_window_left(window);
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().consume_or_expel_window_left(window);
+        }
+    }
+
+    pub(super) fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
+        if self.panel_owns(window) {
+            self.panels.consume_or_expel_window_right(window);
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().consume_or_expel_window_right(window);
+        }
+    }
+
+    pub(super) fn consume_into_column(&mut self) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.consume_into_column();
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().consume_into_column();
+        }
+    }
+
+    pub(super) fn expel_from_column(&mut self) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.expel_from_column();
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().expel_from_column();
+        }
+    }
+
+    pub(super) fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.swap_window_in_direction(direction);
+        } else {
+            self.active_ws().swap_window_in_direction(direction);
+        }
+    }
+
+    pub(super) fn toggle_width(&mut self, forwards: bool) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.toggle_window_width(None, forwards);
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().toggle_width(forwards);
+        }
+    }
+
+    pub(super) fn set_column_width(&mut self, change: SizeChange) {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.set_window_width(None, change);
+            self.sync_panel_insets_to_workspaces();
+        } else {
+            self.active_ws().set_column_width(change);
+        }
+    }
+
+    pub(super) fn resize_column_positional(&mut self, toward_right: bool, step: SizeChange) {
+        match self.panels.active_fixed_side() {
+            Some(side) => {
+                // Panel windows are unambiguously on their side: a left-panel
+                // window grows toward the right (center), a right-panel window
+                // toward the left.
+                let left_of_center = side == FixedSide::Left;
+                let grow = left_of_center == toward_right;
+                let change = if grow {
+                    step
+                } else {
+                    negate_size_change_local(step)
+                };
+                self.panels.set_window_width(None, change);
+                self.sync_panel_insets_to_workspaces();
+            }
+            None => self.active_ws().resize_column_positional(toward_right, step),
+        }
+    }
+
+    pub(super) fn center_window(&mut self, id: Option<&W::Id>) {
+        // Panels are pinned (no view scrolling) — nothing to center there.
+        if self.panel_owns(id) {
+            return;
+        }
+        self.active_ws().center_window(id);
+    }
+
+    pub(super) fn center_column(&mut self) {
+        // Panels are pinned — nothing to center.
+        if self.panels.active_fixed_side().is_some() {
+            return;
+        }
+        self.active_ws().center_column();
+    }
+
+    pub(super) fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
+        if self.panels.has_window(&window) {
+            self.panels.interactive_resize_begin(window, edges)
+        } else {
+            self.active_ws().interactive_resize_begin(window, edges)
+        }
+    }
+
+    pub(super) fn interactive_resize_update(
+        &mut self,
+        window: &W::Id,
+        delta: Point<f64, Logical>,
+    ) -> bool {
+        if self.panels.has_window(window) {
+            let rv = self.panels.interactive_resize_update(window, delta);
+            self.sync_panel_insets_to_workspaces();
+            rv
+        } else {
+            self.active_ws().interactive_resize_update(window, delta)
+        }
+    }
+
+    pub(super) fn interactive_resize_end(&mut self, window: Option<&W::Id>) {
+        // Always end on both layers when no specific window is given.
+        match window {
+            Some(id) if self.panels.has_window(id) => {
+                self.panels.interactive_resize_end(Some(id));
+                self.sync_panel_insets_to_workspaces();
+            }
+            Some(id) => self.active_ws().interactive_resize_end(Some(id)),
+            None => {
+                self.panels.interactive_resize_end(None);
+                self.active_ws().interactive_resize_end(None);
+            }
+        }
+    }
+
+    /// Whether a per-window op should target a panel: an explicit panel-owned
+    /// id, or — for `None` — the active panel side.
+    fn panel_owns(&self, window: Option<&W::Id>) -> bool {
+        match window {
+            Some(id) => self.panels.has_window(id),
+            None => self.panels.active_fixed_side().is_some(),
+        }
     }
 
     pub fn add_workspace_at(&mut self, idx: usize) {
@@ -500,12 +1108,13 @@ impl<W: LayoutElement> Monitor<W> {
                 (idx, target)
             }
             MonitorAddWindowTarget::NextTo(win_id) => {
-                let idx = self
-                    .workspaces
-                    .iter_mut()
-                    .position(|ws| ws.has_window(win_id))
-                    .unwrap();
-                (idx, WorkspaceAddWindowTarget::NextTo(win_id))
+                // If `win_id` is a fixed-side panel window (monitor-owned, not in a
+                // workspace), there's no carousel column to open next to — fall back
+                // to the active workspace's auto placement.
+                match self.workspaces.iter_mut().position(|ws| ws.has_window(win_id)) {
+                    Some(idx) => (idx, WorkspaceAddWindowTarget::NextTo(win_id)),
+                    None => (self.active_workspace_idx, WorkspaceAddWindowTarget::Auto),
+                }
             }
         }
     }
@@ -569,6 +1178,43 @@ impl<W: LayoutElement> Monitor<W> {
         is_full_width: bool,
         is_floating: bool,
     ) {
+        // Fixed-side panel routing (panels are owned by the monitor):
+        //   - `open-in-fixed-side` opens the window as a fresh column at the
+        //     inner edge of the named panel.
+        //   - `NextTo` a panel window inserts next to it in that panel.
+        // Both bypass the carousel / floating placement entirely.
+        if matches!(target, MonitorAddWindowTarget::Auto) {
+            if let Some(side) = tile.window().rules().open_in_fixed_side {
+                let side = match side {
+                    naru_ipc::OpenInFixedSide::Left => FixedSide::Left,
+                    naru_ipc::OpenInFixedSide::Right => FixedSide::Right,
+                };
+                let mut tile = tile;
+                tile.restore_to_floating = is_floating;
+                self.enter_output_for_window(tile.window());
+                self.panels
+                    .add_tile_at_inner_edge(side, tile, width, is_full_width);
+                self.sync_panel_insets_to_workspaces();
+                return;
+            }
+        }
+        if let MonitorAddWindowTarget::NextTo(next_to) = target {
+            if let Some(side) = self.panels.side_with_window(next_to) {
+                let activate_b = activate
+                    .map_smart(|| self.active_window().map(|w| w.id()) == Some(next_to));
+                let mut tile = tile;
+                tile.restore_to_floating = is_floating;
+                self.enter_output_for_window(tile.window());
+                self.panels
+                    .add_tile_right_of(side, next_to, tile, activate_b, width, is_full_width);
+                if activate_b {
+                    self.panels.set_active_fixed_side(Some(side));
+                }
+                self.sync_panel_insets_to_workspaces();
+                return;
+            }
+        }
+
         let (mut workspace_idx, target) = self.resolve_add_window_target(target);
 
         let workspace = &mut self.workspaces[workspace_idx];
@@ -624,6 +1270,13 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn clean_up_workspaces(&mut self) {
         assert!(self.workspace_switch.is_none());
+
+        // During session restore, keep empty placeholder workspaces around so a
+        // window saved on workspace N still has workspace N waiting for it even
+        // when it maps after windows on higher indices. See `Monitor::restoring`.
+        if self.restoring {
+            return;
+        }
 
         let range_start = if self.options.layout.empty_workspace_above_first {
             1
@@ -771,13 +1424,13 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn focus_window_or_workspace_down(&mut self) {
-        if !self.active_workspace().focus_down() {
+        if !self.focus_down() {
             self.switch_workspace_down();
         }
     }
 
     pub fn focus_window_or_workspace_up(&mut self) {
-        if !self.active_workspace().focus_up() {
+        if !self.focus_up() {
             self.switch_workspace_up();
         }
     }
@@ -857,10 +1510,12 @@ impl<W: LayoutElement> Monitor<W> {
         activate: ActivateWindow,
     ) {
         let source_workspace_idx = if let Some(window) = window {
-            self.workspaces
-                .iter()
-                .position(|ws| ws.has_window(window))
-                .unwrap()
+            // A fixed-side panel window is output-pinned, not workspace-owned, so
+            // "move to workspace" doesn't apply to it — no-op rather than panic.
+            let Some(idx) = self.workspaces.iter().position(|ws| ws.has_window(window)) else {
+                return;
+            };
+            idx
         } else {
             self.active_workspace_idx
         };
@@ -1031,7 +1686,19 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn active_window(&self) -> Option<&W> {
+        if self.panels.active_fixed_side().is_some() {
+            if let Some(win) = self.panels.active_window() {
+                return Some(win);
+            }
+        }
         self.active_workspace_ref().active_window()
+    }
+
+    pub fn active_window_mut(&mut self) -> Option<&mut W> {
+        if self.panels.active_fixed_side().is_some() && self.panels.active_window().is_some() {
+            return self.panels.active_window_mut();
+        }
+        self.active_ws().active_window_mut()
     }
 
     pub fn advance_animations(&mut self) {
@@ -1072,12 +1739,15 @@ impl<W: LayoutElement> Monitor<W> {
         for ws in &mut self.workspaces {
             ws.advance_animations();
         }
+
+        self.panels.advance_animations();
     }
 
     pub(super) fn are_animations_ongoing(&self) -> bool {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
+            || self.panels.are_animations_ongoing()
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1096,8 +1766,25 @@ impl<W: LayoutElement> Monitor<W> {
             .as_ref()
             .and_then(|hint| hint.workspace.existing_id());
 
+        // The fixed-side panels are monitor-global; their focus persists across
+        // workspace switches. The panel focus (when this monitor is active)
+        // suppresses the carousel's focus ring so the user can tell where input
+        // is going.
+        let panel_focus = if is_active {
+            self.panels.active_fixed_side()
+        } else {
+            None
+        };
+        self.panels.update_render_elements(panel_focus);
+        // Panel widths can change asynchronously (a panel window committing a
+        // configure changes its strip's content width), so re-push the insets to
+        // the workspaces every frame — the old per-workspace strips did this
+        // implicitly via `sync_carousel_parent_area` in their own
+        // `update_render_elements`.
+        self.sync_panel_insets_to_workspaces();
+
         for (ws, geo) in self.workspaces_with_render_geo_mut(true) {
-            ws.update_render_elements(is_active);
+            ws.update_render_elements(is_active, panel_focus);
 
             if Some(ws.id()) == insert_hint_ws_id {
                 insert_hint_ws_geo = Some(geo);
@@ -1203,6 +1890,14 @@ impl<W: LayoutElement> Monitor<W> {
             ws.update_config(options.clone());
         }
 
+        self.panels.update_config(
+            self.view_size,
+            self.working_area,
+            self.scale.fractional_scale(),
+            options.clone(),
+        );
+        self.sync_panel_insets_to_workspaces();
+
         self.insert_hint_element
             .update_config(options.layout.insert_hint);
 
@@ -1237,6 +1932,14 @@ impl<W: LayoutElement> Monitor<W> {
         for ws in &mut self.workspaces {
             ws.update_output_size();
         }
+
+        self.panels.update_output_size(
+            self.view_size,
+            self.working_area,
+            self.scale.fractional_scale(),
+            self.options.clone(),
+        );
+        self.sync_panel_insets_to_workspaces();
     }
 
     pub fn move_workspace_down(&mut self) {
@@ -1560,6 +2263,15 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
+        // The fixed-side panels are pinned to the screen (working-area origin),
+        // in front of the carousel — hit-test them first so a click focuses a
+        // panel window. Skipped in the overview (scaled windows can't be hit).
+        if self.overview_progress.is_none() {
+            if let Some(rv) = self.panels.window_under(pos_within_output) {
+                return Some(rv);
+            }
+        }
+
         let (ws, geo) = self.workspace_under(pos_within_output)?;
 
         if self.overview_progress.is_some() {
@@ -1720,8 +2432,19 @@ impl<W: LayoutElement> Monitor<W> {
             )
         };
 
+        // Push order is front-to-back (earlier = on top — see naru.rs, where the
+        // overlay layer is pushed first and the wallpaper backdrop last).
+        //
+        // Three passes so the monitor-global fixed-side panels render exactly
+        // once, pinned to the screen, *in front of* the carousels but *behind*
+        // the floating windows:
+        //   1. floating + insert hint (front)
+        //   2. fixed-side panels (pinned, once per output — do NOT slide during
+        //      a workspace switch)
+        //   3. carousels (back)
+
+        // Pass 1: floating windows + insert hint.
         for (ws, geo) in self.workspaces_with_render_geo() {
-            // Macro instead of closure because ws and insert hint have different elem types.
             macro_rules! push {
                 () => {{
                     &mut |elem| {
@@ -1735,7 +2458,6 @@ impl<W: LayoutElement> Monitor<W> {
             }
 
             let xray_pos = XrayPos::new(geo.loc, zoom);
-
             ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
 
             if let Some(loc) = insert_hint_render_loc {
@@ -1744,22 +2466,44 @@ impl<W: LayoutElement> Monitor<W> {
                         .render(ctx.renderer, loc.location, push!());
                 }
             }
+        }
 
-            // Push order is front-to-back (earlier = on top — see naru.rs,
-            // where the overlay layer is pushed first and the wallpaper
-            // backdrop last). The fixed-side panels therefore render *in front
-            // of* the carousel: a carousel column scrolled to the edge slides
-            // behind the panel rather than over it. The carousel's position
-            // relative to the screen still stays pinned as panels grow / shrink
-            // (that's a layout property, independent of z-order).
-            //
-            // `render_scrolling` fades the carousel's edge out to transparent as
-            // it approaches a populated panel, so it dissolves into the wallpaper
-            // just before disappearing underneath.
-            ws.render_fixed_left(ctx.r(), xray_pos, focus_ring, push!());
-            ws.render_fixed_right(ctx.r(), xray_pos, focus_ring, push!());
+        // Pass 2: the fixed-side panels, pinned to the working-area origin of
+        // the screen (not offset by any per-workspace geo) so they stay put
+        // while the carousels slide during a switch. The focus-ring gating
+        // depends on the active workspace's floating state (floating lives on
+        // the workspace, not the panels).
+        {
+            let pinned_geo = Rectangle::from_size(self.view_size);
+            let panel_focus_ring =
+                focus_ring && !self.workspaces[self.active_workspace_idx].floating_is_active();
+            let xray_pos = XrayPos::new(pinned_geo.loc, zoom);
+            let mut panel_push = |elem: ScrollingSpaceRenderElement<R>| {
+                let elem = WorkspaceRenderElement::Scrolling(elem);
+                let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
+                if let Some(elem) = elem {
+                    let elem = MonitorInnerRenderElement::from(elem);
+                    push(scale_relocate(pinned_geo, elem));
+                }
+            };
+            self.panels
+                .render_left(ctx.r(), xray_pos, panel_focus_ring, &mut panel_push);
+            self.panels
+                .render_right(ctx.r(), xray_pos, panel_focus_ring, &mut panel_push);
+        }
 
-            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, push!());
+        // Pass 3: the carousels (behind the panels). `render_scrolling` fades
+        // the carousel's edge to transparent as it approaches a populated panel,
+        // so it dissolves into the wallpaper just before sliding underneath.
+        for (ws, geo) in self.workspaces_with_render_geo() {
+            let xray_pos = XrayPos::new(geo.loc, zoom);
+            ws.render_scrolling(ctx.r(), xray_pos, focus_ring, &mut |elem| {
+                let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
+                if let Some(elem) = elem {
+                    let elem = MonitorInnerRenderElement::from(elem);
+                    push(scale_relocate(geo, elem));
+                }
+            });
         }
     }
 
@@ -2071,6 +2815,8 @@ impl<W: LayoutElement> Monitor<W> {
     #[cfg(test)]
     pub(super) fn verify_invariants(&self) {
         use approx::assert_abs_diff_eq;
+
+        self.panels.verify_invariants();
 
         let options =
             Options::clone(&self.base_options).with_merged_layout(self.layout_config.as_ref());

@@ -1471,9 +1471,20 @@ impl Op {
                                     }
                                 }
                             }
+                            // Fixed-side panel windows are owned per-output, not by
+                            // a workspace, so scan them too — otherwise a panel
+                            // window never acks its configure (e.g. a resize).
+                            for win in mon.panels.tiles().map(|t| t.window()) {
+                                if win.0.id == id {
+                                    if win.communicate() {
+                                        update = true;
+                                    }
+                                    break 'outer;
+                                }
+                            }
                         }
                     }
-                    MonitorSet::NoOutputs { workspaces, .. } => {
+                    MonitorSet::NoOutputs { workspaces, panels } => {
                         'outer: for ws in workspaces {
                             for win in ws.windows() {
                                 if win.0.id == id {
@@ -1482,6 +1493,14 @@ impl Op {
                                     }
                                     break 'outer;
                                 }
+                            }
+                        }
+                        for win in panels.tiles().map(|t| t.window()) {
+                            if win.0.id == id {
+                                if win.communicate() {
+                                    update = true;
+                                }
+                                break;
                             }
                         }
                     }
@@ -2385,7 +2404,7 @@ fn removing_all_outputs_preserves_empty_named_workspaces() {
 
     let layout = check_ops(ops);
 
-    let MonitorSet::NoOutputs { workspaces } = layout.monitor_set else {
+    let MonitorSet::NoOutputs { workspaces, .. } = layout.monitor_set else {
         unreachable!()
     };
 

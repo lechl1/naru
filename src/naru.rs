@@ -2281,7 +2281,7 @@ impl Naru {
     /// `SessionManager::new`; they stay in `pending_restore` after this call so the
     /// `add_window` matcher in `handlers/compositor.rs` can pin each respawned
     /// window to its saved slot as it maps. No-op when session-restore is disabled.
-    pub fn restore_session_apps(&self) {
+    pub fn restore_session_apps(&mut self) {
         let Some(sm) = self.session_manager.as_ref() else {
             return;
         };
@@ -2291,6 +2291,16 @@ impl Naru {
             std::env::var_os("WAYLAND_DISPLAY"),
             entries.len(),
         );
+
+        if !entries.is_empty() {
+            // Protect placeholder workspaces while the respawned windows map, so
+            // an index-saved window lands on its workspace even when it maps after
+            // windows on higher indices. Ended early when the pending queue drains
+            // (handlers/compositor.rs); the settle timer is the backstop.
+            self.layout.begin_session_restore();
+            crate::session::SessionManager::schedule_restore_settle(&self.event_loop);
+        }
+
         crate::session::restore_apps(&self.config.borrow().session_restore, &entries);
     }
 

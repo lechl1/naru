@@ -57,7 +57,7 @@ use self::monitor::{Monitor, WorkspaceSwitch};
 use self::workspace::{OutputId, Workspace};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
-use crate::layout::fixed_strip::FixedSide;
+use crate::layout::fixed_strip::{FixedPanels, FixedSide};
 use crate::layout::scrolling::ScrollDirection;
 use crate::naru_render_elements;
 use crate::render_helpers::background_effect::BackgroundEffectElement;
@@ -383,6 +383,12 @@ pub struct Layout<W: LayoutElement> {
     /// stacking moves on the same window — any other action clears it. Phase 4 consumes this
     /// to flip behavior between "new column/row" and "overlap neighbor" on each repeat.
     stacking_move_state: Option<StackingMoveState<W::Id>>,
+    /// Whether a prior session is currently being restored. While `true`, empty
+    /// placeholder workspaces are protected from compaction (see
+    /// [`Monitor::restoring`]), and any monitor connected mid-restore inherits
+    /// the flag. Toggled by [`Self::begin_session_restore`] /
+    /// [`Self::end_session_restore`].
+    session_restoring: bool,
 }
 
 /// Direction of a stacking move sequence.
@@ -418,6 +424,10 @@ enum MonitorSet<W: LayoutElement> {
     NoOutputs {
         /// The workspaces.
         workspaces: Vec<Workspace<W>>,
+        /// Fixed-side panel windows stashed while no output is connected, so
+        /// they survive a last-output disconnect and are restored to the
+        /// monitor on the next reconnect.
+        panels: FixedPanels<W>,
     },
 }
 
@@ -738,8 +748,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn with_options(clock: Clock, options: Options) -> Self {
+        let opts = Rc::new(options);
         Self {
-            monitor_set: MonitorSet::NoOutputs { workspaces: vec![] },
+            monitor_set: MonitorSet::NoOutputs {
+                workspaces: vec![],
+                panels: empty_stash_panels(clock.clone(), opts.clone()),
+            },
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -748,8 +762,9 @@ impl<W: LayoutElement> Layout<W> {
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
             overview_progress: None,
-            options: Rc::new(options),
+            options: opts,
             stacking_move_state: None,
+            session_restoring: false,
         }
     }
 
@@ -765,7 +780,10 @@ impl<W: LayoutElement> Layout<W> {
             .collect();
 
         Self {
-            monitor_set: MonitorSet::NoOutputs { workspaces },
+            monitor_set: MonitorSet::NoOutputs {
+                workspaces,
+                panels: empty_stash_panels(clock.clone(), opts.clone()),
+            },
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -776,6 +794,7 @@ impl<W: LayoutElement> Layout<W> {
             overview_progress: None,
             options: opts,
             stacking_move_state: None,
+            session_restoring: false,
         }
     }
 
@@ -856,6 +875,7 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
+                monitor.restoring = self.session_restoring;
                 monitors.push(monitor);
 
                 MonitorSet::Normal {
@@ -864,7 +884,7 @@ impl<W: LayoutElement> Layout<W> {
                     active_monitor_idx,
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, panels } => {
                 let ws_id_to_activate = self.last_active_workspace_id.remove(&output.name());
 
                 let mut monitor = Monitor::new(
@@ -877,6 +897,9 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
+                monitor.restoring = self.session_restoring;
+                // Restore the stashed panel windows onto the new monitor.
+                monitor.adopt_panels(panels);
 
                 MonitorSet::Normal {
                     monitors: vec![monitor],
@@ -905,17 +928,18 @@ impl<W: LayoutElement> Layout<W> {
                     monitor.workspaces[monitor.active_workspace_idx].id(),
                 );
 
-                let mut workspaces = monitor.into_workspaces();
+                let (mut workspaces, panels) = monitor.into_workspaces_and_panels();
 
                 if monitors.is_empty() {
-                    // Removed the last monitor.
+                    // Removed the last monitor. Stash the panels so panel windows
+                    // survive until an output reconnects.
 
                     for ws in &mut workspaces {
                         // Reset base options to layout ones.
                         ws.update_config(self.options.clone());
                     }
 
-                    MonitorSet::NoOutputs { workspaces }
+                    MonitorSet::NoOutputs { workspaces, panels }
                 } else {
                     if primary_idx >= idx {
                         // Update primary_idx to either still point at the same monitor, or at some
@@ -931,6 +955,9 @@ impl<W: LayoutElement> Layout<W> {
 
                     let primary = &mut monitors[primary_idx];
                     primary.append_workspaces(workspaces);
+                    // Merge the removed monitor's panel windows into the primary
+                    // monitor's panels so they aren't dropped.
+                    primary.absorb_panels(panels);
 
                     MonitorSet::Normal {
                         monitors,
@@ -1087,18 +1114,20 @@ impl<W: LayoutElement> Layout<W> {
                 // Set the default height for scrolling windows.
                 if !is_floating {
                     if let Some(change) = scrolling_height {
-                        let ws = mon
-                            .workspaces
-                            .iter_mut()
-                            .find(|ws| ws.has_window(&id))
-                            .unwrap();
-                        ws.set_window_height(Some(&id), change);
+                        // The window may have opened into a fixed-side panel
+                        // (open-in-fixed-side rule), in which case it's monitor-owned
+                        // and not in any workspace — its height is the panel's concern.
+                        if let Some(ws) =
+                            mon.workspaces.iter_mut().find(|ws| ws.has_window(&id))
+                        {
+                            ws.set_window_height(Some(&id), change);
+                        }
                     }
                 }
 
                 Some(&mon.output)
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 let (ws_idx, target) = match target {
                     AddWindowTarget::Auto => {
                         if workspaces.is_empty() {
@@ -1139,12 +1168,14 @@ impl<W: LayoutElement> Layout<W> {
                             }
 
                             (0, WorkspaceAddWindowTarget::Auto)
-                        } else {
-                            let ws_idx = workspaces
-                                .iter()
-                                .position(|ws| ws.has_window(next_to))
-                                .unwrap();
+                        } else if let Some(ws_idx) =
+                            workspaces.iter().position(|ws| ws.has_window(next_to))
+                        {
                             (ws_idx, WorkspaceAddWindowTarget::NextTo(next_to))
+                        } else {
+                            // `next_to` isn't in a workspace (e.g. a panel window);
+                            // fall back to opening on the first workspace.
+                            (0, WorkspaceAddWindowTarget::Auto)
                         }
                     }
                 };
@@ -1217,12 +1248,18 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    if mon.panels.has_window(window) {
+                        return mon.remove_panel_tile(window, transaction);
+                    }
                     for (idx, ws) in mon.workspaces.iter_mut().enumerate() {
                         if ws.has_window(window) {
                             let removed = ws.remove_tile(window, transaction);
 
                             // Clean up empty workspaces that are not active and not last.
+                            // Suppressed during session restore so materialized
+                            // placeholder workspaces survive until their windows map.
                             if !ws.has_windows_or_name()
+                                && !mon.restoring
                                 && idx != mon.active_workspace_idx
                                 && idx != mon.workspaces.len() - 1
                                 && mon.workspace_switch.is_none()
@@ -1237,6 +1274,7 @@ impl<W: LayoutElement> Layout<W> {
                             // Special case handling when empty_workspace_above_first is set and all
                             // workspaces are empty.
                             if mon.options.layout.empty_workspace_above_first
+                                && !mon.restoring
                                 && mon.workspaces.len() == 2
                                 && mon.workspace_switch.is_none()
                             {
@@ -1295,6 +1333,9 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    if mon.update_panel_window(window, serial) {
+                        return;
+                    }
                     for ws in &mut mon.workspaces {
                         if ws.has_window(window) {
                             ws.update_window(window, serial);
@@ -1303,7 +1344,10 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
             }
-            MonitorSet::NoOutputs { workspaces, .. } => {
+            MonitorSet::NoOutputs { workspaces, panels } => {
+                if panels.update_window(window, serial) {
+                    return;
+                }
                 for ws in workspaces {
                     if ws.has_window(window) {
                         ws.update_window(window, serial);
@@ -1328,7 +1372,7 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 if let Some((index, workspace)) =
                     workspaces.iter().enumerate().find(|(_, w)| w.id() == id)
                 {
@@ -1355,7 +1399,7 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 if let Some((index, workspace)) = workspaces.iter().enumerate().find(|(_, w)| {
                     w.name
                         .as_ref()
@@ -1410,7 +1454,7 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 for (idx, ws) in workspaces.iter_mut().enumerate() {
                     if ws.id() == id {
                         ws.unname();
@@ -1444,7 +1488,7 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 for ws in workspaces {
                     if let Some(window) = ws.find_wl_surface(wl_surface) {
                         return Some((window, None));
@@ -1476,7 +1520,7 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 for ws in workspaces {
                     if let Some(window) = ws.find_wl_surface_mut(wl_surface) {
                         return Some((window, None));
@@ -1512,6 +1556,17 @@ impl<W: LayoutElement> Layout<W> {
         // call, no workspace owns it any more. Returning a unit rect lets the
         // popup positioner run without unconstrained data instead of
         // `unwrap()`-panicking the whole compositor over a stale popup.
+        // Fixed-side panel windows live on the monitor, not a workspace.
+        let panel_rect = match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => monitors
+                .iter()
+                .find_map(|m| m.panels.popup_target_rect(window)),
+            MonitorSet::NoOutputs { panels, .. } => panels.popup_target_rect(window),
+        };
+        if let Some(rect) = panel_rect {
+            return rect;
+        }
+
         self.workspaces()
             .find_map(|(_, _, ws)| ws.popup_target_rect(window))
             .unwrap_or_else(|| {
@@ -1566,15 +1621,16 @@ impl<W: LayoutElement> Layout<W> {
             return true;
         };
 
-        let (mon, ws_idx) = monitors
-            .iter()
-            .find_map(|mon| {
-                mon.workspaces
-                    .iter()
-                    .position(|ws| ws.has_window(window))
-                    .map(|ws_idx| (mon, ws_idx))
-            })
-            .unwrap();
+        let Some((mon, ws_idx)) = monitors.iter().find_map(|mon| {
+            mon.workspaces
+                .iter()
+                .position(|ws| ws.has_window(window))
+                .map(|ws_idx| (mon, ws_idx))
+        }) else {
+            // A fixed-side panel window isn't in any workspace; it's always on the
+            // visible (active) workspace, so allow focus-follows-mouse.
+            return true;
+        };
 
         // During a gesture, focus-follows-mouse does not cause any unintended workspace switches.
         if let Some(WorkspaceSwitch::Gesture(_)) = mon.workspace_switch {
@@ -1601,8 +1657,14 @@ impl<W: LayoutElement> Layout<W> {
         };
 
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
+            // Fixed-side panel windows are monitor-global (no workspace switch).
+            if mon.panels.activate_window(window) {
+                *active_monitor_idx = monitor_idx;
+                return;
+            }
             for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
                 if ws.activate_window(window) {
+                    mon.panels.set_active_fixed_side(None);
                     *active_monitor_idx = monitor_idx;
 
                     // If currently in the middle of a vertical swipe between the target workspace
@@ -1637,8 +1699,13 @@ impl<W: LayoutElement> Layout<W> {
         };
 
         for (monitor_idx, mon) in monitors.iter_mut().enumerate() {
+            if mon.panels.activate_window(window) {
+                *active_monitor_idx = monitor_idx;
+                return;
+            }
             for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
                 if ws.activate_window_without_raising(window) {
+                    mon.panels.set_active_fixed_side(None);
                     *active_monitor_idx = monitor_idx;
 
                     // If currently in the middle of a vertical swipe between the target workspace
@@ -1742,6 +1809,91 @@ impl<W: LayoutElement> Layout<W> {
         mon.workspaces.get(index).map(|ws| ws.id())
     }
 
+    /// Resolve a saved per-output workspace `index` to a workspace id for
+    /// session restore, **creating** empty placeholder workspaces as needed so
+    /// the index is always satisfiable.
+    ///
+    /// Unlike [`Self::existing_workspace_id_at`], this never falls back for an
+    /// out-of-range index: a freshly-started session has only workspace 0, so a
+    /// window saved on workspace 3 would otherwise resolve to nothing and pile
+    /// onto the active workspace (0) along with everything else. Here we append
+    /// empty workspaces until `index` exists and return its id.
+    ///
+    /// The materialized placeholders are protected from compaction while the
+    /// monitor is [`restoring`](Monitor::restoring) (see
+    /// [`Self::begin_session_restore`]), so they survive until the windows that
+    /// belong on them have mapped — regardless of the order clients map in.
+    pub fn materialize_workspace_id_at(
+        &mut self,
+        output_name: Option<&str>,
+        index: usize,
+    ) -> Option<WorkspaceId> {
+        match &mut self.monitor_set {
+            MonitorSet::Normal {
+                monitors,
+                active_monitor_idx,
+                ..
+            } => {
+                if monitors.is_empty() {
+                    return None;
+                }
+                let mon_idx = output_name
+                    .and_then(|name| {
+                        monitors
+                            .iter()
+                            .position(|m| m.output_name().as_str() == name)
+                    })
+                    .unwrap_or(*active_monitor_idx);
+                let mon = &mut monitors[mon_idx];
+                // Append empty workspaces at the bottom until `index` exists.
+                // Appending keeps the active index stable and preserves the
+                // trailing-empty-workspace invariant (the last one stays empty).
+                while mon.workspaces.len() <= index {
+                    mon.add_workspace_bottom();
+                }
+                Some(mon.workspaces[index].id())
+            }
+            MonitorSet::NoOutputs { workspaces, .. } => {
+                while workspaces.len() <= index {
+                    workspaces.push(Workspace::new_no_outputs(
+                        self.clock.clone(),
+                        self.options.clone(),
+                    ));
+                }
+                Some(workspaces[index].id())
+            }
+        }
+    }
+
+    /// Enter session-restore mode: protect empty placeholder workspaces from
+    /// compaction on every monitor (see [`Monitor::restoring`]). Call once when
+    /// the prior session's apps are respawned.
+    pub fn begin_session_restore(&mut self) {
+        self.session_restoring = true;
+        for mon in self.monitors_mut() {
+            mon.restoring = true;
+        }
+    }
+
+    /// Leave session-restore mode and reclaim any placeholder workspaces that no
+    /// restored window ever filled. Idempotent. Call when the pending-restore
+    /// queue drains or a bounded settle timeout elapses.
+    pub fn end_session_restore(&mut self) {
+        if !self.session_restoring {
+            return;
+        }
+        self.session_restoring = false;
+        for mon in self.monitors_mut() {
+            if !mon.restoring {
+                continue;
+            }
+            mon.restoring = false;
+            if mon.workspace_switch.is_none() {
+                mon.clean_up_workspaces();
+            }
+        }
+    }
+
     pub fn windows_for_output(&self, output: &Output) -> impl Iterator<Item = &W> + '_ {
         let MonitorSet::Normal { monitors, .. } = &self.monitor_set else {
             panic!()
@@ -1812,14 +1964,31 @@ impl<W: LayoutElement> Layout<W> {
                             }
                         }
                     }
+                    // Fixed-side panel windows are output-owned (not in a
+                    // workspace), so emit them once per monitor — paired with the
+                    // active workspace's id, since that's the workspace they
+                    // currently render over — or they'd be invisible to
+                    // foreign-toplevel/the IPC `windows` listing.
+                    let active_ws_id = mon.active_workspace_ref().id();
+                    for (tile, layout) in mon.panels.tiles_with_ipc_layouts() {
+                        for w in tile.stacked_windows() {
+                            f(w, Some(&mon.output), Some(active_ws_id), layout.clone());
+                        }
+                    }
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, panels } => {
                 for ws in workspaces {
                     for (tile, layout) in ws.tiles_with_ipc_layouts() {
                         for w in tile.stacked_windows() {
                             f(w, None, Some(ws.id()), layout.clone());
                         }
+                    }
+                }
+                let stash_ws_id = workspaces.first().map(|ws| ws.id());
+                for (tile, layout) in panels.tiles_with_ipc_layouts() {
+                    for w in tile.stacked_windows() {
+                        f(w, None, stash_ws_id, layout.clone());
                     }
                 }
             }
@@ -1839,13 +2008,20 @@ impl<W: LayoutElement> Layout<W> {
                             f(win, Some(&mon.output));
                         }
                     }
+                    // Panel windows are owned by the monitor.
+                    for tile in mon.panels.tiles_mut() {
+                        f(tile.window_mut(), Some(&mon.output));
+                    }
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, panels } => {
                 for ws in workspaces {
                     for win in ws.windows_mut() {
                         f(win, None);
                     }
+                }
+                for tile in panels.tiles_mut() {
+                    f(tile.window_mut(), None);
                 }
             }
         }
@@ -1862,6 +2038,65 @@ impl<W: LayoutElement> Layout<W> {
         };
 
         Some(&mut monitors[*active_monitor_idx])
+    }
+
+    /// The monitor whose fixed-side panels own `id`, if any. Panel windows live
+    /// on the monitor (not a workspace), so by-window operations must route here
+    /// instead of `workspaces_mut().find(...)` (which would miss them).
+    fn monitor_owning_panel_window(&mut self, id: &W::Id) -> Option<&mut Monitor<W>> {
+        let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
+            return None;
+        };
+        monitors.iter_mut().find(|m| m.panels.has_window(id))
+    }
+
+    /// Which fixed-side panel (on any output, incl. the stash) holds `id`.
+    #[cfg(test)]
+    pub(crate) fn panel_side_with_window(&self, id: &W::Id) -> Option<FixedSide> {
+        match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => {
+                monitors.iter().find_map(|m| m.panels.side_with_window(id))
+            }
+            MonitorSet::NoOutputs { panels, .. } => panels.side_with_window(id),
+        }
+    }
+
+    /// Render position (screen-pinned) of a fixed-side panel window, for tests.
+    #[cfg(test)]
+    pub(crate) fn panel_tile_with_render_position(
+        &self,
+        id: &W::Id,
+    ) -> Option<(&Tile<W>, Point<f64, Logical>)> {
+        match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => monitors.iter().find_map(|m| {
+                m.panels
+                    .tiles_with_render_positions()
+                    .find(|(t, _, _)| t.window().id() == id)
+                    .map(|(t, p, _)| (t, p))
+            }),
+            MonitorSet::NoOutputs { panels, .. } => panels
+                .tiles_with_render_positions()
+                .find(|(t, _, _)| t.window().id() == id)
+                .map(|(t, p, _)| (t, p)),
+        }
+    }
+
+    /// The fixed-side panel that owns focus on the active monitor, for tests.
+    #[cfg(test)]
+    pub(crate) fn layout_active_fixed_side(&self) -> Option<FixedSide> {
+        self.active_monitor_ref()
+            .and_then(|m| m.panels.active_fixed_side())
+    }
+
+    /// Whether `id` is a fixed-side panel window on any output (including the
+    /// `NoOutputs` stash).
+    fn is_panel_window(&self, id: &W::Id) -> bool {
+        match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => {
+                monitors.iter().any(|m| m.panels.has_window(id))
+            }
+            MonitorSet::NoOutputs { panels, .. } => panels.has_window(id),
+        }
     }
 
     pub fn active_monitor_ref(&self) -> Option<&Monitor<W>> {
@@ -2014,20 +2249,17 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.consume_or_expel_window_left(window);
+        if let Some(id) = window {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.consume_or_expel_window_left(Some(id));
+                return;
+            }
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.consume_or_expel_window_left(Some(id));
+            }
+        } else if let Some(mon) = self.active_monitor() {
+            mon.consume_or_expel_window_left(None);
+        }
     }
 
     pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
@@ -2037,62 +2269,53 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.consume_or_expel_window_right(window);
+        if let Some(id) = window {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.consume_or_expel_window_right(Some(id));
+                return;
+            }
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.consume_or_expel_window_right(Some(id));
+            }
+        } else if let Some(mon) = self.active_monitor() {
+            mon.consume_or_expel_window_right(None);
+        }
     }
 
     pub fn focus_left(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_left();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_left();
+        }
     }
 
     pub fn focus_right(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_right();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_right();
+        }
     }
 
     pub fn focus_column_first(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_column_first();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_column_first();
+        }
     }
 
     pub fn focus_column_last(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_column_last();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_column_last();
+        }
     }
 
     pub fn focus_column_right_or_first(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_column_right_or_first();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_column_right_or_first();
+        }
     }
 
     pub fn focus_column_left_or_last(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_column_left_or_last();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_column_left_or_last();
+        }
     }
 
     pub fn focus_column(&mut self, index: usize) {
@@ -2103,8 +2326,8 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_window_up_or_output(&mut self, output: &Output) -> bool {
-        if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_up() {
+        if let Some(mon) = self.active_monitor() {
+            if mon.focus_up() {
                 return false;
             }
         }
@@ -2114,8 +2337,8 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_window_down_or_output(&mut self, output: &Output) -> bool {
-        if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_down() {
+        if let Some(mon) = self.active_monitor() {
+            if mon.focus_down() {
                 return false;
             }
         }
@@ -2125,8 +2348,8 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_column_left_or_output(&mut self, output: &Output) -> bool {
-        if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_left() {
+        if let Some(mon) = self.active_monitor() {
+            if mon.focus_left() {
                 return false;
             }
         }
@@ -2136,8 +2359,8 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_column_right_or_output(&mut self, output: &Output) -> bool {
-        if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_right() {
+        if let Some(mon) = self.active_monitor() {
+            if mon.focus_right() {
                 return false;
             }
         }
@@ -2273,20 +2496,20 @@ impl<W: LayoutElement> Layout<W> {
         // consume the keypress here and never fall through to the carousel
         // path — otherwise `active_focused_tile_info()` would route the
         // operation to the carousel's stale active column.
-        if let Some(workspace) = self.active_workspace_mut() {
-            match workspace.active_fixed_side() {
+        if let Some(monitor) = self.active_monitor() {
+            match monitor.panels_active_fixed_side() {
                 Some(FixedSide::Right) => {
                     // Toward inner edge of right strip. At inner edge OUT to
                     // the carousel; otherwise move one column within strip.
-                    let _ = workspace.move_active_strip_column_back_to_carousel_right()
-                        || workspace.move_active_window_within_right_strip(true);
+                    let _ = monitor.move_active_strip_column_back_to_carousel_right()
+                        || monitor.move_active_window_within_right_strip(true);
                     self.stacking_move_state = None;
                     return;
                 }
                 Some(FixedSide::Left) => {
                     // Toward outer edge of left strip. At outer edge no-op
                     // (TODO Phase 6 workspace cross).
-                    let _ = workspace.move_active_window_within_left_strip(true);
+                    let _ = monitor.move_active_window_within_left_strip(true);
                     self.stacking_move_state = None;
                     return;
                 }
@@ -2321,19 +2544,19 @@ impl<W: LayoutElement> Layout<W> {
             && focused_stack_len == 1
             && column_tile_count == 1;
         let split_into_new_column = column_tile_count > 1 || focused_stack_len > 1;
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             self.stacking_move_state = None;
             return;
         };
         let success = if want_overlap {
-            workspace.move_active_window_to_left_neighbor_overlap()
+            monitor.active_workspace().move_active_window_to_left_neighbor_overlap()
         } else if split_into_new_column
-            && workspace.move_active_window_to_new_neighbor_column(true)
+            && monitor.active_workspace().move_active_window_to_new_neighbor_column(true)
         {
             true
-        } else if workspace.move_active_window_to_neighbor_column_as_new_row(true) {
+        } else if monitor.active_workspace().move_active_window_to_neighbor_column_as_new_row(true) {
             true
-        } else if !split_into_new_column && workspace.move_active_carousel_column_into_left_strip()
+        } else if !split_into_new_column && monitor.move_active_carousel_column_into_left_strip()
         {
             // Carousel's leftmost edge with a *single-window* column: extract
             // it and insert it into the left fixed panel at the strip's inner
@@ -2349,7 +2572,7 @@ impl<W: LayoutElement> Layout<W> {
             // into the panel on the next move), or a defensive fallback (e.g.
             // floating layer active). Both preserve the "new leftmost column"
             // behaviour.
-            workspace.move_active_window_to_new_column_left()
+            monitor.active_workspace().move_active_window_to_new_column_left()
         };
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
@@ -2376,16 +2599,16 @@ impl<W: LayoutElement> Layout<W> {
         // Strip-aware dispatch — see [`move_window_left_stacked`] for the
         // rationale. Symmetric: left strip OUT-or-within, right strip just
         // within (no OUT toward right).
-        if let Some(workspace) = self.active_workspace_mut() {
-            match workspace.active_fixed_side() {
+        if let Some(monitor) = self.active_monitor() {
+            match monitor.panels_active_fixed_side() {
                 Some(FixedSide::Left) => {
-                    let _ = workspace.move_active_strip_column_back_to_carousel_left()
-                        || workspace.move_active_window_within_left_strip(false);
+                    let _ = monitor.move_active_strip_column_back_to_carousel_left()
+                        || monitor.move_active_window_within_left_strip(false);
                     self.stacking_move_state = None;
                     return;
                 }
                 Some(FixedSide::Right) => {
-                    let _ = workspace.move_active_window_within_right_strip(false);
+                    let _ = monitor.move_active_window_within_right_strip(false);
                     self.stacking_move_state = None;
                     return;
                 }
@@ -2405,19 +2628,19 @@ impl<W: LayoutElement> Layout<W> {
             && focused_stack_len == 1
             && column_tile_count == 1;
         let split_into_new_column = column_tile_count > 1 || focused_stack_len > 1;
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             self.stacking_move_state = None;
             return;
         };
         let success = if want_overlap {
-            workspace.move_active_window_to_right_neighbor_overlap()
+            monitor.active_workspace().move_active_window_to_right_neighbor_overlap()
         } else if split_into_new_column
-            && workspace.move_active_window_to_new_neighbor_column(false)
+            && monitor.active_workspace().move_active_window_to_new_neighbor_column(false)
         {
             true
-        } else if workspace.move_active_window_to_neighbor_column_as_new_row(false) {
+        } else if monitor.active_workspace().move_active_window_to_neighbor_column_as_new_row(false) {
             true
-        } else if !split_into_new_column && workspace.move_active_carousel_column_into_right_strip()
+        } else if !split_into_new_column && monitor.move_active_carousel_column_into_right_strip()
         {
             // Carousel's rightmost edge with a *single-window* column: mirror of
             // left-IN — extract it into `fixed_right` at its inner edge. A
@@ -2428,7 +2651,7 @@ impl<W: LayoutElement> Layout<W> {
             // Multi-window source column at the rightmost edge (split the
             // active window out into a new rightmost column — it enters the
             // panel on the next move), or a defensive fallback.
-            workspace.move_active_window_to_new_column_right()
+            monitor.active_workspace().move_active_window_to_new_column_right()
         };
         if success {
             self.record_stacking_move(direction, focused_id, want_overlap);
@@ -2535,8 +2758,8 @@ impl<W: LayoutElement> Layout<W> {
             .active_workspace()
             .and_then(|ws| ws.active_column_visual_center_x());
 
-        let moved = match self.active_workspace_mut() {
-            Some(workspace) => workspace.focus_down(),
+        let moved = match self.active_monitor() {
+            Some(monitor) => monitor.focus_down(),
             None => return,
         };
         if moved {
@@ -2568,8 +2791,8 @@ impl<W: LayoutElement> Layout<W> {
             .active_workspace()
             .and_then(|ws| ws.active_column_visual_center_x());
 
-        let moved = match self.active_workspace_mut() {
-            Some(workspace) => workspace.focus_up(),
+        let moved = match self.active_monitor() {
+            Some(monitor) => monitor.focus_up(),
             None => return,
         };
         if moved {
@@ -2597,31 +2820,27 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_down_or_left(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_down_or_left();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_down_or_left();
+        }
     }
 
     pub fn focus_down_or_right(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_down_or_right();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_down_or_right();
+        }
     }
 
     pub fn focus_up_or_left(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_up_or_left();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_up_or_left();
+        }
     }
 
     pub fn focus_up_or_right(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_up_or_right();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_up_or_right();
+        }
     }
 
     pub fn focus_window_or_workspace_down(&mut self) {
@@ -2653,17 +2872,15 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn focus_window_down_or_top(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_window_down_or_top();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_window_down_or_top();
+        }
     }
 
     pub fn focus_window_up_or_bottom(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.focus_window_up_or_bottom();
+        if let Some(mon) = self.active_monitor() {
+            mon.focus_window_up_or_bottom();
+        }
     }
 
     pub fn move_to_workspace_up(&mut self, focus: bool) {
@@ -2768,24 +2985,21 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn consume_into_column(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.consume_into_column();
+        if let Some(mon) = self.active_monitor() {
+            mon.consume_into_column();
+        }
     }
 
     pub fn expel_from_column(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.expel_from_column();
+        if let Some(mon) = self.active_monitor() {
+            mon.expel_from_column();
+        }
     }
 
     pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.swap_window_in_direction(direction);
+        if let Some(mon) = self.active_monitor() {
+            mon.swap_window_in_direction(direction);
+        }
     }
 
     pub fn toggle_column_tabbed_display(&mut self) {
@@ -2803,10 +3017,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn center_column(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.center_column();
+        if let Some(mon) = self.active_monitor() {
+            mon.center_column();
+        }
     }
 
     pub fn center_window(&mut self, id: Option<&W::Id>) {
@@ -2816,16 +3029,18 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(id) = id {
-            Some(self.workspaces_mut().find(|ws| ws.has_window(id)).unwrap())
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.center_window(id);
+        if let Some(id) = id {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.center_window(Some(id));
+                return;
+            }
+            let Some(workspace) = self.workspaces_mut().find(|ws| ws.has_window(id)) else {
+                return;
+            };
+            workspace.center_window(Some(id));
+        } else if let Some(mon) = self.active_monitor() {
+            mon.center_window(None);
+        }
     }
 
     pub fn center_visible_columns(&mut self) {
@@ -3016,7 +3231,7 @@ impl<W: LayoutElement> Layout<W> {
                 primary_idx,
                 active_monitor_idx,
             } => (monitors, primary_idx, active_monitor_idx),
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 for workspace in workspaces {
                     assert!(
                         workspace.has_windows_or_name(),
@@ -3500,7 +3715,7 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 mon.insert_workspace(ws, 0, false);
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 let ws =
                     Workspace::new_with_config_no_outputs(Some(ws_config.clone()), clock, options);
                 workspaces.insert(0, ws);
@@ -3539,7 +3754,7 @@ impl<W: LayoutElement> Layout<W> {
                     mon.update_config(options.clone());
                 }
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 for ws in workspaces {
                     ws.update_config(options.clone());
                 }
@@ -3550,10 +3765,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_width(&mut self, forwards: bool) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.toggle_width(forwards);
+        if let Some(mon) = self.active_monitor() {
+            mon.toggle_width(forwards);
+        }
     }
 
     pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
@@ -3563,20 +3777,17 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.toggle_window_width(window, forwards);
+        if let Some(id) = window {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.toggle_window_width(Some(id), forwards);
+                return;
+            }
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.toggle_window_width(Some(id), forwards);
+            }
+        } else if let Some(mon) = self.active_monitor() {
+            mon.toggle_window_width(None, forwards);
+        }
     }
 
     pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
@@ -3586,44 +3797,43 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.toggle_window_height(window, forwards);
+        if let Some(id) = window {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.toggle_window_height(Some(id), forwards);
+                return;
+            }
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.toggle_window_height(Some(id), forwards);
+            }
+        } else if let Some(mon) = self.active_monitor() {
+            mon.toggle_window_height(None, forwards);
+        }
     }
 
     pub fn toggle_full_width(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.toggle_full_width();
+        // A panel owns no scrolling viewport, so "full width" has no meaning
+        // there — leave the panel untouched (matching the old behaviour).
+        if let Some(mon) = self.active_monitor() {
+            if mon.panels_active_fixed_side().is_some() {
+                return;
+            }
+            mon.active_workspace().toggle_full_width();
+        }
     }
 
     pub fn set_column_width(&mut self, change: SizeChange) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.set_column_width(change);
+        if let Some(mon) = self.active_monitor() {
+            mon.set_column_width(change);
+        }
     }
 
     /// Positionally-aware resize of the active column. `toward_right` is true for
     /// the right arrow, false for the left arrow; the arrow grows the active
     /// window when it points toward the screen center and shrinks it otherwise.
     pub fn resize_column_positional(&mut self, toward_right: bool, step: SizeChange) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.resize_column_positional(toward_right, step);
+        if let Some(mon) = self.active_monitor() {
+            mon.resize_column_positional(toward_right, step);
+        }
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
@@ -3633,20 +3843,17 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.set_window_width(window, change);
+        if let Some(id) = window {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.set_window_width(Some(id), change);
+                return;
+            }
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.set_window_width(Some(id), change);
+            }
+        } else if let Some(mon) = self.active_monitor() {
+            mon.set_window_width(None, change);
+        }
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
@@ -3656,20 +3863,19 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
+        if let Some(id) = window {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.set_window_height(Some(id), change);
+                return;
+            }
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.set_window_height(Some(id), change);
+            }
             return;
-        };
-        workspace.set_window_height(window, change);
+        }
+        if let Some(mon) = self.active_monitor() {
+            mon.set_window_height(None, change);
+        }
     }
 
     pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
@@ -3679,27 +3885,27 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.reset_window_height(window);
+        if let Some(id) = window {
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.reset_window_height(Some(id));
+                return;
+            }
+            if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) {
+                ws.reset_window_height(Some(id));
+            }
+        } else if let Some(mon) = self.active_monitor() {
+            mon.reset_window_height(None);
+        }
     }
 
     pub fn expand_column_to_available_width(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
-            return;
-        };
-        workspace.expand_column_to_available_width();
+        // "Available width" has no meaning for a pinned panel; no-op there.
+        if let Some(mon) = self.active_monitor() {
+            if mon.panels_active_fixed_side().is_some() {
+                return;
+            }
+            mon.active_workspace().expand_column_to_available_width();
+        }
     }
 
     pub fn toggle_window_floating(&mut self, window: Option<&W::Id>) {
@@ -3750,11 +3956,10 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
+            // A fixed-side panel window is owned by the monitor, not a workspace,
+            // so it won't be found here — toggling float on a pinned panel window
+            // is a no-op rather than a panic.
+            self.workspaces_mut().find(|ws| ws.has_window(window))
         } else {
             self.active_workspace_mut()
         };
@@ -3776,11 +3981,10 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let workspace = if let Some(window) = window {
-            Some(
-                self.workspaces_mut()
-                    .find(|ws| ws.has_window(window))
-                    .unwrap(),
-            )
+            // Fixed-side panel windows are monitor-owned, so they aren't found in
+            // any workspace; setting their floating state is a no-op (they stay
+            // pinned) rather than a panic.
+            self.workspaces_mut().find(|ws| ws.has_window(window))
         } else {
             self.active_workspace_mut()
         };
@@ -3825,16 +4029,19 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
-        let workspace = if let Some(id) = id {
-            Some(self.workspaces_mut().find(|ws| ws.has_window(id)).unwrap())
-        } else {
-            self.active_workspace_mut()
-        };
-
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.move_floating_window(id, x, y, animate);
+        // Fixed-side panel windows are pinned (no floating position to seed);
+        // skip them rather than panicking on the workspace lookup.
+        if let Some(id) = id {
+            if self.is_panel_window(id) {
+                return;
+            }
+            let Some(workspace) = self.workspaces_mut().find(|ws| ws.has_window(id)) else {
+                return;
+            };
+            workspace.move_floating_window(Some(id), x, y, animate);
+        } else if let Some(workspace) = self.active_workspace_mut() {
+            workspace.move_floating_window(None, x, y, animate);
+        }
     }
 
     pub fn focus_output(&mut self, output: &Output) {
@@ -3877,21 +4084,51 @@ impl<W: LayoutElement> Layout<W> {
                 .position(|mon| &mon.output == output)
                 .unwrap();
 
-            let (mon_idx, ws_idx) = if let Some(window) = window {
-                monitors
-                    .iter()
-                    .enumerate()
-                    .find_map(|(mon_idx, mon)| {
-                        mon.workspaces
-                            .iter()
-                            .position(|ws| ws.has_window(window))
-                            .map(|ws_idx| (mon_idx, ws_idx))
-                    })
-                    .unwrap()
+            // Fixed-side panel windows aren't in any workspace; move them off the
+            // source monitor's panels and let the target monitor place them
+            // (re-entering a panel via `open-in-fixed-side`, else the carousel).
+            if let Some(window) = window {
+                if let Some(src_idx) = monitors.iter().position(|m| m.panels.has_window(window)) {
+                    if src_idx == new_idx {
+                        return;
+                    }
+                    let transaction = Transaction::new();
+                    let Some(mut removed) = monitors[src_idx].remove_panel_tile(window, transaction)
+                    else {
+                        return;
+                    };
+                    removed.tile.stop_move_animations();
+                    monitors[new_idx].add_tile(
+                        removed.tile,
+                        MonitorAddWindowTarget::Auto,
+                        activate,
+                        true,
+                        removed.width,
+                        removed.is_full_width,
+                        removed.is_floating,
+                    );
+                    if activate.map_smart(|| false) {
+                        *active_monitor_idx = new_idx;
+                    }
+                    return;
+                }
+            }
+
+            let found = if let Some(window) = window {
+                monitors.iter().enumerate().find_map(|(mon_idx, mon)| {
+                    mon.workspaces
+                        .iter()
+                        .position(|ws| ws.has_window(window))
+                        .map(|ws_idx| (mon_idx, ws_idx))
+                })
             } else {
                 let mon_idx = *active_monitor_idx;
-                let mon = &monitors[mon_idx];
-                (mon_idx, mon.active_workspace_idx)
+                Some((mon_idx, monitors[mon_idx].active_workspace_idx))
+            };
+            // A fixed-side panel window is monitor-pinned, not workspace-owned, so
+            // it isn't moved between outputs by this path — no-op rather than panic.
+            let Some((mon_idx, ws_idx)) = found else {
+                return;
             };
 
             let workspace_idx = target_ws_idx.unwrap_or(monitors[new_idx].active_workspace_idx);
@@ -4087,6 +4324,10 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        if let Some(mon) = self.monitor_owning_panel_window(id) {
+            mon.set_fullscreen(id, is_fullscreen);
+            return;
+        }
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
                 ws.set_fullscreen(id, is_fullscreen);
@@ -4102,6 +4343,17 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        if self.is_panel_window(id) {
+            let current = self
+                .windows()
+                .find(|(_, w)| w.id() == id)
+                .map(|(_, w)| w.pending_sizing_mode().is_fullscreen())
+                .unwrap_or(false);
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.set_fullscreen(id, !current);
+            }
+            return;
+        }
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
                 ws.toggle_fullscreen(id);
@@ -4137,6 +4389,10 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        if let Some(mon) = self.monitor_owning_panel_window(id) {
+            mon.set_maximized(id, maximize);
+            return;
+        }
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
                 ws.set_maximized(id, maximize);
@@ -4152,6 +4408,17 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        if self.is_panel_window(id) {
+            let current = self
+                .windows()
+                .find(|(_, w)| w.id() == id)
+                .map(|(_, w)| w.pending_sizing_mode().is_maximized())
+                .unwrap_or(false);
+            if let Some(mon) = self.monitor_owning_panel_window(id) {
+                mon.set_maximized(id, !current);
+            }
+            return;
+        }
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
                 ws.toggle_maximized(id);
@@ -4526,12 +4793,12 @@ impl<W: LayoutElement> Layout<W> {
 
                 // Unset fullscreen before removing the tile. This will restore its size properly,
                 // and move it to floating if needed, so we don't have to deal with that here.
-                let ws = self
-                    .workspaces_mut()
-                    .find(|ws| ws.has_window(&window_id))
-                    .unwrap();
-                ws.set_fullscreen(window, false);
-                ws.set_maximized(window, false);
+                // A fixed-side panel window is monitor-owned (not in a workspace); it isn't
+                // fullscreened/maximized through this path, so skip when not found.
+                if let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(&window_id)) {
+                    ws.set_fullscreen(window, false);
+                    ws.set_maximized(window, false);
+                }
 
                 let RemovedTile {
                     mut tile,
@@ -5011,6 +5278,9 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    if mon.panels.has_window(&window) {
+                        return mon.interactive_resize_begin(window, edges);
+                    }
                     for ws in &mut mon.workspaces {
                         if ws.has_window(&window) {
                             return ws.interactive_resize_begin(window, edges);
@@ -5044,6 +5314,9 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    if mon.panels.has_window(window) {
+                        return mon.interactive_resize_update(window, delta);
+                    }
                     for ws in &mut mon.workspaces {
                         if ws.has_window(window) {
                             return ws.interactive_resize_update(window, delta);
@@ -5073,6 +5346,10 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    if mon.panels.has_window(window) {
+                        mon.interactive_resize_end(Some(window));
+                        return;
+                    }
                     for ws in &mut mon.workspaces {
                         if ws.has_window(window) {
                             ws.interactive_resize_end(Some(window));
@@ -5267,6 +5544,20 @@ impl<W: LayoutElement> Layout<W> {
                 return;
             }
         }
+
+        // Fixed-side panel windows live on the monitor (or the stash).
+        match &mut self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => {
+                for mon in monitors {
+                    if mon.panels.start_open_animation(window) {
+                        return;
+                    }
+                }
+            }
+            MonitorSet::NoOutputs { panels, .. } => {
+                panels.start_open_animation(window);
+            }
+        }
     }
 
     pub fn store_unmap_snapshot(
@@ -5406,6 +5697,11 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    if mon.panels.has_window(window) {
+                        mon.panels
+                            .start_close_animation_for_window(renderer, window, blocker);
+                        return;
+                    }
                     for ws in &mut mon.workspaces {
                         if ws.has_window(window) {
                             ws.start_close_animation_for_window(renderer, window, blocker);
@@ -5511,9 +5807,16 @@ impl<W: LayoutElement> Layout<W> {
                         mon.dnd_scroll_gesture_end();
                     }
 
+                    let panel_focus = if is_active {
+                        mon.panels.active_fixed_side()
+                    } else {
+                        None
+                    };
+                    mon.panels.refresh(panel_focus, is_active);
+
                     for (ws_idx, ws) in mon.workspaces.iter_mut().enumerate() {
                         let is_focused = is_active && ws_idx == mon.active_workspace_idx;
-                        ws.refresh(is_active, is_focused);
+                        ws.refresh(is_active, is_focused, panel_focus);
 
                         if let Some(is_scrolling) = ongoing_scrolling_dnd {
                             // Lock or unlock the view for scrolling interactive move.
@@ -5533,7 +5836,7 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for ws in workspaces {
-                    ws.refresh(false, false);
+                    ws.refresh(false, false, None);
                     ws.view_offset_gesture_end(None);
                 }
             }
@@ -5558,7 +5861,7 @@ impl<W: LayoutElement> Layout<W> {
                 iter_normal = Some(it);
                 iter_no_outputs = None;
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 let it = workspaces
                     .iter()
                     .enumerate()
@@ -5587,7 +5890,7 @@ impl<W: LayoutElement> Layout<W> {
                 iter_normal = Some(it);
                 iter_no_outputs = None;
             }
-            MonitorSet::NoOutputs { workspaces } => {
+            MonitorSet::NoOutputs { workspaces, .. } => {
                 let it = workspaces.iter_mut();
 
                 iter_normal = None;
@@ -5612,7 +5915,26 @@ impl<W: LayoutElement> Layout<W> {
             .workspaces()
             .flat_map(|(mon, _, ws)| ws.windows().map(move |win| (mon, win)));
 
-        moving_window.chain(rest)
+        // Fixed-side panel windows are owned per-output (by the monitor or the
+        // NoOutputs stash), so they're not reached via `workspaces()`. Emit them
+        // once per output here so every `windows()` consumer still sees them.
+        let panel_windows = self.panel_windows();
+
+        moving_window.chain(rest).chain(panel_windows)
+    }
+
+    /// Every fixed-side panel window, paired with its owning monitor (`None` for
+    /// the `NoOutputs` stash).
+    fn panel_windows(&self) -> Vec<(Option<&Monitor<W>>, &W)> {
+        match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => monitors
+                .iter()
+                .flat_map(|m| m.panels.tiles().map(move |t| (Some(m), t.window())))
+                .collect(),
+            MonitorSet::NoOutputs { panels, .. } => {
+                panels.tiles().map(|t| (None, t.window())).collect()
+            }
+        }
     }
 
     pub fn has_window(&self, window: &W::Id) -> bool {
@@ -5626,8 +5948,20 @@ impl<W: LayoutElement> Layout<W> {
 
 impl<W: LayoutElement> Default for MonitorSet<W> {
     fn default() -> Self {
-        Self::NoOutputs { workspaces: vec![] }
+        Self::NoOutputs {
+            workspaces: vec![],
+            panels: empty_stash_panels(Clock::default(), Rc::new(Options::default())),
+        }
     }
+}
+
+/// Build an empty `FixedPanels` for the `NoOutputs` stash. Geometry is a
+/// placeholder (matching `Workspace::new_with_config_no_outputs`); it is reset
+/// to the real output geometry when the panels move into a monitor.
+fn empty_stash_panels<W: LayoutElement>(clock: Clock, options: Rc<Options>) -> FixedPanels<W> {
+    let view_size = Size::from((1280., 720.));
+    let working_area = Rectangle::from_size(view_size);
+    FixedPanels::new(view_size, working_area, 1., clock, options)
 }
 
 fn compute_overview_zoom(options: &Options, overview_progress: Option<f64>) -> f64 {

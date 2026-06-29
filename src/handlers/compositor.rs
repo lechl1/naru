@@ -280,32 +280,40 @@ impl CompositorHandler for State {
                         activate
                     };
 
-                    // Phase 3.6: route to the saved workspace when we recorded a
-                    // named workspace and that name still exists. Per-output
-                    // index-only entries are skipped — workspace indices aren't
-                    // stable across session restarts when the user has reordered
-                    // outputs or renamed monitors, so the saved-Auto fallback is
-                    // safer than blindly picking workspace N on whatever output
-                    // happens to be primary now.
+                    // Route the restored window back to its saved workspace.
+                    // Named workspaces match by name. Index-only entries are
+                    // *materialized* — `materialize_workspace_id_at` creates the
+                    // workspace at that per-output index (and any below it) if it
+                    // doesn't exist yet, so a window saved on workspace N lands on
+                    // workspace N instead of piling onto the active workspace in a
+                    // freshly-started session. The placeholders are protected from
+                    // compaction until restore settles (`begin_session_restore`),
+                    // so out-of-order maps still land on the right workspace.
                     let target = match saved_entry.as_ref().and_then(|e| match &e.workspace {
                         crate::session::WorkspaceRef::Name { name } => self
                             .naru
                             .layout
                             .find_workspace_by_name(name)
                             .map(|(_, ws)| ws.id()),
-                        // Index-only entries: route to the workspace at that per-output
-                        // index if it already exists, else fall through to `target`
-                        // (Auto). Index workspaces are not materialised on demand — see
-                        // `existing_workspace_id_at`; name a workspace for reliable
-                        // cross-restart pinning.
                         crate::session::WorkspaceRef::Index { index } => self
                             .naru
                             .layout
-                            .existing_workspace_id_at(e.output.as_deref(), *index),
+                            .materialize_workspace_id_at(e.output.as_deref(), *index),
                     }) {
                         Some(ws_id) => AddWindowTarget::Workspace(ws_id),
                         None => target,
                     };
+
+                    // If this was the last pending restore entry, leave restore
+                    // mode so the placeholder-protection lifts and any never-filled
+                    // workspaces are reclaimed. (A bounded settle timer is the
+                    // backstop when some saved windows never reappear.)
+                    let restore_drained = saved_entry.is_some()
+                        && self
+                            .naru
+                            .session_manager
+                            .as_ref()
+                            .is_some_and(|sm| sm.pending_restore.is_empty());
 
                     // Floating-vs-tiled override.
                     let is_floating = match &saved_entry {
@@ -370,6 +378,12 @@ impl CompositorHandler for State {
                             self.restore_window_size(&window, *width, *height);
                         }
                         Some(crate::session::Placement::Floating { .. }) | None => {}
+                    }
+
+                    // Last restored window placed: lift placeholder-workspace
+                    // protection and reclaim any workspaces that stayed empty.
+                    if restore_drained {
+                        self.naru.layout.end_session_restore();
                     }
 
                     // Session-restore: window appearing changes what we'd persist.

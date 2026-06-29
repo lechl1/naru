@@ -55,6 +55,11 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
     // per save; could be cached in `SessionManager` if save frequency makes it hot.
     let wm_class_index = crate::session::index_startup_wm_classes();
 
+    // Fixed-side panels are owned per-output now, so enumerate them once per
+    // monitor (keyed by output name) rather than once per workspace — otherwise
+    // each panel window would be saved once for every workspace on the monitor.
+    let mut panels_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for (mon, ws_idx, ws) in naru.layout.workspaces() {
         let output = mon.map(|m| m.output_name().clone());
         let workspace = workspace_ref_for(ws, ws_idx);
@@ -85,7 +90,15 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
         }
 
         // Fixed-side panel windows — not covered by the carousel iterator.
-        for (side, col_idx, tile_idx, tile) in ws.fixed_side_tiles() {
+        // Panels live on the monitor (shared across its workspaces), so emit
+        // them once per output.
+        let Some(mon) = mon else {
+            continue;
+        };
+        if !panels_seen.insert(mon.output_name().clone()) {
+            continue;
+        }
+        for (side, col_idx, tile_idx, tile) in mon.fixed_side_tiles() {
             let mapped = tile.window();
             let app_id = match mapped.app_id() {
                 Some(s) if !s.is_empty() => s,

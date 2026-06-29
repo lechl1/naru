@@ -16,7 +16,7 @@
 
 use std::rc::Rc;
 
-use naru_ipc::SizeChange;
+use naru_ipc::{SizeChange, WindowLayout};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Serial, Size};
 
@@ -487,6 +487,10 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner.tiles()
     }
 
+    pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> + '_ {
+        self.inner.tiles_with_ipc_layouts()
+    }
+
     pub fn tiles_mut(&mut self) -> impl Iterator<Item = &mut Tile<W>> + '_ {
         self.inner.tiles_mut()
     }
@@ -556,5 +560,613 @@ impl<W: LayoutElement> FixedStrip<W> {
             ),
             "fixed strip view offset must stay static",
         );
+    }
+}
+
+/// Both fixed-side panels (left + right) for one output, plus the monitor-global
+/// active-side signal and the cached geometry the strips need.
+///
+/// Panels are owned by the [`Monitor`](super::monitor::Monitor) (not the
+/// workspace), so they render once per output, stay pinned to the screen during
+/// a workspace switch, and persist across switches. `Monitor` composes the
+/// cross-boundary carousel↔strip moves and focus traversal (which need the
+/// active workspace's carousel) on top of the half-ops exposed here.
+#[derive(Debug)]
+pub struct FixedPanels<W: LayoutElement> {
+    /// Fixed panel pinned to the left edge of the working area.
+    fixed_left: FixedStrip<W>,
+
+    /// Fixed panel pinned to the right edge of the working area.
+    fixed_right: FixedStrip<W>,
+
+    /// Which fixed-side panel currently owns keyboard focus, if any. Persists
+    /// across workspace switches because the panels themselves do.
+    active_fixed_side: Option<FixedSide>,
+
+    /// Cached view size, working area, and scale for the strips. Updated by
+    /// [`Self::update_config`] / [`Self::update_output_size`].
+    view_size: Size<f64, Logical>,
+    working_area: Rectangle<f64, Logical>,
+    scale: f64,
+}
+
+impl<W: LayoutElement> FixedPanels<W> {
+    pub fn new(
+        view_size: Size<f64, Logical>,
+        working_area: Rectangle<f64, Logical>,
+        scale: f64,
+        clock: Clock,
+        options: Rc<Options>,
+    ) -> Self {
+        let fixed_left = FixedStrip::new(
+            FixedSide::Left,
+            view_size,
+            working_area,
+            scale,
+            clock.clone(),
+            options.clone(),
+        );
+        let fixed_right = FixedStrip::new(
+            FixedSide::Right,
+            view_size,
+            working_area,
+            scale,
+            clock,
+            options,
+        );
+        Self {
+            fixed_left,
+            fixed_right,
+            active_fixed_side: None,
+            view_size,
+            working_area,
+            scale,
+        }
+    }
+
+    pub fn advance_animations(&mut self) {
+        self.fixed_left.advance_animations();
+        self.fixed_right.advance_animations();
+    }
+
+    pub fn are_animations_ongoing(&self) -> bool {
+        self.fixed_left.are_animations_ongoing() || self.fixed_right.are_animations_ongoing()
+    }
+
+    /// Update both strips' render elements. `focus` says which strip (if any)
+    /// currently owns focus, so only that strip draws its active tile with the
+    /// focused styling.
+    pub fn update_render_elements(&mut self, focus: Option<FixedSide>) {
+        self.fixed_left
+            .update_render_elements(focus == Some(FixedSide::Left));
+        self.fixed_right
+            .update_render_elements(focus == Some(FixedSide::Right));
+    }
+
+    pub fn update_config(
+        &mut self,
+        view_size: Size<f64, Logical>,
+        working_area: Rectangle<f64, Logical>,
+        scale: f64,
+        options: Rc<Options>,
+    ) {
+        self.view_size = view_size;
+        self.working_area = working_area;
+        self.scale = scale;
+        self.fixed_left
+            .update_config(view_size, working_area, scale, options.clone());
+        self.fixed_right
+            .update_config(view_size, working_area, scale, options);
+    }
+
+    /// Mirror of [`Self::update_config`] for an output-size change: the strips
+    /// track the working area too (e.g. when a layer-shell exclusive zone maps
+    /// after the panels were created).
+    pub fn update_output_size(
+        &mut self,
+        view_size: Size<f64, Logical>,
+        working_area: Rectangle<f64, Logical>,
+        scale: f64,
+        options: Rc<Options>,
+    ) {
+        self.update_config(view_size, working_area, scale, options);
+    }
+
+    pub fn left_width(&self) -> f64 {
+        self.fixed_left.width()
+    }
+
+    pub fn right_width(&self) -> f64 {
+        self.fixed_right.width()
+    }
+
+    pub fn has_window(&self, id: &W::Id) -> bool {
+        self.fixed_left.has_window(id) || self.fixed_right.has_window(id)
+    }
+
+    pub fn side_with_window(&self, id: &W::Id) -> Option<FixedSide> {
+        if self.fixed_left.has_window(id) {
+            Some(FixedSide::Left)
+        } else if self.fixed_right.has_window(id) {
+            Some(FixedSide::Right)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_empty(&self, side: FixedSide) -> bool {
+        match side {
+            FixedSide::Left => self.fixed_left.is_empty(),
+            FixedSide::Right => self.fixed_right.is_empty(),
+        }
+    }
+
+    pub fn active_fixed_side(&self) -> Option<FixedSide> {
+        self.active_fixed_side
+    }
+
+    pub fn set_active_fixed_side(&mut self, side: Option<FixedSide>) {
+        self.active_fixed_side = side;
+    }
+
+    fn strip(&self, side: FixedSide) -> &FixedStrip<W> {
+        match side {
+            FixedSide::Left => &self.fixed_left,
+            FixedSide::Right => &self.fixed_right,
+        }
+    }
+
+    fn strip_mut(&mut self, side: FixedSide) -> &mut FixedStrip<W> {
+        match side {
+            FixedSide::Left => &mut self.fixed_left,
+            FixedSide::Right => &mut self.fixed_right,
+        }
+    }
+
+    fn strip_with_window_mut(&mut self, id: &W::Id) -> Option<&mut FixedStrip<W>> {
+        self.side_with_window(id).map(move |side| self.strip_mut(side))
+    }
+
+    fn active_strip_mut(&mut self) -> Option<&mut FixedStrip<W>> {
+        self.active_fixed_side.map(move |side| self.strip_mut(side))
+    }
+
+    pub fn columns(&self) -> impl Iterator<Item = &Column<W>> + '_ {
+        self.fixed_left.columns().chain(self.fixed_right.columns())
+    }
+
+    pub fn tiles(&self) -> impl Iterator<Item = &Tile<W>> + '_ {
+        self.fixed_left.tiles().chain(self.fixed_right.tiles())
+    }
+
+    /// Panel tiles paired with their IPC layout, for foreign-toplevel / the IPC
+    /// `windows` listing. Panel windows are output-owned, so the caller pairs
+    /// them with the monitor's active workspace id.
+    pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> + '_ {
+        self.fixed_left
+            .tiles_with_ipc_layouts()
+            .chain(self.fixed_right.tiles_with_ipc_layouts())
+    }
+
+    pub fn tiles_mut(&mut self) -> impl Iterator<Item = &mut Tile<W>> + '_ {
+        self.fixed_left
+            .tiles_mut()
+            .chain(self.fixed_right.tiles_mut())
+    }
+
+    pub fn tiles_with_render_positions(
+        &self,
+    ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
+        self.fixed_left
+            .tiles_with_render_positions()
+            .chain(self.fixed_right.tiles_with_render_positions())
+    }
+
+    pub fn tiles_with_render_positions_mut(
+        &mut self,
+        round: bool,
+    ) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> {
+        self.fixed_left
+            .tiles_with_render_positions_mut(round)
+            .chain(self.fixed_right.tiles_with_render_positions_mut(round))
+    }
+
+    /// The active window of the focused panel (per `active_fixed_side`). Unlike
+    /// the workspace's old accessor there is no carousel fallback — that belongs
+    /// to the Monitor now.
+    pub fn active_window(&self) -> Option<&W> {
+        match self.active_fixed_side {
+            Some(side) => self.strip(side).active_window(),
+            None => None,
+        }
+    }
+
+    pub fn active_window_mut(&mut self) -> Option<&mut W> {
+        match self.active_fixed_side {
+            Some(side) => self.strip_mut(side).active_window_mut(),
+            None => None,
+        }
+    }
+
+    pub fn active_tile_mut(&mut self) -> Option<&mut Tile<W>> {
+        match self.active_fixed_side {
+            Some(side) => self.strip_mut(side).active_tile_mut(),
+            None => None,
+        }
+    }
+
+    pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
+        if let Some(rv) = self.fixed_left.window_under(pos) {
+            return Some(rv);
+        }
+        self.fixed_right.window_under(pos)
+    }
+
+    pub fn popup_target_rect(&self, id: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        if self.fixed_left.has_window(id) {
+            self.fixed_left.popup_target_rect(id)
+        } else if self.fixed_right.has_window(id) {
+            self.fixed_right.popup_target_rect(id)
+        } else {
+            None
+        }
+    }
+
+    /// Apply a committed configure-ack to a panel window. Returns `true` if a
+    /// strip owned the window.
+    pub fn update_window(&mut self, id: &W::Id, serial: Option<Serial>) -> bool {
+        self.fixed_left.update_window(id, serial) || self.fixed_right.update_window(id, serial)
+    }
+
+    pub fn refresh(&mut self, focus: Option<FixedSide>, is_focused: bool) {
+        self.fixed_left
+            .refresh(focus == Some(FixedSide::Left), is_focused);
+        self.fixed_right
+            .refresh(focus == Some(FixedSide::Right), is_focused);
+    }
+
+    pub fn start_open_animation(&mut self, id: &W::Id) -> bool {
+        self.fixed_left.start_open_animation(id) || self.fixed_right.start_open_animation(id)
+    }
+
+    pub fn start_close_animation_for_window(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        id: &W::Id,
+        blocker: TransactionBlocker,
+    ) {
+        if self.fixed_left.has_window(id) {
+            self.fixed_left
+                .start_close_animation_for_window(renderer, id, blocker);
+        } else if self.fixed_right.has_window(id) {
+            self.fixed_right
+                .start_close_animation_for_window(renderer, id, blocker);
+        }
+    }
+
+    /// Activate the panel window `id`, setting `active_fixed_side` to its side.
+    /// Returns `true` if a strip owned the window. The caller clears
+    /// `active_fixed_side` (and updates floating state) when no strip owns it.
+    pub fn activate_window(&mut self, id: &W::Id) -> bool {
+        if self.fixed_left.activate_window(id) {
+            self.active_fixed_side = Some(FixedSide::Left);
+            true
+        } else if self.fixed_right.activate_window(id) {
+            self.active_fixed_side = Some(FixedSide::Right);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a panel window's tile, routing to the owning strip and clearing
+    /// `active_fixed_side` when that strip empties. Returns `None` if neither
+    /// strip owns `id`.
+    pub fn remove_tile(&mut self, id: &W::Id, transaction: Transaction) -> Option<RemovedTile<W>> {
+        if self.fixed_left.has_window(id) {
+            let removed = self.fixed_left.remove_tile(id, transaction);
+            if self.fixed_left.is_empty() && self.active_fixed_side == Some(FixedSide::Left) {
+                self.active_fixed_side = None;
+            }
+            Some(removed)
+        } else if self.fixed_right.has_window(id) {
+            let removed = self.fixed_right.remove_tile(id, transaction);
+            if self.fixed_right.is_empty() && self.active_fixed_side == Some(FixedSide::Right) {
+                self.active_fixed_side = None;
+            }
+            Some(removed)
+        } else {
+            None
+        }
+    }
+
+    pub fn remove_active_tile(&mut self, transaction: Transaction) -> Option<RemovedTile<W>> {
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => {
+                let removed = self.fixed_left.remove_active_tile(transaction)?;
+                if self.fixed_left.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                Some(removed)
+            }
+            Some(FixedSide::Right) => {
+                let removed = self.fixed_right.remove_active_tile(transaction)?;
+                if self.fixed_right.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                Some(removed)
+            }
+            None => None,
+        }
+    }
+
+    pub fn remove_active_column(&mut self) -> Option<Column<W>> {
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => {
+                let column = self.fixed_left.remove_active_column()?;
+                if self.fixed_left.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                Some(column)
+            }
+            Some(FixedSide::Right) => {
+                let column = self.fixed_right.remove_active_column()?;
+                if self.fixed_right.is_empty() {
+                    self.active_fixed_side = None;
+                }
+                Some(column)
+            }
+            None => None,
+        }
+    }
+
+    /// Tiles parked in the fixed-side panels, paired with their side and their
+    /// 0-based (column, tile) position within that strip. Used by session
+    /// restore to persist side-panel placement.
+    pub fn fixed_side_tiles(&self) -> Vec<(FixedSide, usize, usize, &Tile<W>)> {
+        let mut out = Vec::new();
+        for (side, strip) in [
+            (FixedSide::Left, &self.fixed_left),
+            (FixedSide::Right, &self.fixed_right),
+        ] {
+            for (col_idx, col) in strip.columns().enumerate() {
+                for (tile_idx, (tile, _pos)) in col.tiles().enumerate() {
+                    out.push((side, col_idx, tile_idx, tile));
+                }
+            }
+        }
+        out
+    }
+
+    // --- Per-window operations (by id, else active side) ---------------------
+
+    /// `true` if a strip owns `id` and applied the change.
+    pub fn set_fullscreen(&mut self, id: &W::Id, is_fullscreen: bool) -> bool {
+        if let Some(strip) = self.strip_with_window_mut(id) {
+            strip.set_fullscreen(id, is_fullscreen);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_maximized(&mut self, id: &W::Id, maximize: bool) -> bool {
+        if let Some(strip) = self.strip_with_window_mut(id) {
+            strip.set_maximized(id, maximize);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resolve the strip a per-window op should target: the owning strip for a
+    /// `Some(id)`, else the active strip for `None`.
+    fn op_strip_mut(&mut self, window: Option<&W::Id>) -> Option<&mut FixedStrip<W>> {
+        match window {
+            Some(id) => self.strip_with_window_mut(id),
+            None => self.active_strip_mut(),
+        }
+    }
+
+    pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        if let Some(strip) = self.op_strip_mut(window) {
+            strip.set_window_width(window, change);
+        }
+    }
+
+    pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        if let Some(strip) = self.op_strip_mut(window) {
+            strip.set_window_height(window, change);
+        }
+    }
+
+    pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
+        if let Some(strip) = self.op_strip_mut(window) {
+            strip.reset_window_height(window);
+        }
+    }
+
+    pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
+        if let Some(strip) = self.op_strip_mut(window) {
+            strip.toggle_window_width(window, forwards);
+        }
+    }
+
+    pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
+        if let Some(strip) = self.op_strip_mut(window) {
+            strip.toggle_window_height(window, forwards);
+        }
+    }
+
+    pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
+        if let Some(strip) = self.op_strip_mut(window) {
+            strip.consume_or_expel_window_left(window);
+        }
+    }
+
+    pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
+        if let Some(strip) = self.op_strip_mut(window) {
+            strip.consume_or_expel_window_right(window);
+        }
+    }
+
+    pub fn consume_into_column(&mut self) {
+        if let Some(strip) = self.active_strip_mut() {
+            strip.consume_into_column();
+        }
+    }
+
+    pub fn expel_from_column(&mut self) {
+        if let Some(strip) = self.active_strip_mut() {
+            strip.expel_from_column();
+        }
+    }
+
+    pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
+        if let Some(strip) = self.active_strip_mut() {
+            strip.swap_window_in_direction(direction);
+        }
+    }
+
+    /// `true` if a strip owns `window` and began the resize.
+    pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
+        if let Some(strip) = self.strip_with_window_mut(&window) {
+            strip.interactive_resize_begin(window, edges)
+        } else {
+            false
+        }
+    }
+
+    pub fn interactive_resize_update(
+        &mut self,
+        window: &W::Id,
+        delta: Point<f64, Logical>,
+    ) -> bool {
+        if let Some(strip) = self.strip_with_window_mut(window) {
+            strip.interactive_resize_update(window, delta)
+        } else {
+            false
+        }
+    }
+
+    pub fn interactive_resize_end(&mut self, window: Option<&W::Id>) {
+        match window {
+            Some(id) => {
+                if let Some(strip) = self.strip_with_window_mut(id) {
+                    strip.interactive_resize_end(Some(id));
+                }
+            }
+            None => {
+                self.fixed_left.interactive_resize_end(None);
+                self.fixed_right.interactive_resize_end(None);
+            }
+        }
+    }
+
+    // --- Focus within the active panel ---------------------------------------
+
+    pub fn focus_left_in_active(&mut self) -> bool {
+        self.active_strip_mut().is_some_and(|s| s.focus_left())
+    }
+
+    pub fn focus_right_in_active(&mut self) -> bool {
+        self.active_strip_mut().is_some_and(|s| s.focus_right())
+    }
+
+    pub fn focus_up_in_active(&mut self) -> bool {
+        self.active_strip_mut().is_some_and(|s| s.focus_up())
+    }
+
+    pub fn focus_down_in_active(&mut self) -> bool {
+        self.active_strip_mut().is_some_and(|s| s.focus_down())
+    }
+
+    /// Focus the innermost (carousel-facing) column of `side`. Returns `true`
+    /// on success (the strip is non-empty); does NOT set `active_fixed_side`
+    /// — the Monitor sets it when the cross-boundary hop succeeds.
+    pub fn focus_innermost(&mut self, side: FixedSide) -> bool {
+        self.strip_mut(side).focus_innermost()
+    }
+
+    // --- Cross-boundary half-ops (composed by Monitor) -----------------------
+
+    pub fn add_column_at_inner_edge(&mut self, side: FixedSide, column: Column<W>) {
+        self.strip_mut(side).add_column_at_inner_edge(column);
+    }
+
+    pub fn remove_innermost_column(&mut self, side: FixedSide) -> Option<Column<W>> {
+        self.strip_mut(side).remove_innermost_column()
+    }
+
+    pub fn focused_column_is_at_inner_edge(&self, side: FixedSide) -> bool {
+        self.strip(side).focused_column_is_at_inner_edge()
+    }
+
+    pub fn add_tile_at_inner_edge(
+        &mut self,
+        side: FixedSide,
+        tile: Tile<W>,
+        width: ColumnWidth,
+        is_full_width: bool,
+    ) {
+        self.strip_mut(side)
+            .add_tile_at_inner_edge(tile, width, is_full_width);
+    }
+
+    pub fn add_tile_right_of(
+        &mut self,
+        side: FixedSide,
+        right_of: &W::Id,
+        tile: Tile<W>,
+        activate: bool,
+        width: ColumnWidth,
+        is_full_width: bool,
+    ) {
+        self.strip_mut(side)
+            .add_tile_right_of(right_of, tile, activate, width, is_full_width);
+    }
+
+    pub fn move_active_neighbor_as_new_row(&mut self, side: FixedSide, to_left: bool) -> bool {
+        self.strip_mut(side).move_active_neighbor_as_new_row(to_left)
+    }
+
+    // --- Render --------------------------------------------------------------
+
+    pub fn render_left<R: NaruRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
+    ) {
+        self.fixed_left.render(ctx, xray_pos, focus_ring, push);
+    }
+
+    pub fn render_right<R: NaruRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
+    ) {
+        self.fixed_right.render(ctx, xray_pos, focus_ring, push);
+    }
+
+    #[cfg(test)]
+    pub fn verify_invariants(&self) {
+        self.fixed_left.verify_invariants();
+        self.fixed_right.verify_invariants();
+
+        match self.active_fixed_side {
+            Some(FixedSide::Left) => assert!(
+                !self.fixed_left.is_empty(),
+                "active_fixed_side is Left but fixed_left is empty"
+            ),
+            Some(FixedSide::Right) => assert!(
+                !self.fixed_right.is_empty(),
+                "active_fixed_side is Right but fixed_right is empty"
+            ),
+            None => {}
+        }
     }
 }
