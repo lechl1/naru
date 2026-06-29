@@ -3057,9 +3057,29 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             -working_x - (working_w - total_content) / 2.
         } else {
             // Overflows — clamp so neither extremity has wasted gap.
+            // `min_view_x` keeps the content's left edge at the working area's
+            // left edge (content spills off the right); `max_view_x` keeps its
+            // right edge at the working area's right edge (spills off the left).
             let min_view_x = -working_x;
             let max_view_x = total_content - working_w - working_x;
-            self.target_view_pos().clamp(min_view_x, max_view_x)
+
+            // In disable-carousel mode there is no horizontal scrolling, so when
+            // a fixed-side panel insets one edge the overflowing row must spill
+            // off the *screen* edge, not slide under the panel. Anchor it to the
+            // panel's inner edge: left panel → left-anchor (overflow right),
+            // right panel → right-anchor (overflow left). With panels on both
+            // sides or neither — and in scrolling mode, where columns are meant
+            // to slide under the panel behind the edge fade — follow the active
+            // column instead.
+            let left_inset = working_x.max(0.);
+            let right_inset = (self.view_size.w - working_x - working_w).max(0.);
+            if self.options.layout.disable_carousel && left_inset > right_inset + 1. {
+                min_view_x
+            } else if self.options.layout.disable_carousel && right_inset > left_inset + 1. {
+                max_view_x
+            } else {
+                self.target_view_pos().clamp(min_view_x, max_view_x)
+            }
         };
         Some(view_pos)
     }

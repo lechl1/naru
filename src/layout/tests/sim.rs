@@ -1729,6 +1729,63 @@ mod tests {
         }
     }
 
+    /// Resizing a fixed-side panel must keep the disable-carousel row out from
+    /// under the panel: when the remaining columns can't shrink any further (a
+    /// hard minimum width) and so can't fit the space the panel left, the row
+    /// must spill off the *screen* edge, not slide under the panel. Regression
+    /// test for a wide left panel pushing min-width windows under it.
+    #[test]
+    fn disable_carousel_panel_resize_does_not_push_carousel_under_panel() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        options.enable_stacking = true; // fixed-side panels need stacking
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // Windows with a real minimum width (like terminals/browsers) that
+        // resist shrinking, so a wide-enough panel forces an unavoidable overflow.
+        let ids: Vec<usize> = (0..4)
+            .map(|_| sim.add_window_with(|p| p.min_max_size.0.w = 220))
+            .collect();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Park the leftmost window into the left fixed-side panel.
+        sim.focus_window(ids[0]);
+        sim.move_window_left_stacked();
+        let parked = ids[0];
+        sim.assert_slot(parked, WindowLayer::FixedLeft);
+
+        let settle = |sim: &mut LayoutSim| {
+            for _ in 0..2 {
+                sim.communicate_all();
+                sim.complete_animations();
+                sim.update_render_elements();
+            }
+        };
+        settle(&mut sim);
+
+        // Sweep the panel across widths, including ones too wide for the
+        // remaining (min-width) columns to fit.
+        for pw in [200, 500, 800, 300, 600] {
+            sim.set_window_width(parked, SizeChange::SetFixed(pw));
+            settle(&mut sim);
+
+            let pg = sim.window_geometry(&parked).expect("parked geo");
+            let panel_right = pg.loc.x + pg.size.w;
+            for &id in &ids[1..] {
+                let g = sim.window_geometry(&id).expect("carousel geo");
+                assert!(
+                    g.loc.x + 1.0 >= panel_right,
+                    "panel width {pw}: carousel window {id} (left {}) slides under the \
+                     left panel (right edge {panel_right})",
+                    g.loc.x,
+                );
+            }
+        }
+    }
+
     /// Closing a window that lived in a fixed-side panel frees the carousel's
     /// usable width, and the carousel windows grow back proportionally toward
     /// their preferred widths to reclaim it. This extends the close-time
