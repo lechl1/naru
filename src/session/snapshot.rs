@@ -78,7 +78,11 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
             };
 
             let (w, h) = window_size(mapped);
-            let placement = placement_from_ipc_layout(&layout, w, h);
+            let portrait = mon.is_some_and(|m| {
+                let s = m.view_size();
+                s.h > s.w
+            });
+            let placement = placement_from_ipc_layout(&layout, w, persisted_height(portrait, h));
             let (flatpak_id, exec) = launch_info(mapped);
             let (cwd, tmux_session, claude_session) =
                 resolve_terminal_state(mapped, &app_id, session_restore, &mut socket_maps);
@@ -115,6 +119,11 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
             };
 
             let (w, h) = window_size(mapped);
+            let portrait = {
+                let s = mon.view_size();
+                s.h > s.w
+            };
+            let h = persisted_height(portrait, h);
             let (flatpak_id, exec) = launch_info(mapped);
             let (cwd, tmux_session, claude_session) =
                 resolve_terminal_state(mapped, &app_id, session_restore, &mut socket_maps);
@@ -236,6 +245,22 @@ fn launch_info(mapped: &Mapped) -> (Option<String>, Option<String>) {
 fn window_size(mapped: &Mapped) -> (f64, f64) {
     let size = mapped.size();
     (size.w as f64, size.h as f64)
+}
+
+/// The window height to persist. Intentionally *not* saved on a landscape
+/// output: restored windows take the layout's automatic height, so a window
+/// that is alone in its column fills the whole column and a multi-window column
+/// splits evenly. Persisting a stale fixed height there is what left a lone
+/// restored window stuck at, e.g., 50% of the column. On a *portrait* output the
+/// vertical split within a column is the meaningful axis, so the real height is
+/// kept. `0.0` is the "use the default/automatic height" sentinel the restore
+/// path already understands.
+fn persisted_height(portrait: bool, h: f64) -> f64 {
+    if portrait {
+        h
+    } else {
+        0.0
+    }
 }
 
 fn panel_side_for(side: FixedSide) -> PanelSide {
