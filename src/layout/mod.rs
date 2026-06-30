@@ -1481,6 +1481,14 @@ impl<W: LayoutElement> Layout<W> {
         match &self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    // Fixed-side panel windows are owned by the monitor, not a
+                    // workspace, so they must be searched explicitly — otherwise
+                    // their commits resolve no output and never queue a redraw,
+                    // leaving a panel window stale until some unrelated event
+                    // (cursor motion, an animation) forces a repaint.
+                    if let Some(window) = mon.panels.find_wl_surface(wl_surface) {
+                        return Some((window, Some(&mon.output)));
+                    }
                     for ws in &mon.workspaces {
                         if let Some(window) = ws.find_wl_surface(wl_surface) {
                             return Some((window, Some(&mon.output)));
@@ -1513,6 +1521,11 @@ impl<W: LayoutElement> Layout<W> {
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
+                    // Panel windows are monitor-owned; search them too (see
+                    // `find_window_and_output`).
+                    if let Some(window) = mon.panels.find_wl_surface_mut(wl_surface) {
+                        return Some((window, Some(&mon.output)));
+                    }
                     for ws in &mut mon.workspaces {
                         if let Some(window) = ws.find_wl_surface_mut(wl_surface) {
                             return Some((window, Some(&mon.output)));

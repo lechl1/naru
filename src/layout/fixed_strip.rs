@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use naru_ipc::{SizeChange, WindowLayout};
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Serial, Size};
 
 use super::scrolling::{
@@ -682,6 +683,23 @@ impl<W: LayoutElement> FixedPanels<W> {
 
     pub fn has_window(&self, id: &W::Id) -> bool {
         self.fixed_left.has_window(id) || self.fixed_right.has_window(id)
+    }
+
+    /// The panel window owning `wl_surface` (or any of its descendant surfaces),
+    /// if it lives in either fixed-side panel. Mirrors
+    /// [`Workspace::find_wl_surface`](super::workspace::Workspace::find_wl_surface)
+    /// so the commit path can resolve a panel window's output and queue a redraw
+    /// for it, just like a carousel window.
+    pub fn find_wl_surface(&self, wl_surface: &WlSurface) -> Option<&W> {
+        self.tiles()
+            .map(Tile::window)
+            .find(|win| win.is_wl_surface(wl_surface))
+    }
+
+    pub fn find_wl_surface_mut(&mut self, wl_surface: &WlSurface) -> Option<&mut W> {
+        self.tiles_mut()
+            .map(Tile::window_mut)
+            .find(|win| win.is_wl_surface(wl_surface))
     }
 
     pub fn side_with_window(&self, id: &W::Id) -> Option<FixedSide> {
