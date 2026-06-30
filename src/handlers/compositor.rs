@@ -381,9 +381,12 @@ impl CompositorHandler for State {
                     }
 
                     // Last restored window placed: lift placeholder-workspace
-                    // protection and reclaim any workspaces that stayed empty.
+                    // protection and reclaim any workspaces that stayed empty,
+                    // then rebuild any multi-window columns now that every
+                    // restored window is present and positioned.
                     if restore_drained {
                         self.naru.layout.end_session_restore();
+                        self.stack_restored_columns();
                     }
 
                     // Session-restore: window appearing changes what we'd persist.
@@ -715,6 +718,42 @@ impl State {
             self.naru
                 .layout
                 .set_window_height(Some(id), naru_ipc::SizeChange::SetFixed(height.round() as i32));
+        }
+    }
+
+    /// Rebuild the multi-window columns of a restored session. Each restored
+    /// window was added as its own single-window column and positioned in saved
+    /// `(column, tile)` order, so windows that shared a saved column sit in
+    /// adjacent columns sorted by tile. Consuming every non-leader into its left
+    /// neighbour — walking each workspace's restored windows in `(column, tile)`
+    /// order — collapses each run back into one column, with the tiles in their
+    /// saved order (consume appends to the bottom of the target column).
+    ///
+    /// Called once, after the final restored window has mapped and been placed.
+    /// Window heights are intentionally not restored (see `snapshot.rs`), so the
+    /// rebuilt columns split their height evenly.
+    fn stack_restored_columns(&mut self) {
+        // Collect the consume targets first (immutable borrow of the layout),
+        // then apply them (mutable). Grouping is per-workspace so two windows
+        // that shared a saved column index on *different* workspaces are never
+        // merged together.
+        let mut to_consume = Vec::new();
+        for (_mon, _idx, ws) in self.naru.layout.workspaces() {
+            let mut entries: Vec<_> = ws
+                .windows()
+                .filter_map(|w| w.restore_pos().map(|pos| (w.window.clone(), pos)))
+                .collect();
+            entries.sort_by_key(|(_, pos)| *pos);
+            let mut prev_col: Option<usize> = None;
+            for (id, (col, _tile)) in &entries {
+                if Some(*col) == prev_col {
+                    to_consume.push(id.clone());
+                }
+                prev_col = Some(*col);
+            }
+        }
+        for id in to_consume {
+            self.naru.layout.consume_or_expel_window_left(Some(&id));
         }
     }
 

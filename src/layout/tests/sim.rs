@@ -764,6 +764,51 @@ mod tests {
         );
     }
 
+    /// Session restore reconstructs a multi-window column by placing each saved
+    /// window as its own single-window column in saved `(column, tile)` order,
+    /// then consuming every non-leader into its left neighbour — in tile order —
+    /// to rebuild the stack. This verifies that mechanism: two saved columns of
+    /// two windows each end up as exactly two columns, each holding its pair.
+    #[test]
+    fn restore_stacks_same_column_windows() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        // Four windows, each opening as its own column: [w0][w1][w2][w3].
+        let w: Vec<usize> = (0..4).map(|_| sim.add_window()).collect();
+        sim.settle();
+        assert_eq!(
+            (0..4).map(|i| column_occupancy(&sim, w[i])).max(),
+            Some(1),
+            "precondition: every window starts in its own column",
+        );
+
+        // Saved layout: column A = (w0 tile0, w1 tile1), column B = (w2 tile0,
+        // w3 tile1). Stack each non-leader into its left neighbour, in tile
+        // order — exactly what the restore merge does.
+        sim.apply(Op::ConsumeOrExpelWindowLeft { id: Some(w[1]) });
+        sim.apply(Op::ConsumeOrExpelWindowLeft { id: Some(w[3]) });
+        sim.settle();
+
+        // Exactly two columns, each holding its saved pair.
+        assert_eq!(column_occupancy(&sim, w[0]), 2, "w0+w1 share a column");
+        assert_eq!(column_occupancy(&sim, w[2]), 2, "w2+w3 share a column");
+        assert_eq!(
+            sim.scrolling_column_index(w[0]),
+            sim.scrolling_column_index(w[1]),
+            "w0 and w1 are in the same column",
+        );
+        assert_eq!(
+            sim.scrolling_column_index(w[2]),
+            sim.scrolling_column_index(w[3]),
+            "w2 and w3 are in the same column",
+        );
+        assert_ne!(
+            sim.scrolling_column_index(w[0]),
+            sim.scrolling_column_index(w[2]),
+            "the two restored columns stay distinct",
+        );
+    }
+
     /// Animations are genuinely simulated frame by frame: an animated action
     /// leaves work in flight, frame-stepping makes observable progress in
     /// `window_geometry`, and the animation eventually settles at a rest
