@@ -47,6 +47,13 @@ impl PointerGrab<State> for ResizeGrab {
                 .layout
                 .interactive_resize_update(&self.window, delta);
             if ongoing {
+                // Repaint on every motion while the resize is live. Without this
+                // the screen only refreshes when a client happens to commit, so
+                // the layout — and especially a fixed-side panel resize, which
+                // has to reflow the neighbouring carousel — visibly lags behind
+                // the pointer. Mirrors `MoveGrab::motion`.
+                // FIXME: only redraw the affected output.
+                data.naru.queue_redraw_all();
                 return;
             }
         }
