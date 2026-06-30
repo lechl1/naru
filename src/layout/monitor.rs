@@ -2468,28 +2468,45 @@ impl<W: LayoutElement> Monitor<W> {
             }
         }
 
-        // Pass 2: the fixed-side panels, pinned to the working-area origin of
-        // the screen (not offset by any per-workspace geo) so they stay put
-        // while the carousels slide during a switch. The focus-ring gating
-        // depends on the active workspace's floating state (floating lives on
-        // the workspace, not the panels).
-        {
-            let pinned_geo = Rectangle::from_size(self.view_size);
-            let panel_focus_ring =
-                focus_ring && !self.workspaces[self.active_workspace_idx].floating_is_active();
-            let xray_pos = XrayPos::new(pinned_geo.loc, zoom);
+        // Pass 2: the fixed-side panels. The panels are monitor-global, so the
+        // geo they render into depends on the mode:
+        //
+        // - Normal (incl. a workspace switch): pinned to the screen's
+        //   working-area origin, once, so they stay put while the carousels
+        //   slide underneath during a switch.
+        // - Overview: the workspaces are zoomed-out thumbnails, and the panels
+        //   belong to every one of them, so render them into *each* workspace's
+        //   geo — same as the carousels — instead of once at the screen edge.
+        //
+        // The focus-ring gating depends on the workspace's floating state
+        // (floating lives on the workspace, not the panels).
+        let mut render_panels_into = |geo: Rectangle<f64, Logical>,
+                                      panel_focus_ring: bool,
+                                      push: &mut dyn FnMut(MonitorRenderElement<R>)| {
+            let xray_pos = XrayPos::new(geo.loc, zoom);
             let mut panel_push = |elem: ScrollingSpaceRenderElement<R>| {
                 let elem = WorkspaceRenderElement::Scrolling(elem);
                 let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
                 if let Some(elem) = elem {
                     let elem = MonitorInnerRenderElement::from(elem);
-                    push(scale_relocate(pinned_geo, elem));
+                    push(scale_relocate(geo, elem));
                 }
             };
             self.panels
                 .render_left(ctx.r(), xray_pos, panel_focus_ring, &mut panel_push);
             self.panels
                 .render_right(ctx.r(), xray_pos, panel_focus_ring, &mut panel_push);
+        };
+        if self.overview_progress.is_some() {
+            for (ws, geo) in self.workspaces_with_render_geo() {
+                let panel_focus_ring = focus_ring && !ws.floating_is_active();
+                render_panels_into(geo, panel_focus_ring, push);
+            }
+        } else {
+            let pinned_geo = Rectangle::from_size(self.view_size);
+            let panel_focus_ring =
+                focus_ring && !self.workspaces[self.active_workspace_idx].floating_is_active();
+            render_panels_into(pinned_geo, panel_focus_ring, push);
         }
 
         // Pass 3: the carousels (behind the panels). `render_scrolling` fades
