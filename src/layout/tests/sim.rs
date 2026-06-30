@@ -1554,20 +1554,19 @@ mod tests {
         );
     }
 
-    /// Resizing one window must never auto-grow the others. Two wide columns
-    /// overflow and get shrunk by a shared factor; shrinking the active one
-    /// frees enough room that recomputing the fit from scratch would snap the
-    /// bystander back to its (large) natural width. It must not: the shrink
-    /// factor may only decrease on a resize.
+    /// Resizing one window smaller frees space, and the other columns grow back
+    /// proportionally toward their preferred widths to reclaim it. Two wide
+    /// columns overflow and get shrunk by a shared factor; shrinking the active
+    /// one lets the bystander recover toward its (large) preferred width.
     #[test]
-    fn disable_carousel_does_not_grow_other_columns_when_resizing_smaller() {
+    fn disable_carousel_grows_other_columns_when_resizing_smaller() {
         let mut options = Options::default();
         options.layout.disable_carousel = true;
         let mut sim = LayoutSim::with_options(options);
         sim.add_output(1); // 1280×720
 
         // Two very wide columns: together they overflow, so the shared factor
-        // shrinks both well below their natural width.
+        // shrinks both well below their preferred width.
         let bystander = sim.add_window();
         sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(80.0)));
         let _active = sim.add_window();
@@ -1577,9 +1576,8 @@ mod tests {
         sim.update_render_elements();
         let before = sim.window_geometry(&bystander).expect("bystander geo").size.w;
 
-        // Shrink the active column. Now everything would fit at natural width,
-        // so a from-scratch refit would grow the bystander — but a resize must
-        // never auto-grow the others.
+        // Shrink the active column so the row now fits at preferred width: the
+        // bystander grows back to reclaim the freed space.
         sim.apply(Op::SetColumnWidth(SizeChange::SetProportion(10.0)));
         sim.communicate_all();
         sim.complete_animations();
@@ -1587,8 +1585,9 @@ mod tests {
         let after = sim.window_geometry(&bystander).expect("bystander geo").size.w;
 
         assert!(
-            after <= before + 1.0,
-            "resizing one window smaller must not auto-grow the others: bystander {before} -> {after}",
+            after > before + 1.0,
+            "resizing one window smaller should grow the others back toward their \
+             preferred width: bystander {before} -> {after}",
         );
     }
 
@@ -1828,6 +1827,46 @@ mod tests {
         assert!(
             after > shrunk + 1.0,
             "closing a panel window should grow the carousel back: {shrunk} -> {after}",
+        );
+    }
+
+    /// Growing one column wide enough to compress the row (shrink-to-fit), then
+    /// shrinking it back so everything fits again, restores the *other* columns
+    /// to their preferred widths. The disable-carousel fit must not ratchet
+    /// permanently small once the overflow is gone. Regression for "preferred
+    /// width not restored when shrinking (after growing)".
+    #[test]
+    fn disable_carousel_shrink_after_grow_restores_preferred_width() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        let ids: Vec<usize> = (0..3).map(|_| sim.add_window()).collect();
+        sim.settle();
+        let sibling = ids[1];
+        let natural = sim.window_geometry(&sibling).expect("geo").size.w;
+
+        // Grow column 0 far past what fits → the row shrinks to fit, so the
+        // untouched sibling renders narrower than its preferred width.
+        sim.set_window_width(ids[0], SizeChange::SetFixed(1500));
+        sim.settle();
+        let shrunk = sim.window_geometry(&sibling).expect("geo").size.w;
+        assert!(
+            shrunk < natural - 1.0,
+            "precondition: growing one column should shrink the siblings \
+             ({natural} -> {shrunk})",
+        );
+
+        // Shrink column 0 back so everything fits again → the sibling returns to
+        // its preferred width, not stuck compressed.
+        sim.set_window_width(ids[0], SizeChange::SetFixed(200));
+        sim.settle();
+        let restored = sim.window_geometry(&sibling).expect("geo").size.w;
+        assert!(
+            (restored - natural).abs() < 2.0,
+            "shrinking back should restore the sibling's preferred width \
+             (natural {natural}, shrunk {shrunk}, restored {restored})",
         );
     }
 

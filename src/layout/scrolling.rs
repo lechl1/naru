@@ -128,16 +128,6 @@ pub struct ScrollingSpace<W: LayoutElement> {
     /// Scale of the output the space is on (and rounds its sizes to).
     scale: f64,
 
-    /// Last shared shrink factor applied across all columns by
-    /// [`fit_columns_to_parent`](Self::fit_columns_to_parent) in
-    /// `disable-carousel` mode. `1.0` means "natural size". Tracked at the
-    /// space level (rather than read off a column) because, right after a
-    /// column is inserted, the new column still carries `fit_scale == 1.0`
-    /// while the existing ones carry the prior factor — so no single column
-    /// reliably reports the previous *global* scale. Used as the ceiling for
-    /// the never-grow-on-resize clamp.
-    last_fit_scale: f64,
-
     /// Clock for driving animations.
     clock: Clock,
 
@@ -367,7 +357,6 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             working_area,
             parent_area,
             scale,
-            last_fit_scale: 1.0,
             clock,
             options,
         }
@@ -3623,17 +3612,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     /// whole row — columns plus gaps — always fits the area between the
     /// fixed-side panels (which are not part of the carousel).
     ///
-    /// `allow_grow` controls whether the factor may rise back toward `1.0`:
-    /// - `true` (window closed, or a fixed-side panel freed space): recompute
-    ///   freely so the remaining columns return toward their natural width.
-    /// - `false` (a resize): the factor may only *decrease* from its current
-    ///   value, so shrinking one window never auto-grows the others. It still
-    ///   shrinks further when a resize would overflow the row, keeping every
-    ///   window on screen.
+    /// The factor is recomputed from scratch every call, never clamped to a
+    /// previous value, so whenever space frees up — a window closed, a column
+    /// resized smaller, a fixed-side panel shrunk — the columns grow back
+    /// proportionally toward their preferred (natural) widths instead of staying
+    /// stuck at an old, smaller scale.
     ///
     /// Re-centers the row afterwards. No-op when the carousel is enabled or
     /// empty.
-    pub fn fit_columns_to_parent(&mut self, allow_grow: bool) {
+    pub fn fit_columns_to_parent(&mut self) {
         if !self.options.layout.disable_carousel || self.columns.is_empty() {
             return;
         }
@@ -3657,22 +3644,21 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             .sum();
         let usable = available - gaps_total;
 
-        let mut factor = if total_columns > usable && usable > 0.0 {
+        // Shrink the row to fit when it would overflow; otherwise show every
+        // column at its preferred (natural) width. The factor is shared, so the
+        // user's relative widths are preserved, and it never exceeds `1.0` (no
+        // column grows past its preferred width).
+        //
+        // Recomputed from scratch every time — never clamped to a previous
+        // value — so that whenever space frees up (a column resized smaller, a
+        // window closed, a fixed-side panel shrunk) the columns grow back
+        // *proportionally* toward their preferred widths rather than staying
+        // stuck at an old, smaller scale. The row is centered below.
+        let factor = if total_columns > usable && usable > 0.0 {
             usable / total_columns
         } else {
-            // Everything fits at natural size — never grow to fill; the row is
-            // centered (leaving equal slack on both sides) below.
             1.0
         };
-
-        // Never auto-grow on a resize: clamp the factor so it can only shrink
-        // relative to the last applied one. Closing a window / freeing panel
-        // space passes `allow_grow = true` to skip this and recover toward
-        // natural width.
-        if !allow_grow {
-            factor = factor.min(self.last_fit_scale);
-        }
-        self.last_fit_scale = factor;
 
         for (col, data) in zip(&mut self.columns, &mut self.data) {
             col.set_fit_scale(factor, true);
