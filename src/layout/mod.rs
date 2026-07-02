@@ -1922,8 +1922,14 @@ impl<W: LayoutElement> Layout<W> {
 
         let mon = monitors.iter().find(|mon| &mon.output == output).unwrap();
         let mon_windows = mon.workspaces.iter().flat_map(|ws| ws.windows());
+        // Fixed-side panel windows are owned by the monitor, not its workspaces,
+        // so they must be surfaced here too — otherwise they miss frame
+        // callbacks, primary-scanout-output tracking, dmabuf/presentation
+        // feedback, etc. (a panelled video would render at the ~1 Hz fallback
+        // frame-callback rate instead of the output's refresh rate).
+        let panel_windows = mon.panels.tiles().map(|tile| tile.window());
 
-        moving_window.chain(mon_windows)
+        moving_window.chain(mon_windows).chain(panel_windows)
     }
 
     pub fn windows_for_output_mut(&mut self, output: &Output) -> impl Iterator<Item = &mut W> + '_ {
@@ -1944,8 +1950,11 @@ impl<W: LayoutElement> Layout<W> {
             .find(|mon| &mon.output == output)
             .unwrap();
         let mon_windows = mon.workspaces.iter_mut().flat_map(|ws| ws.windows_mut());
+        // See `windows_for_output`: panel windows are monitor-owned and must be
+        // included so they receive frame callbacks at the output's refresh rate.
+        let panel_windows = mon.panels.tiles_mut().map(|tile| tile.window_mut());
 
-        moving_window.chain(mon_windows)
+        moving_window.chain(mon_windows).chain(panel_windows)
     }
 
     pub fn with_windows(
