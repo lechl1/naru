@@ -4,8 +4,9 @@
 //! each conversation to `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`,
 //! where `<encoded-cwd>` is the absolute working directory with every
 //! non-alphanumeric character replaced by `-`. On restore the terminal is
-//! relaunched running `claude --resume <session-id>` so the conversation picks
-//! up where it left off.
+//! relaunched running `claude --resume <session-id>` (plus the
+//! bypass-permissions and Remote Control flags — see [`resume_command`]) so the
+//! conversation picks up where it left off.
 //!
 //! Detection mirrors tmux: walk the terminal's process tree for the `claude`
 //! process and take its cwd, then resolve the active session as the most
@@ -24,8 +25,29 @@ use std::time::SystemTime;
 use super::cwd::{descendant_chain, read_cmdline, read_cwd_for_pid};
 
 /// The argv that resumes Claude Code session `session_id`.
+///
+/// Beyond `--resume`, this brings the session back the way the user runs it:
+///
+/// - `--dangerously-skip-permissions` restores bypass-permissions mode. The
+///   flag is the reliable lever for this on resume — Claude Code's
+///   `permissions.defaultMode` setting governs *new* sessions and isn't applied
+///   to a resumed one, so passing the flag is what actually carries the mode
+///   across a compositor restart. Security note: a restored terminal therefore
+///   relaunches Claude Code with all permission checks bypassed. That is
+///   intentional and matches how the user drives these sessions, but it means
+///   session-restore re-grants that bypass automatically.
+/// - `--remote-control` re-registers the resumed session for Remote Control
+///   (steering it from claude.ai / the mobile app) so the user doesn't have to
+///   run `/remote-control` again by hand. Passed last so its optional `[name]`
+///   value can't swallow a following flag.
 pub fn resume_command(session_id: &str) -> Vec<String> {
-    vec!["claude".to_owned(), "--resume".to_owned(), session_id.to_owned()]
+    vec![
+        "claude".to_owned(),
+        "--resume".to_owned(),
+        session_id.to_owned(),
+        "--dangerously-skip-permissions".to_owned(),
+        "--remote-control".to_owned(),
+    ]
 }
 
 /// The id of the resumable Claude Code session a terminal whose process tree
@@ -138,7 +160,13 @@ mod tests {
     fn resume_command_targets_session() {
         assert_eq!(
             resume_command("abc-123"),
-            vec!["claude", "--resume", "abc-123"]
+            vec![
+                "claude",
+                "--resume",
+                "abc-123",
+                "--dangerously-skip-permissions",
+                "--remote-control",
+            ]
         );
     }
 

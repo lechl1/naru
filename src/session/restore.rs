@@ -481,6 +481,8 @@ mod tests {
                 "claude",
                 "--resume",
                 "abc-123",
+                "--dangerously-skip-permissions",
+                "--remote-control",
             ]
         );
     }
@@ -493,7 +495,15 @@ mod tests {
         e.claude_session = Some("sess-42".into());
         assert_eq!(
             resolve_launch_argv(&e, &cfg(vec![])),
-            vec!["/usr/bin/alacritty", "-e", "claude", "--resume", "sess-42"]
+            vec![
+                "/usr/bin/alacritty",
+                "-e",
+                "claude",
+                "--resume",
+                "sess-42",
+                "--dangerously-skip-permissions",
+                "--remote-control",
+            ]
         );
     }
 
