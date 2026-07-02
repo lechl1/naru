@@ -5,44 +5,17 @@
 # `docker build`, then `docker cp` extracts /out/naru into the repo's
 # target/release/ so the upstream scripts/install.sh keeps working unchanged.
 #
-# Base image must match the host distro so the binary's NEEDED sonames
-# match the host's installed runtime libs. Trixie shipped libdisplay-info
-# soname 2 while the host (Ubuntu 26.04) ships soname 3 — that mismatch
-# left the installed binary unable to load libdisplay-info.so.2 at runtime.
-
-FROM ubuntu:26.04 AS builder
+# The apt + rust toolchain now live in a prebuilt base image (Dockerfile.base,
+# tagged naru-build-base) so the expensive package install survives BuildKit's
+# build-cache GC and doesn't re-run on every code build. See Dockerfile.base
+# for why, and the base-image note there for the distro/soname rationale.
+ARG BASE_IMAGE=naru-build-base:26.04
+FROM ${BASE_IMAGE} AS builder
 # See cli/Dockerfile for the TARGETARCH cache-id rationale.
 ARG TARGETARCH
-RUN rm -f /etc/apt/apt.conf.d/docker-clean \
- && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
-        > /etc/apt/apt.conf.d/keep-cache
 WORKDIR /app
-ENV DEBIAN_FRONTEND=noninteractive
 # Network access comes from the legacy builder's CLI-level
 # `--network=host` (see 00-naru-linux-install.sh).
-# naru is a Wayland compositor (downstream niri fork). Its dep tree pulls
-# in *-sys crates for the full graphics/input/seat stack — every one of
-# them runs pkg-config in build.rs and panics without the matching `.pc`
-# file. Install the whole set up front rather than iterating per failure.
-RUN --mount=type=cache,id=apt-${TARGETARCH},target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,id=apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-        curl pkg-config ca-certificates \
-        build-essential clang libclang-dev \
-        libssl-dev libsystemd-dev \
-        libudev-dev libseat-dev libinput-dev \
-        libwayland-dev wayland-protocols libxkbcommon-dev \
-        libdrm-dev libgbm-dev libegl-dev libgles-dev \
-        libpixman-1-dev libdisplay-info-dev libdbus-1-dev \
-        libcairo2-dev libpango1.0-dev \
-        libpipewire-0.3-dev libspa-0.2-dev \
-        libxcb1-dev libxkbcommon-x11-dev
-
-# Pin rust via rustup (Ubuntu's apt-shipped rustc lags behind upstream).
-ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain 1.88.0 --profile minimal --no-modify-path
-
 COPY . .
 RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git-${TARGETARCH},target=/usr/local/cargo/git \

@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# Durable build base for naru: the full Wayland/graphics *-dev toolchain plus a
+# pinned Rust toolchain, baked into a tagged image (naru-build-base).
+#
+# Why a separate image instead of an inline `RUN apt-get` in Dockerfile.alloy /
+# Dockerfile.test: on this disk-constrained host BuildKit's GC evicts the apt
+# layer snapshot (and the .deb cache mount, kept only 48h), so an inline apt
+# step becomes a cache *miss* and re-runs — and re-downloads — on most builds.
+# A tagged image lives in the image store, not the build cache, so it survives
+# that GC; apt then runs only when THIS file is rebuilt (i.e. when the dep set
+# or the Rust pin changes), never on a routine code build.
+#
+# Rebuild after changing the package list or toolchain pin:
+#   docker buildx build -f Dockerfile.base -t naru-build-base:26.04 .
+# (`just build` builds it automatically when the image is missing.)
+#
+# Base image is pinned by digest so the durable base doesn't silently drift
+# when the ubuntu:26.04 tag moves upstream. Must match the host distro so the
+# binary's NEEDED sonames match the host's runtime libs (see Dockerfile.alloy).
+FROM ubuntu:26.04@sha256:b7f48194d4d8b763a478a621cdc81c27be222ba2206ca3ca6bc42b49685f3d9e
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+# naru is a Wayland compositor (downstream niri fork). Its dep tree pulls in
+# *-sys crates for the full graphics/input/seat stack — every one runs
+# pkg-config in build.rs and panics without the matching `.pc` file. Install
+# the whole set up front rather than iterating per failure. Baked into the
+# image layer (no cache mount) and the apt lists dropped to keep it lean.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl pkg-config ca-certificates \
+        build-essential clang libclang-dev \
+        libssl-dev libsystemd-dev \
+        libudev-dev libseat-dev libinput-dev \
+        libwayland-dev wayland-protocols libxkbcommon-dev \
+        libdrm-dev libgbm-dev libegl-dev libgles-dev \
+        libpixman-1-dev libdisplay-info-dev libdbus-1-dev \
+        libcairo2-dev libpango1.0-dev \
+        libpipewire-0.3-dev libspa-0.2-dev \
+        libxcb1-dev libxkbcommon-x11-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pin rust via rustup (Ubuntu's apt-shipped rustc lags behind upstream).
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain 1.88.0 --profile minimal --no-modify-path

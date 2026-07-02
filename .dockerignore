@@ -16,6 +16,7 @@ target/
 .github/
 
 # Docker files themselves (not needed inside the context).
+Dockerfile.base
 Dockerfile.alloy
 Dockerfile.test
 .dockerignore

@@ -5,8 +5,11 @@
 #                   Only needed for `just test` and host-side hacking; `just build`
 #                   runs inside the Docker builder image so the host does not need
 #                   rustup or any of the *-dev packages.
+#   just build-base — (re)build the prebuilt apt + rust base image. Run this
+#                   after changing the dep set or Rust pin in Dockerfile.base;
+#                   `just build` builds it automatically when it is missing.
 #   just build    — build the naru binary via docker buildx using Dockerfile.alloy
-#                   and extract it into target/release/naru
+#                   (FROM the prebuilt base) and extract it into target/release/naru
 #   just test     — run the workspace test suite (excludes naru-visual-tests)
 #   just install  — build (docker buildx) and install system-wide via scripts/install.sh
 
@@ -64,9 +67,22 @@ setup:
 # robust to that, we materialise the export stage into a per-build tmp
 # directory and then `install` the binary into target/release/ — same
 # path `scripts/install.sh` expects, but with predictable ownership.
+# Prebuilt build base: the apt *-dev toolchain + pinned Rust, baked into a
+# tagged image so the slow package install survives BuildKit's build-cache GC
+# and doesn't re-run on every code build. Rebuild after changing the dep set or
+# the Rust pin in Dockerfile.base; `build` below does this automatically when
+# the image is missing.
+build-base:
+    docker buildx build --file Dockerfile.base --tag naru-build-base:26.04 --load .
+
 build:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Ensure the prebuilt base exists (apt + rust). Built once, then reused by
+    # every code build — this is what keeps the package install off the hot path.
+    if ! docker image inspect naru-build-base:26.04 >/dev/null 2>&1; then
+        docker buildx build --file Dockerfile.base --tag naru-build-base:26.04 --load .
+    fi
     out=$(mktemp -d -t naru-build-XXXXXX)
     trap 'rm -rf "$out"' EXIT
     docker buildx build \
