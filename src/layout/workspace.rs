@@ -472,17 +472,24 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     /// The carousel's parent area: the workspace working area inset on each
-    /// side by the width of a non-empty fixed-side panel. With both panels
-    /// empty this equals `self.working_area`, so the carousel spans the full
-    /// width exactly as before; a populated panel shrinks the carousel to the
-    /// space remaining between the panels. The carousel still *renders* past
-    /// these edges while scrolling (its edge tiles fade out behind the panels
-    /// — see the render path), but its resting layout is confined here.
+    /// side by the width of a non-empty fixed-side panel *plus* one inter-window
+    /// gap, so the carousel is separated from a panel by the same gap that
+    /// separates two windows. With both panels empty this equals
+    /// `self.working_area`, so the carousel spans the full width exactly as
+    /// before (no gap is added on a side with no panel); a populated panel
+    /// shrinks the carousel to the space remaining between the panels, minus the
+    /// gap. The carousel still *renders* past these edges while scrolling (its
+    /// edge tiles fade out behind the panels — see the render path), but its
+    /// resting layout is confined here.
     fn carousel_parent_area(&self) -> Rectangle<f64, Logical> {
         let (left, right) = self.fixed_insets;
+        let gaps = self.options.layout.gaps;
+        // Only a side that actually has a panel gets the separating gap.
+        let left_inset = if left > 0. { left + gaps } else { 0. };
+        let right_inset = if right > 0. { right + gaps } else { 0. };
         let mut area = self.working_area;
-        area.loc.x += left;
-        area.size.w = (area.size.w - left - right).max(0.);
+        area.loc.x += left_inset;
+        area.size.w = (area.size.w - left_inset - right_inset).max(0.);
         area
     }
 

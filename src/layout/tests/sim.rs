@@ -1773,6 +1773,50 @@ mod tests {
         }
     }
 
+    /// A fixed-side panel is separated from the carousel by the same gap that
+    /// separates two windows: the carousel's usable area is inset by the panel
+    /// width *plus* one `layout.gaps`. With the row overflowing (so the fit
+    /// fills the whole usable area) the window nearest the panel lands exactly
+    /// one gap short of it, not flush against it.
+    #[test]
+    fn disable_carousel_keeps_a_gap_between_row_and_fixed_panel() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        options.enable_stacking = true; // fixed-side panels need stacking
+        let gaps = options.layout.gaps;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // Enough windows that the row overflows and the fit fills the usable
+        // width, so the window nearest the panel abuts the usable-area edge.
+        let ids: Vec<usize> = (0..15).map(|_| sim.add_window()).collect();
+        sim.settle();
+
+        // Park the rightmost window into the right fixed-side panel, then let
+        // the panel-area re-fit (one render cycle delayed) settle.
+        sim.move_window_right_stacked();
+        let parked = *ids.last().unwrap();
+        sim.assert_slot(parked, WindowLayer::FixedRight);
+        sim.settle();
+
+        let panel_left = sim.window_geometry(&parked).expect("parked geo").loc.x;
+        // Right edge of the carousel window closest to the panel.
+        let nearest_right = ids[..ids.len() - 1]
+            .iter()
+            .filter_map(|id| sim.window_geometry(id))
+            .map(|g| g.loc.x + g.size.w)
+            .fold(f64::MIN, f64::max);
+        // One full gap separates them (before this inset the row abutted the
+        // panel, gap ≈ 0). Allow slack above `gaps` for the few px of centering
+        // rounding when integer column widths don't sum to the exact usable
+        // width, but stay well under two gaps so a double-inset regression fails.
+        let gap = panel_left - nearest_right;
+        assert!(
+            gap >= gaps - 1.0 && gap < gaps * 2.0,
+            "expected a ~{gaps}px gap between the carousel and the fixed panel, got {gap}",
+        );
+    }
+
     /// Resizing a fixed-side panel must keep the disable-carousel row out from
     /// under the panel: when the remaining columns can't shrink any further (a
     /// hard minimum width) and so can't fit the space the panel left, the row
