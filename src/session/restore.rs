@@ -79,9 +79,11 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
     }
     // 2. PWA / site-specific-browser: a captured `.desktop` `Exec` argv. Must beat
     //    flatpak_id/exec, which would reopen the whole browser instead of the app.
+    //    A compositor restart kills the browser uncleanly, so it's relaunched with
+    //    the crash-restore bubble suppressed (see [`suppress_crash_restore`]).
     if let Some(command) = &entry.command {
         if !command.is_empty() {
-            return command.clone();
+            return suppress_crash_restore(command.clone());
         }
     }
     // 3. Konsole: pin the saved cwd with `--workdir`. A bare relaunch would rely on
@@ -103,6 +105,26 @@ pub fn resolve_launch_argv(entry: &WindowEntry, config: &SessionRestore) -> Vec<
     }
     // 6. Last resort.
     vec![entry.app_id.clone()]
+}
+
+/// Chromium switch that suppresses the "restore pages?" crash-recovery bubble.
+const HIDE_CRASH_RESTORE_BUBBLE: &str = "--hide-crash-restore-bubble";
+
+/// Append [`HIDE_CRASH_RESTORE_BUBBLE`] to a PWA launch argv (idempotently).
+///
+/// A compositor restart kills the browser uncleanly, so on relaunch Chromium
+/// (Brave/Helium/Chrome) believes it crashed and prompts to restore the previous
+/// pages — interfering with naru's own restore of the PWA. Every captured
+/// `command` is a Chromium site-specific-browser launcher, so appending this flag
+/// makes the app just reopen without the prompt. Trailing Chromium flags reach the
+/// browser: for a flatpak SSB (`flatpak run … com.brave.Browser --app-id=…`)
+/// everything after the app id is forwarded into the sandbox, and a native SSB
+/// passes it straight through.
+fn suppress_crash_restore(mut command: Vec<String>) -> Vec<String> {
+    if !command.iter().any(|a| a == HIDE_CRASH_RESTORE_BUBBLE) {
+        command.push(HIDE_CRASH_RESTORE_BUBBLE.to_owned());
+    }
+    command
 }
 
 /// Build the argv that relaunches `entry`'s terminal reattaching to its tmux
@@ -292,7 +314,8 @@ mod tests {
 
     #[test]
     fn resolve_uses_captured_pwa_command() {
-        // A PWA window carries the exact `.desktop` Exec argv; it is used verbatim.
+        // A PWA window carries the exact `.desktop` Exec argv; it's used as-is, with
+        // the crash-restore bubble suppressed so the browser doesn't prompt on relaunch.
         let mut e = entry("crx_abc", None);
         e.command = Some(vec![
             "flatpak".into(),
@@ -302,14 +325,20 @@ mod tests {
         ]);
         assert_eq!(
             resolve_launch_argv(&e, &cfg(vec![])),
-            vec!["flatpak", "run", "net.imput.helium", "--app-id=abc"]
+            vec![
+                "flatpak",
+                "run",
+                "net.imput.helium",
+                "--app-id=abc",
+                "--hide-crash-restore-bubble",
+            ]
         );
     }
 
     #[test]
     fn resolve_prefers_pwa_command_over_flatpak_id() {
         // The browser's flatpak id would reopen the whole browser, so the captured
-        // per-app command must win.
+        // per-app command must win (again with the crash-restore bubble suppressed).
         let mut e = entry("crx_abc", None);
         e.flatpak_id = Some("net.imput.helium".into());
         e.command = Some(vec![
@@ -320,7 +349,29 @@ mod tests {
         ]);
         assert_eq!(
             resolve_launch_argv(&e, &cfg(vec![])),
-            vec!["flatpak", "run", "net.imput.helium", "--app-id=abc"]
+            vec![
+                "flatpak",
+                "run",
+                "net.imput.helium",
+                "--app-id=abc",
+                "--hide-crash-restore-bubble",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_pwa_command_suppresses_crash_bubble_idempotently() {
+        // If the captured command already carries the flag (e.g. a re-saved entry),
+        // it isn't appended twice.
+        let mut e = entry("crx_abc", None);
+        e.command = Some(vec![
+            "brave".into(),
+            "--app-id=abc".into(),
+            "--hide-crash-restore-bubble".into(),
+        ]);
+        assert_eq!(
+            resolve_launch_argv(&e, &cfg(vec![])),
+            vec!["brave", "--app-id=abc", "--hide-crash-restore-bubble"]
         );
     }
 
