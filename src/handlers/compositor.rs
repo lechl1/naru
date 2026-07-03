@@ -280,28 +280,58 @@ impl CompositorHandler for State {
                         activate
                     };
 
-                    // Route the restored window back to its saved workspace.
-                    // Named workspaces match by name. Index-only entries are
-                    // *materialized* — `materialize_workspace_id_at` creates the
-                    // workspace at that per-output index (and any below it) if it
-                    // doesn't exist yet, so a window saved on workspace N lands on
-                    // workspace N instead of piling onto the active workspace in a
-                    // freshly-started session. The placeholders are protected from
-                    // compaction until restore settles (`begin_session_restore`),
-                    // so out-of-order maps still land on the right workspace.
-                    let target = match saved_entry.as_ref().and_then(|e| match &e.workspace {
-                        crate::session::WorkspaceRef::Name { name } => self
-                            .naru
-                            .layout
-                            .find_workspace_by_name(name)
-                            .map(|(_, ws)| ws.id()),
-                        crate::session::WorkspaceRef::Index { index } => self
-                            .naru
-                            .layout
-                            .materialize_workspace_id_at(e.output.as_deref(), *index),
-                    }) {
-                        Some(ws_id) => AddWindowTarget::Workspace(ws_id),
-                        None => target,
+                    // Route the restored window back to where it was.
+                    //
+                    // Fixed-side panels are monitor-owned, not workspace-scoped, and
+                    // the panel routing (`open-in-fixed-side`, set above) only fires
+                    // on an Auto/output target — a *Workspace* target instead drops
+                    // the window into that workspace's carousel, which is why a saved
+                    // side-panel PWA was coming back in the carousel. So a side-panel
+                    // entry steers to its saved *output* (which resolves to Auto on
+                    // that monitor) and lets the routing park it in the panel.
+                    //
+                    // Everything else routes to its saved workspace: named workspaces
+                    // match by name; index-only entries are *materialized*
+                    // (`materialize_workspace_id_at` creates the workspace at that
+                    // per-output index, and any below it, if missing) so a window
+                    // saved on workspace N lands there instead of piling onto the
+                    // active workspace. Placeholders are protected from compaction
+                    // until restore settles, so out-of-order maps still land right.
+                    let is_side_panel = matches!(
+                        &saved_placement,
+                        Some(crate::session::Placement::SidePanel { .. })
+                    );
+                    // Cloned so the `&Output` doesn't borrow `self.naru` across the
+                    // `add_window` call below.
+                    let panel_output = if is_side_panel {
+                        saved_entry
+                            .as_ref()
+                            .and_then(|e| e.output.as_deref())
+                            .and_then(|name| self.naru.output_by_name_match(name))
+                            .cloned()
+                    } else {
+                        None
+                    };
+                    let target = if is_side_panel {
+                        panel_output
+                            .as_ref()
+                            .map(AddWindowTarget::Output)
+                            .unwrap_or(AddWindowTarget::Auto)
+                    } else {
+                        match saved_entry.as_ref().and_then(|e| match &e.workspace {
+                            crate::session::WorkspaceRef::Name { name } => self
+                                .naru
+                                .layout
+                                .find_workspace_by_name(name)
+                                .map(|(_, ws)| ws.id()),
+                            crate::session::WorkspaceRef::Index { index } => self
+                                .naru
+                                .layout
+                                .materialize_workspace_id_at(e.output.as_deref(), *index),
+                        }) {
+                            Some(ws_id) => AddWindowTarget::Workspace(ws_id),
+                            None => target,
+                        }
                     };
 
                     // If this was the last pending restore entry, leave restore
