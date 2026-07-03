@@ -1533,6 +1533,12 @@ impl<W: LayoutElement> Workspace<W> {
         self.scrolling.move_column_to_index(index);
     }
 
+    /// Reorder the scrolling single-window columns holding `ordered_ids` into that
+    /// relative order (session-restore title reconcile). Returns whether anything moved.
+    pub fn reorder_single_window_columns(&mut self, ordered_ids: &[W::Id]) -> bool {
+        self.scrolling.reorder_single_window_columns(ordered_ids)
+    }
+
     pub fn move_down(&mut self) -> bool {
         if self.floating_is_active.get() {
             self.floating.move_down();

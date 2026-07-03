@@ -2233,6 +2233,20 @@ impl<W: LayoutElement> Layout<W> {
         workspace.move_column_to_index(index);
     }
 
+    /// Reorder the single-window columns holding `ordered_ids` within workspace `ws_id`
+    /// into that relative order — used by session-restore's title reconcile to align
+    /// same-app windows with their saved order once titles settle. No-op if the
+    /// workspace is gone. Returns whether any column actually moved.
+    pub fn reorder_workspace_single_window_columns(
+        &mut self,
+        ws_id: WorkspaceId,
+        ordered_ids: &[W::Id],
+    ) -> bool {
+        self.workspaces_mut()
+            .find(|ws| ws.id() == ws_id)
+            .is_some_and(|ws| ws.reorder_single_window_columns(ordered_ids))
+    }
+
     pub fn move_down(&mut self) {
         // Move the active column down within the workspace; if there's no in-
         // workspace target, fall through to moving the column to the workspace

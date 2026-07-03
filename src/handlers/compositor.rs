@@ -246,16 +246,20 @@ impl CompositorHandler for State {
                         AddWindowTarget::Auto
                     };
                     // Session-restore: try to match this newly-mapping window
-                    // against a saved entry from the prior session.
+                    // against a saved entry from the prior session. Match on cwd and
+                    // title as well as app_id: the restored process was spawned in its
+                    // saved directory (distinguishes terminals), and the title
+                    // distinguishes same-app GUI windows that share a cwd. The title may
+                    // still be settling this early, so a mismatch just falls back to the
+                    // cwd/FIFO keys — the deferred reconcile fixes ordering once titles
+                    // land.
                     let saved_entry = mapped.app_id().and_then(|id| {
-                        // Match on cwd as well as app_id: the restored process was
-                        // spawned in its saved directory, so its captured cwd identifies
-                        // *which* saved window this is among same-app instances.
                         let cwd = mapped.session_cwd();
+                        let title = with_toplevel_role(mapped.toplevel(), |r| r.title.clone());
                         self.naru
                             .session_manager
                             .as_mut()
-                            .and_then(|sm| sm.take_pending_for(&id, cwd))
+                            .and_then(|sm| sm.take_pending_for(&id, cwd, title.as_deref()))
                     });
 
                     // Capture the saved placement up front: `mapped` is consumed

@@ -1889,6 +1889,74 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.move_column_to(index.saturating_sub(1).min(self.columns.len() - 1));
     }
 
+    /// Reorder the single-window columns holding `ordered_ids` so they appear in that
+    /// relative order, leaving every other column (and any multi-window column) in place.
+    ///
+    /// Session-restore's title reconcile uses this to line up multiple windows of one app
+    /// with their saved order once titles have settled — without disturbing other apps'
+    /// columns. Only columns currently holding exactly one of `ordered_ids` are touched;
+    /// they are permuted among the exact slots they already occupy, so untouched columns
+    /// keep their indices. The active window stays active. No-op unless at least two such
+    /// columns exist. Returns whether the order actually changed.
+    pub fn reorder_single_window_columns(&mut self, ordered_ids: &[W::Id]) -> bool {
+        // Slots (column indices) currently holding a listed single-window column, in
+        // left-to-right order, paired with the id at each.
+        let slots: Vec<(usize, W::Id)> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, col)| col.tiles.len() == 1)
+            .filter_map(|(idx, col)| {
+                let id = col.tiles[0].window().id().clone();
+                ordered_ids.contains(&id).then_some((idx, id))
+            })
+            .collect();
+        if slots.len() < 2 {
+            return false;
+        }
+        // Desired id for each slot: `ordered_ids` filtered to those present, in order.
+        let present: Vec<W::Id> = ordered_ids
+            .iter()
+            .filter(|id| slots.iter().any(|(_, s)| s == *id))
+            .cloned()
+            .collect();
+        debug_assert_eq!(present.len(), slots.len());
+
+        // Already in the desired order? Nothing to do.
+        if slots.iter().map(|(_, id)| id).eq(present.iter()) {
+            return false;
+        }
+
+        let active_id = self
+            .columns
+            .get(self.active_column_idx)
+            .map(|c| c.tiles[c.active_tile_idx].window().id().clone());
+
+        // Build a full column permutation: non-slot positions map to themselves; slot
+        // position `slots[k]` sources the column currently at `present[k]`'s slot.
+        let old_slot_of = |id: &W::Id| slots.iter().find(|(_, s)| s == id).map(|(idx, _)| *idx);
+        let mut perm: Vec<usize> = (0..self.columns.len()).collect();
+        for (k, (slot_idx, _)) in slots.iter().enumerate() {
+            perm[*slot_idx] = old_slot_of(&present[k]).expect("present id has a slot");
+        }
+
+        // Apply the permutation to columns + their cached data in lockstep.
+        let mut cols: Vec<Option<Column<W>>> = self.columns.drain(..).map(Some).collect();
+        let mut data: Vec<Option<ColumnData>> = self.data.drain(..).map(Some).collect();
+        for &src in &perm {
+            self.columns.push(cols[src].take().expect("permutation visits each once"));
+            self.data.push(data[src].take().expect("permutation visits each once"));
+        }
+
+        // Keep the same window active.
+        if let Some(active_id) = active_id {
+            if let Some(new_idx) = self.columns.iter().position(|c| c.contains(&active_id)) {
+                self.active_column_idx = new_idx;
+            }
+        }
+        true
+    }
+
     fn move_column_to(&mut self, new_idx: usize) {
         if self.active_column_idx == new_idx {
             return;

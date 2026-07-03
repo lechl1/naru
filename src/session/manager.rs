@@ -216,32 +216,56 @@ impl SessionManager {
     }
 
     /// Pop the pending entry for a newly-mapped window, matching on `app_id` and, when
-    /// possible, `cwd`.
+    /// they help, `cwd` and `title`.
     ///
     /// A restored process is spawned in its saved directory (see
     /// [`crate::session::restore`]), so a multi-instance app like a terminal carries a
-    /// distinct cwd per window. Preferring an exact `(app_id, cwd)` match pins each
-    /// window back to *its* saved slot regardless of the order clients happen to map
-    /// in — without it, the i-th window to map would grab the i-th saved entry (FIFO),
-    /// shuffling which terminal lands in which column when load times vary.
+    /// distinct cwd per window. GUI apps (browsers, PWAs) instead share one process cwd,
+    /// so the window `title` is what tells their windows apart. Match precedence, most to
+    /// least specific:
     ///
-    /// Falls back to the first `app_id` match (FIFO) when the window has no cwd, or
-    /// none of the remaining entries share it — e.g. single-instance apps whose windows
-    /// all report one process cwd. Returns `None` if no entry matches at all.
-    pub fn take_pending_for(&mut self, app_id: &str, cwd: Option<&Path>) -> Option<WindowEntry> {
-        if let Some(cwd) = cwd {
-            if let Some(pos) = self
-                .pending_restore
-                .iter()
-                .position(|e| e.app_id == app_id && e.cwd.as_deref() == Some(cwd))
-            {
-                return self.pending_restore.remove(pos);
-            }
-        }
-        let pos = self
-            .pending_restore
-            .iter()
-            .position(|e| e.app_id == app_id)?;
+    /// 1. `(app_id, cwd, title)` — pins a window exactly even when neither cwd nor title
+    ///    alone is unique.
+    /// 2. `(app_id, cwd)` — the terminal case (distinct cwds).
+    /// 3. `(app_id, title)` — the browser case (shared cwd, distinct titles).
+    /// 4. `(app_id)` FIFO — last resort; the i-th same-app window to map gets the i-th
+    ///    saved entry.
+    ///
+    /// A `title` is only *used* when it actually distinguishes: it's matched by exact
+    /// equality, and an empty/absent title never matches. Titles settle asynchronously as
+    /// an app loads, so a caller that needs the settled title should hold the window and
+    /// re-match once it's available rather than trusting the map-time value. Returns
+    /// `None` if no entry shares the `app_id`.
+    pub fn take_pending_for(
+        &mut self,
+        app_id: &str,
+        cwd: Option<&Path>,
+        title: Option<&str>,
+    ) -> Option<WindowEntry> {
+        let title = title.filter(|t| !t.is_empty());
+
+        // Try each key in precedence order; the first that finds an entry wins.
+        let find = |pred: &dyn Fn(&WindowEntry) -> bool| self.pending_restore.iter().position(pred);
+        let pos = None
+            .or_else(|| match (cwd, title) {
+                (Some(cwd), Some(title)) => find(&|e| {
+                    e.app_id == app_id
+                        && e.cwd.as_deref() == Some(cwd)
+                        && e.title.as_deref() == Some(title)
+                }),
+                _ => None,
+            })
+            .or_else(|| match cwd {
+                Some(cwd) => find(&|e| e.app_id == app_id && e.cwd.as_deref() == Some(cwd)),
+                None => None,
+            })
+            .or_else(|| match title {
+                Some(title) => {
+                    find(&|e| e.app_id == app_id && e.title.as_deref() == Some(title))
+                }
+                None => None,
+            })
+            .or_else(|| find(&|e| e.app_id == app_id))?;
         self.pending_restore.remove(pos)
     }
 
@@ -322,6 +346,53 @@ mod tests {
     fn off_returns_none() {
         let c = cfg(true, None);
         assert!(SessionManager::new(&c).is_none());
+    }
+
+    #[test]
+    fn take_pending_for_distinguishes_same_app_by_title() {
+        use crate::session::state::{Placement, WorkspaceRef};
+
+        let path = std::env::temp_dir()
+            .join(format!("naru-title-test-{}.json", std::process::id()));
+        let c = cfg(false, path.to_str());
+        let mut m = SessionManager::new(&c).expect("manager");
+
+        let entry = |title: &str, col: usize| WindowEntry {
+            app_id: "librewolf".into(),
+            title: Some(title.into()),
+            cwd: Some(PathBuf::from("/home")),
+            flatpak_id: None,
+            exec: None,
+            command: None,
+            tmux_session: None,
+            claude_session: None,
+            output: None,
+            workspace: WorkspaceRef::Index { index: 0 },
+            placement: Placement::Tiled {
+                column_index: col,
+                tile_index: 0,
+                width: 0.0,
+                height: 0.0,
+                is_fullscreen: false,
+                is_maximized: false,
+            },
+        };
+        // Three same-app, same-cwd windows distinguishable only by title.
+        m.pending_restore = [entry("GitHub", 0), entry("Docs", 1), entry("Mail", 2)].into();
+
+        let cwd = Some(Path::new("/home"));
+        // A window whose title matches "Docs" pulls the Docs entry, not FIFO.
+        let got = m.take_pending_for("librewolf", cwd, Some("Docs")).unwrap();
+        assert_eq!(got.title.as_deref(), Some("Docs"));
+        // Title still settling (None) → falls back to (app_id, cwd) FIFO → GitHub.
+        let got = m.take_pending_for("librewolf", cwd, None).unwrap();
+        assert_eq!(got.title.as_deref(), Some("GitHub"));
+        // A non-matching title falls back too, leaving the last one → Mail.
+        let got = m.take_pending_for("librewolf", cwd, Some("Nope")).unwrap();
+        assert_eq!(got.title.as_deref(), Some("Mail"));
+        assert!(m.take_pending_for("librewolf", None, None).is_none());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -1488,6 +1488,46 @@ mod tests {
         );
     }
 
+    /// The session-restore title reconcile primitive permutes only the listed
+    /// single-window columns — among the exact slots they occupy — and leaves every
+    /// other column in place, keeping the active window active.
+    #[test]
+    fn reorder_single_window_columns_permutes_only_listed() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+        let c = sim.add_window();
+        let d = sim.add_window();
+        sim.settle();
+
+        // Current left-to-right column order by render x.
+        let order = |s: &LayoutSim| {
+            let mut ids = [a, b, c, d];
+            ids.sort_by(|x, y| s.window_x(*x).partial_cmp(&s.window_x(*y)).unwrap());
+            ids.to_vec()
+        };
+        assert_eq!(order(&sim), vec![a, b, c, d]);
+        sim.assert_active(Some(d));
+
+        let ws = sim.layout.active_workspace().expect("active ws").id();
+        // Swap just b (slot 1) and d (slot 3); a (0) and c (2) stay put.
+        let changed = sim
+            .layout
+            .reorder_workspace_single_window_columns(ws, &[d, b]);
+        sim.settle();
+        assert!(changed, "reorder reported a change");
+        assert_eq!(order(&sim), vec![a, d, c, b]);
+        // The active window is unchanged even though its column moved.
+        sim.assert_active(Some(d));
+
+        // Reordering to the already-current order is a no-op.
+        let ws = sim.layout.active_workspace().expect("active ws").id();
+        assert!(!sim
+            .layout
+            .reorder_workspace_single_window_columns(ws, &[d, b]));
+    }
+
     /// With `disable-carousel`, the workspace must never grow wider than the
     /// screen (minus any fixed side panels). When more windows open than fit,
     /// every window still gets its own column — nothing stacks below the active

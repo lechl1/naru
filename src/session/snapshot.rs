@@ -13,9 +13,8 @@
 //! ## What's captured
 //!
 //! - **app_id**: required; windows without one are skipped (nothing to launch them by).
-//! - **title**: not captured in this phase. The IPC's per-window title is informational,
-//!   and adding the lookup here would require borrowing into XDG toplevel state which
-//!   the snapshot's read-only path shouldn't do.
+//! - **title**: the current XDG toplevel title (empty → `None`). Used at restore time to
+//!   tell apart multiple windows of the same app that share an `app_id` (and often a cwd).
 //! - **cwd**: by default the cached `Mapped::session_cwd` (captured at construction —
 //!   the directory the window was opened in). For app_ids whose launch-command has
 //!   `cwd-from-child` set (terminals), [`resolve_cwd`] instead re-reads the foreground
@@ -109,7 +108,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
 
             windows.push(WindowEntry {
                 app_id: app_id.clone(),
-                title: None,
+                title: window_title(mapped),
                 cwd,
                 flatpak_id,
                 exec,
@@ -155,7 +154,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 resolve_terminal_state(mapped, &app_id, session_restore, &mut socket_maps);
             windows.push(WindowEntry {
                 app_id: app_id.clone(),
-                title: None,
+                title: window_title(mapped),
                 cwd,
                 flatpak_id,
                 exec,
@@ -272,6 +271,13 @@ fn launch_info(mapped: &Mapped) -> (Option<String>, Option<String>) {
 fn window_size(mapped: &Mapped) -> (f64, f64) {
     let size = mapped.size();
     (size.w as f64, size.h as f64)
+}
+
+/// The window's current title, with empty strings normalized to `None`. Captured so
+/// restore can tell apart multiple windows of the same app (same `app_id`, often the
+/// same cwd) — see [`crate::session::SessionManager::take_pending_for`].
+fn window_title(mapped: &Mapped) -> Option<String> {
+    with_toplevel_role(mapped.toplevel(), |role| role.title.clone()).filter(|t| !t.is_empty())
 }
 
 /// The window height to persist. Intentionally *not* saved on a landscape
