@@ -177,7 +177,55 @@ fn substitute_cwd(template: &[String], cwd: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
-/// Respawn each saved window via its resolved launch-command.
+/// The deduplicated `(argv, cwd)` list to spawn for `entries`, in order.
+///
+/// A single-instance app that restores its own session — a browser like Librewolf
+/// or Brave — would open **duplicate** windows if launched once per saved window:
+/// the first launch reopens all the windows the browser itself remembers, and every
+/// further launch just forwards to the running instance and pops one extra blank
+/// window. So each distinct whole-app launch command is issued only **once**, and the
+/// browser is left to create its own windows; the `add_window` matcher then pins each
+/// to its saved slot (by app_id, cwd, and title) as it maps.
+///
+/// Terminals are exempt: they open exactly one window per launch and don't restore a
+/// session of their own, so each saved terminal still needs its own spawn (its
+/// per-window `--workdir` / `-e` command usually differs anyway, but same-cwd konsoles
+/// share one argv and must not collapse). PWAs, tmux/claude terminals, and user
+/// launch-commands carry per-window arguments, so their argvs differ naturally.
+fn plan_launches(
+    config: &SessionRestore,
+    entries: &[WindowEntry],
+) -> Vec<(Vec<String>, Option<std::path::PathBuf>)> {
+    let mut launched: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+    let mut plan = Vec::new();
+    for entry in entries {
+        let argv = resolve_launch_argv(entry, config);
+        if argv.is_empty() {
+            // Defensive: resolve_launch_argv always produces at least one element
+            // (the app_id fallback) unless the user set a launch-command to an empty
+            // argv, which is a config bug worth noting.
+            warn!(
+                "session-restore: empty launch-command for app_id={:?}; skipping",
+                entry.app_id
+            );
+            continue;
+        }
+        // Terminals launch one window per invocation; everything else collapses to a
+        // single launch per distinct command.
+        let is_terminal = config.reads_cwd_from_child(&entry.app_id);
+        if !is_terminal && !launched.insert(argv.clone()) {
+            debug!(
+                "session-restore: {argv:?} already launched; the app restores its own \
+                 remaining windows — skipping duplicate spawn"
+            );
+            continue;
+        }
+        plan.push((argv, entry.cwd.clone()));
+    }
+    plan
+}
+
+/// Respawn the saved windows, deduplicating self-restoring apps (see [`plan_launches`]).
 ///
 /// Phase 3.5 hoists state loading out of this function and into
 /// `SessionManager::new` (so the loaded entries can also be consulted by the
@@ -191,28 +239,19 @@ pub fn restore_apps(config: &SessionRestore, entries: &[WindowEntry]) {
         return;
     }
 
-    info!("session-restore: respawning {} window(s)", entries.len());
+    let plan = plan_launches(config, entries);
+    info!(
+        "session-restore: respawning {} window(s) via {} launch(es)",
+        entries.len(),
+        plan.len(),
+    );
 
-    for entry in entries {
-        let argv = resolve_launch_argv(entry, config);
-        if argv.is_empty() {
-            // Defensive: resolve_launch_argv always produces at least one element
-            // (the app_id fallback) unless the user set a launch-command to an empty
-            // argv, which is a config bug worth noting.
-            warn!(
-                "session-restore: empty launch-command for app_id={:?}; skipping",
-                entry.app_id
-            );
-            continue;
-        }
-        info!(
-            "session-restore: spawning {:?} (cwd={:?})",
-            argv, entry.cwd
-        );
+    for (argv, cwd) in plan {
+        info!("session-restore: spawning {argv:?} (cwd={cwd:?})");
         // Spawn in the saved directory so the respawned process's cwd matches the
         // saved entry — this is what lets `take_pending_for` pin multi-instance
         // same-app windows (terminals) back to their specific slot by cwd.
-        crate::utils::spawning::spawn_with_cwd(argv, None, entry.cwd.clone());
+        crate::utils::spawning::spawn_with_cwd(argv, None, cwd);
     }
 }
 
@@ -255,6 +294,52 @@ mod tests {
             launch_commands: commands,
             cwd_from_child: Vec::new(),
         }
+    }
+
+    #[test]
+    fn plan_launches_dedups_self_restoring_apps_but_not_terminals() {
+        let mut config = cfg(vec![]);
+        config.cwd_from_child = vec!["org.kde.konsole".into()];
+
+        let konsole = |cwd: &str| {
+            let mut e = entry("org.kde.konsole", Some(cwd));
+            e.exec = Some("/usr/bin/konsole".into());
+            e
+        };
+        let librewolf = |title: &str| {
+            let mut e = entry("librewolf", Some("/home/leo"));
+            e.flatpak_id = Some("io.gitlab.librewolf-community".into());
+            e.title = Some(title.into());
+            e
+        };
+        // Two konsoles in the *same* cwd (identical argv) interleaved with three
+        // librewolf windows.
+        let entries = vec![
+            konsole("/home/leo"),
+            librewolf("Mail"),
+            konsole("/home/leo"),
+            librewolf("Docs"),
+            librewolf("News"),
+        ];
+
+        let plan = plan_launches(&config, &entries);
+
+        let konsole_launches = plan
+            .iter()
+            .filter(|(a, _)| a.first().map(String::as_str) == Some("/usr/bin/konsole"))
+            .count();
+        let librewolf_launches = plan
+            .iter()
+            .filter(|(a, _)| a.iter().any(|s| s == "io.gitlab.librewolf-community"))
+            .count();
+        // Terminals always launch per window (even with an identical argv); the
+        // self-restoring browser launches exactly once.
+        assert_eq!(konsole_launches, 2, "each konsole opens its own window");
+        assert_eq!(
+            librewolf_launches, 1,
+            "librewolf launches once and restores its own windows",
+        );
+        assert_eq!(plan.len(), 3);
     }
 
     #[test]
