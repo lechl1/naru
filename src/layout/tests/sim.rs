@@ -48,7 +48,7 @@
 
 use std::time::Duration;
 
-use naru_config::FloatOrInt;
+use naru_config::{CenterFocusedColumn, FloatOrInt};
 use naru_ipc::{OpenInFixedSide, SizeChange};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -1938,6 +1938,80 @@ mod tests {
         assert!(
             gap >= gaps - 1.0 && gap < gaps * 2.0,
             "expected a ~{gaps}px gap between the carousel and the fixed panel, got {gap}",
+        );
+    }
+
+    /// With `disable-carousel` + `center-focused-column "always"`, the active
+    /// window centres on the true *screen* centre — not the centre of the
+    /// working area, which an asymmetric side panel (modelled here by a left
+    /// strut, the same working-area inset a panel produces) would otherwise
+    /// shove it toward. The window still stays fully visible inside the working
+    /// area (best effort).
+    #[test]
+    fn disable_carousel_centers_active_window_on_screen_not_working_area() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        options.layout.center_focused_column = CenterFocusedColumn::Always;
+        // A 200px left inset, like a left fixed-side panel: it pushes the working
+        // area's centre to the right of the screen centre.
+        options.layout.struts.left = FloatOrInt(200.);
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720 → screen centre x = 640
+
+        let a = sim.add_window();
+        sim.set_window_width(a, SizeChange::SetFixed(400));
+        sim.settle();
+
+        let screen_center = 1280. / 2.; // 640
+        let working_center = (200. + 1280.) / 2.; // 740 — where group-centring lands
+        let g = sim.window_geometry(&a).expect("geo");
+        let center = g.loc.x + g.size.w / 2.;
+        assert!(
+            (center - screen_center).abs() <= 2.0,
+            "active window should sit on the screen centre {screen_center}, got {center}",
+        );
+        assert!(
+            (center - working_center).abs() > 20.0,
+            "must not be centred on the working area {working_center}: that ignores the \
+             panel-aware screen centring",
+        );
+        // Still fully visible: left edge not under the strut/panel, right on-screen.
+        assert!(g.loc.x >= 200. - 1.0, "left edge under the panel inset: {}", g.loc.x);
+        assert!(
+            g.loc.x + g.size.w <= 1280. + 1.0,
+            "right edge off screen: {}",
+            g.loc.x + g.size.w,
+        );
+    }
+
+    /// Best-effort clamp: when the active window is too wide to sit on the screen
+    /// centre without sliding under the panel inset, it stops flush against the
+    /// panel (staying visible) instead of centring under it.
+    #[test]
+    fn disable_carousel_screen_centering_clamps_to_keep_window_visible() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        options.layout.center_focused_column = CenterFocusedColumn::Always;
+        options.layout.struts.left = FloatOrInt(500.); // wide left inset
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720, working area [500, 1280]
+
+        let a = sim.add_window();
+        sim.set_window_width(a, SizeChange::SetFixed(700));
+        sim.settle();
+
+        // Screen-centring 700px at 640 would put the left edge at 290 — under the
+        // 500px inset. Best effort clamps it flush to the inset edge instead.
+        let g = sim.window_geometry(&a).expect("geo");
+        assert!(
+            (g.loc.x - 500.).abs() <= 2.0,
+            "window should be flush against the 500px panel inset, got left {}",
+            g.loc.x,
+        );
+        assert!(
+            g.loc.x + g.size.w <= 1280. + 1.0,
+            "right edge off screen: {}",
+            g.loc.x + g.size.w,
         );
     }
 

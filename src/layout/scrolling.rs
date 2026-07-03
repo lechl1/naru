@@ -3240,6 +3240,41 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // trailing gap; total content extent is that position minus the gap.
         let total_content = self.column_x(self.columns.len()) - gap;
 
+        // With `disable-carousel` + `center-focused-column "always"` (or
+        // always-center-single-column on a lone column), center the *active*
+        // window on the true screen centre rather than balancing the whole row
+        // inside the working area. The working area is inset by any fixed-side
+        // panels, so a plain working-area centre sits off to one side when the
+        // panels are asymmetric; `view_size.w / 2` is the real screen centre. We
+        // then clamp to keep every window inside the working area (nothing
+        // slides under a panel or off-screen) — best-effort centring, exact when
+        // the slack allows it and flush against the nearer panel when it
+        // doesn't. Scoped to disable-carousel: there the whole row is sized to
+        // fit and every view position already routes through here, so the
+        // clamp's all-visible guarantee holds and stays self-consistent.
+        if self.options.layout.disable_carousel && self.is_centering_focused_column() {
+            let active_left = self.column_x(self.active_column_idx);
+            let active_right = self.column_x(self.active_column_idx + 1) - gap;
+            let active_center = (active_left + active_right) / 2.;
+            let screen_centered = active_center - self.view_size.w / 2.;
+
+            // view_pos range that keeps the whole row within the working area:
+            // left edge flush (min) to right edge flush (max).
+            let content_left_flush = -working_x;
+            let content_right_flush = total_content - working_w - working_x;
+            let clamped = if total_content <= working_w {
+                // Fits between the panels: keep all windows visible, as close to
+                // screen-centred as that leaves room for.
+                screen_centered.clamp(content_right_flush, content_left_flush)
+            } else {
+                // Overflows the inter-panel area — everything can't stay visible;
+                // clamp to the panel-inner edges so no wasted gap shows past
+                // either side.
+                screen_centered.clamp(content_left_flush, content_right_flush)
+            };
+            return Some(clamped);
+        }
+
         let view_pos = if total_content <= working_w {
             // Fits — center the group inside the working area.
             -working_x - (working_w - total_content) / 2.
