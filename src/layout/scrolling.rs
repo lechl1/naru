@@ -3252,10 +3252,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // doesn't. Scoped to disable-carousel: there the whole row is sized to
         // fit and every view position already routes through here, so the
         // clamp's all-visible guarantee holds and stays self-consistent.
-        if self.options.layout.disable_carousel && self.is_centering_focused_column() {
+        if self.options.layout.disable_carousel
+            && self.is_centering_focused_column()
+            && self.active_column_idx < self.columns.len()
+        {
+            // The active column's extent, derived from its own cached width rather
+            // than the next column's x. `column_x(active_idx + 1)` would index past
+            // the end during a column removal, when `active_column_idx` transiently
+            // sits at the past-the-end slot — that panicked inside a Wayland FFI
+            // destructor and aborted the whole compositor.
             let active_left = self.column_x(self.active_column_idx);
-            let active_right = self.column_x(self.active_column_idx + 1) - gap;
-            let active_center = (active_left + active_right) / 2.;
+            let active_width = self.data.get(self.active_column_idx).map_or(0., |d| d.width);
+            let active_center = active_left + active_width / 2.;
             let screen_centered = active_center - self.view_size.w / 2.;
 
             // view_pos range that keeps the whole row within the working area:

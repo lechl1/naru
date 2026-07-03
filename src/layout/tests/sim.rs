@@ -1644,6 +1644,36 @@ mod tests {
         );
     }
 
+    /// Closing the active window with `disable-carousel` + `center-focused-column
+    /// "always"` must not panic. Regression: the screen-centring path read
+    /// `column_x(active_column_idx + 1)`, which indexed past the end while a column
+    /// was being removed (active index transiently at the past-the-end slot). In
+    /// production that panic fired inside a Wayland FFI destructor and aborted the
+    /// whole compositor when a window closed.
+    #[test]
+    fn disable_carousel_centering_survives_closing_active_window() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        options.layout.center_focused_column = CenterFocusedColumn::Always;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1);
+
+        // A left inset makes the centring math take the screen-centre branch.
+        // (Struts stand in for a fixed-side panel; same working-area inset.)
+        let ids: Vec<usize> = (0..5).map(|_| sim.add_window()).collect();
+        sim.settle();
+
+        // Close the active window repeatedly, all the way to empty. Each close
+        // routes remove_column_by_idx → activate → compute_centered_view_pos, the
+        // exact path that used to panic. Settling drives the render/reflow.
+        for _ in &ids {
+            let active = sim.active_window_id().expect("a window is focused");
+            sim.close_window(active);
+            sim.settle();
+        }
+        assert_eq!(sim.active_window_id(), None, "all windows closed cleanly");
+    }
+
     /// Normal (scrolling) carousel: closing a window must not grow the
     /// survivors via the min-span floor. Three natural-width columns exceed the
     /// half-screen floor (so they open ungrown); closing one drops the row
