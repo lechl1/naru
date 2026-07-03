@@ -179,8 +179,9 @@ fn substitute_cwd(template: &[String], cwd: Option<&Path>) -> Vec<String> {
 
 /// The deduplicated `(argv, cwd)` list to spawn for `entries`, in order.
 ///
-/// A single-instance app that restores its own session — a browser like Librewolf
-/// or Brave — would open **duplicate** windows if launched once per saved window:
+/// A single-instance app that restores its own session — any browser (Librewolf,
+/// Brave, Chrome, Firefox, …) — would open **duplicate** windows if launched once per
+/// saved window:
 /// the first launch reopens all the windows the browser itself remembers, and every
 /// further launch just forwards to the running instance and pops one extra blank
 /// window. So each distinct whole-app launch command is issued only **once**, and the
@@ -340,6 +341,33 @@ mod tests {
             "librewolf launches once and restores its own windows",
         );
         assert_eq!(plan.len(), 3);
+    }
+
+    #[test]
+    fn plan_launches_dedups_every_browser_regardless_of_launcher() {
+        // The dedup is browser-agnostic: it keys on the launch command, not any
+        // per-browser list. A flatpak browser (Brave, via flatpak_id) and a native
+        // one (Firefox, via exec) both collapse to a single launch each.
+        let config = cfg(vec![]); // no terminals configured
+        let brave = || {
+            let mut e = entry("brave-browser", Some("/home/leo"));
+            e.flatpak_id = Some("com.brave.Browser".into());
+            e
+        };
+        let firefox = || {
+            let mut e = entry("firefox", Some("/home/leo"));
+            e.exec = Some("/usr/bin/firefox".into());
+            e
+        };
+        let entries = vec![brave(), firefox(), brave(), firefox(), brave()];
+
+        let plan = plan_launches(&config, &entries);
+
+        assert_eq!(plan.len(), 2, "three Braves + two Firefoxes → one launch each");
+        assert!(plan
+            .iter()
+            .any(|(a, _)| a.iter().any(|s| s == "com.brave.Browser")));
+        assert!(plan.iter().any(|(a, _)| a == &vec!["/usr/bin/firefox".to_string()]));
     }
 
     #[test]
