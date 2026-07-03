@@ -6800,34 +6800,61 @@ naru_render_elements! {
     }
 }
 
-/// Order `current` windows to follow `desired_titles`: greedily assign each saved title
-/// (in saved column order) to a current window carrying that exact non-empty title, then
-/// append the windows that matched no saved title in their original order. Returns the
-/// ordered ids and whether every saved title found a window — i.e. the titles have
-/// settled and all the windows are present, so the reconcile can stop polling.
+/// Order `current` windows to follow the saved column order encoded by `desired_titles`.
+///
+/// Each saved slot (a position in `desired_titles`, in column order) is assigned the
+/// current window carrying that exact non-empty title; slots whose title matches nothing
+/// are filled, in order, with the leftover (unmatched) windows. This is *positional*: a
+/// matched window keeps *its* slot rather than being packed to the front. That matters
+/// when only some titles match — e.g. a saved page title that reloaded to a different
+/// string, next to a generic `LibreWolf` blank-window title. Packing matched-first made
+/// the two windows swap slots depending on the browser's restore order, oscillating
+/// across save/restore cycles; positional assignment pins each to a stable slot.
+///
+/// Returns the ordered ids (a permutation of `current`) and whether every non-empty saved
+/// title found a window — i.e. titles have settled and the windows are present, so the
+/// reconcile can stop polling.
 fn order_windows_by_saved_titles<Id: Clone>(
     desired_titles: &[Option<String>],
     current: &[(Id, Option<String>)],
 ) -> (Vec<Id>, bool) {
-    let mut used = vec![false; current.len()];
-    let mut order: Vec<Id> = Vec::new();
+    let n = current.len();
+    let mut used = vec![false; n];
     let mut matched = 0usize;
-    for dt in desired_titles {
-        let Some(dt) = dt.as_deref() else { continue };
-        if let Some(i) =
-            (0..current.len()).find(|&i| !used[i] && current[i].1.as_deref() == Some(dt))
-        {
-            used[i] = true;
+
+    // Assign each saved slot the current window with that exact, non-empty title.
+    let slots: Vec<Option<usize>> = desired_titles
+        .iter()
+        .map(|dt| {
+            let pick = dt
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .and_then(|t| (0..n).find(|&i| !used[i] && current[i].1.as_deref() == Some(t)));
+            if let Some(i) = pick {
+                used[i] = true;
+                matched += 1;
+            }
+            pick
+        })
+        .collect();
+
+    // Fill each slot: matched window, else the next leftover — so matched windows keep
+    // their slot. Windows beyond the saved slot count are appended in order.
+    let mut leftovers = (0..n).filter(|&i| !used[i]);
+    let mut order = Vec::with_capacity(n);
+    for slot in slots {
+        if let Some(i) = slot.or_else(|| leftovers.next()) {
             order.push(current[i].0.clone());
-            matched += 1;
         }
     }
-    for (i, slot) in current.iter().enumerate() {
-        if !used[i] {
-            order.push(slot.0.clone());
-        }
+    for i in leftovers {
+        order.push(current[i].0.clone());
     }
-    let want = desired_titles.iter().filter(|t| t.is_some()).count();
+
+    let want = desired_titles
+        .iter()
+        .filter(|t| t.as_deref().is_some_and(|t| !t.is_empty()))
+        .count();
     (order, want > 0 && matched == want)
 }
 
@@ -6869,5 +6896,29 @@ mod title_reconcile_tests {
         let (order, done) = order_windows_by_saved_titles(&desired, &current);
         assert_eq!(order, vec![1, 2]);
         assert!(done);
+    }
+
+    #[test]
+    fn matched_window_keeps_its_slot_when_another_title_is_unmatched() {
+        // The real Librewolf oscillation: col0's saved page title reloaded to a
+        // different string (unmatched), while col1's generic "LibreWolf" matches. The
+        // matched window must land at *its* slot (1), leaving the leftover at slot 0 —
+        // and it must do so regardless of the browser's restore order, so the two
+        // windows stop swapping across save/restore cycles.
+        let desired = vec![Some("old-page-url".into()), Some("LibreWolf".into())];
+
+        // Windows arriving in one order...
+        let (order_a, done_a) = order_windows_by_saved_titles(
+            &desired,
+            &cur(&[(20, Some("LibreWolf")), (21, Some("Real Page"))]),
+        );
+        // ...and the reverse order both put the "LibreWolf" window at slot 1.
+        let (order_b, _) = order_windows_by_saved_titles(
+            &desired,
+            &cur(&[(21, Some("Real Page")), (20, Some("LibreWolf"))]),
+        );
+        assert_eq!(order_a, vec![21, 20], "leftover at slot0, LibreWolf at slot1");
+        assert_eq!(order_b, vec![21, 20], "same result independent of arrival order");
+        assert!(!done_a, "an unmatched saved title keeps polling");
     }
 }
