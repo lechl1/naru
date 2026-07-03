@@ -48,6 +48,47 @@ const PERIODIC_SAVE: Duration = Duration::from_secs(60);
 /// then. Generous, because some apps (browsers restoring many tabs) map slowly.
 const RESTORE_SETTLE: Duration = Duration::from_secs(60);
 
+/// How often the post-restore title reconcile re-checks same-app window order, and how
+/// many times before it gives up. Browsers (Librewolf, Brave) can open *and* finish
+/// setting their window titles well after the compositor starts — sometimes past
+/// [`RESTORE_SETTLE`] — so the reconcile polls, reordering by title as titles land, and
+/// stops early once every group is satisfied. `2s × 150 = 5 min` covers a very slow
+/// browser session restore without churning afterwards.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+const RECONCILE_MAX_TICKS: u32 = 150;
+
+/// The saved *tiled* entries that need title-based reordering at restore: for each
+/// `app_id` with two or more of them carrying two or more distinct non-empty titles
+/// (browsers with several windows sharing one app_id), all of that app's tiled entries.
+/// Terminals rarely have stable titles and are disambiguated by cwd, but they aren't
+/// excluded here — an app that genuinely has distinct per-window titles is fair game.
+fn title_reconcile_entries(windows: &[WindowEntry]) -> Vec<WindowEntry> {
+    use crate::session::state::Placement;
+    let tiled = |e: &WindowEntry| matches!(e.placement, Placement::Tiled { .. });
+
+    let mut by_app: std::collections::HashMap<&str, Vec<&WindowEntry>> =
+        std::collections::HashMap::new();
+    for e in windows.iter().filter(|e| tiled(e)) {
+        by_app.entry(e.app_id.as_str()).or_default().push(e);
+    }
+
+    by_app
+        .into_values()
+        .filter(|group| {
+            group.len() >= 2 && {
+                let distinct: std::collections::HashSet<&str> = group
+                    .iter()
+                    .filter_map(|e| e.title.as_deref())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                distinct.len() >= 2
+            }
+        })
+        .flatten()
+        .cloned()
+        .collect()
+}
+
 /// Per-process runtime state for session-restore.
 ///
 /// Constructed only when the feature is enabled (i.e. `config.session_restore.off ==
@@ -88,6 +129,11 @@ pub struct SessionManager {
     /// `None` after that, or when the prior session recorded no active workspace.
     pub pending_active_workspace: Option<ActiveWorkspace>,
 
+    /// Saved tiled entries for same-app multi-title groups (browsers), consulted by the
+    /// post-restore title reconcile to order each app's windows by title once they've
+    /// settled. Kept for the whole session (cheap); the reconcile timer bounds its use.
+    title_reconcile: Vec<WindowEntry>,
+
     /// The snapshot most recently written to disk, used to skip redundant writes.
     ///
     /// The periodic timer rebuilds the snapshot every [`PERIODIC_SAVE`]; comparing
@@ -117,17 +163,21 @@ impl SessionManager {
         // Load the prior session into memory once. From here on, `pending_restore` is
         // consumed entry-by-entry as new windows map; entries that never match (e.g.
         // an app the user uninstalled) just sit there until compositor exit. The
-        // saved active workspace is stashed too, applied once restore settles.
-        let (pending_restore, pending_active_workspace) = match load(&state_path) {
-            Ok(Some(s)) => (VecDeque::from(s.windows), s.active_workspace),
-            Ok(None) => (VecDeque::new(), None),
+        // saved active workspace is stashed too, applied once restore settles, and the
+        // title-reconcile groups are computed before the windows are moved.
+        let (pending_restore, pending_active_workspace, title_reconcile) = match load(&state_path) {
+            Ok(Some(s)) => {
+                let reconcile = title_reconcile_entries(&s.windows);
+                (VecDeque::from(s.windows), s.active_workspace, reconcile)
+            }
+            Ok(None) => (VecDeque::new(), None, Vec::new()),
             Err(e) => {
                 warn!(
                     "session-restore: load failed at {}: {e:#}; starting with no \
                      pending entries",
                     state_path.display()
                 );
-                (VecDeque::new(), None)
+                (VecDeque::new(), None, Vec::new())
             }
         };
 
@@ -137,8 +187,16 @@ impl SessionManager {
             pending_save_token: None,
             pending_restore,
             pending_active_workspace,
+            title_reconcile,
             last_saved: None,
         })
+    }
+
+    /// The saved entries whose windows should be reordered by title once their titles
+    /// settle — i.e. tiled windows of an app with two or more distinct saved titles that
+    /// share an `app_id` (browsers). Empty when nothing needs title reconciliation.
+    pub fn title_reconcile_entries(&self) -> &[WindowEntry] {
+        &self.title_reconcile
     }
 
     /// Take the saved active workspace, if any, leaving `None` behind so it is applied
@@ -189,6 +247,32 @@ impl SessionManager {
         });
         if let Err(e) = res {
             warn!("session-restore: scheduling restore-settle timer failed: {e}");
+        }
+    }
+
+    /// Schedule the repeating post-restore title reconcile.
+    ///
+    /// Call once at startup when [`title_reconcile_entries`] found groups to order.
+    /// Every [`RECONCILE_INTERVAL`] it re-orders same-app windows to their saved title
+    /// order (see [`crate::naru::Naru::reconcile_restored_titles`]) and reschedules,
+    /// until that returns "satisfied" (every group's windows are present with settled
+    /// titles) or [`RECONCILE_MAX_TICKS`] is reached. Polling — rather than a single
+    /// timer — is deliberate: browsers open late and finish titling their windows
+    /// asynchronously, so the correct moment to order them isn't known up front.
+    pub fn schedule_title_reconcile(loop_handle: &LoopHandle<'static, crate::naru::State>) {
+        let mut ticks: u32 = 0;
+        let timer = Timer::from_duration(RECONCILE_INTERVAL);
+        let res = loop_handle.insert_source(timer, move |_deadline, _, state| {
+            ticks += 1;
+            let done = state.naru.reconcile_restored_titles();
+            if done || ticks >= RECONCILE_MAX_TICKS {
+                TimeoutAction::Drop
+            } else {
+                TimeoutAction::ToDuration(RECONCILE_INTERVAL)
+            }
+        });
+        if let Err(e) = res {
+            warn!("session-restore: scheduling title-reconcile timer failed: {e}");
         }
     }
 
@@ -346,6 +430,52 @@ mod tests {
     fn off_returns_none() {
         let c = cfg(true, None);
         assert!(SessionManager::new(&c).is_none());
+    }
+
+    #[test]
+    fn title_reconcile_entries_selects_multi_title_same_app_groups() {
+        use crate::session::state::{Placement, WorkspaceRef};
+
+        let tiled = |app: &str, title: Option<&str>, col: usize| WindowEntry {
+            app_id: app.into(),
+            title: title.map(String::from),
+            cwd: None,
+            flatpak_id: None,
+            exec: None,
+            command: None,
+            tmux_session: None,
+            claude_session: None,
+            output: None,
+            workspace: WorkspaceRef::Index { index: 0 },
+            placement: Placement::Tiled {
+                column_index: col,
+                tile_index: 0,
+                width: 0.0,
+                height: 0.0,
+                is_fullscreen: false,
+                is_maximized: false,
+            },
+        };
+        let windows = vec![
+            tiled("librewolf", Some("GitHub"), 0),
+            tiled("librewolf", Some("Docs"), 1),
+            tiled("librewolf", Some("Mail"), 2),
+            tiled("brave-browser", Some("News"), 3), // single window → excluded
+            tiled("org.kde.konsole", None, 4),        // no titles → excluded
+            tiled("org.kde.konsole", None, 5),
+            tiled("firefox", Some("Same"), 6), // identical titles → excluded
+            tiled("firefox", Some("Same"), 7),
+        ];
+
+        let result = title_reconcile_entries(&windows);
+        let apps: std::collections::HashSet<&str> =
+            result.iter().map(|e| e.app_id.as_str()).collect();
+        assert_eq!(
+            apps,
+            std::collections::HashSet::from(["librewolf"]),
+            "only the multi-window, multi-distinct-title app qualifies",
+        );
+        assert_eq!(result.len(), 3, "all three librewolf entries are kept");
     }
 
     #[test]

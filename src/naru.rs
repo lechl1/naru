@@ -2301,6 +2301,16 @@ impl Naru {
             crate::session::SessionManager::schedule_restore_settle(&self.event_loop);
         }
 
+        // If several same-app windows (browsers) need title-based ordering, poll for
+        // their windows/titles to settle and reorder them then — browsers open late.
+        let needs_title_reconcile = self
+            .session_manager
+            .as_ref()
+            .is_some_and(|sm| !sm.title_reconcile_entries().is_empty());
+        if needs_title_reconcile {
+            crate::session::SessionManager::schedule_title_reconcile(&self.event_loop);
+        }
+
         crate::session::restore_apps(&self.config.borrow().session_restore, &entries);
     }
 
@@ -3756,6 +3766,105 @@ impl Naru {
         }
         self.layout.switch_workspace(index);
         debug!("session-restore: restored active workspace at index {index}");
+    }
+
+    /// Reorder each browser's restored windows into their saved title order, once the
+    /// windows exist and their titles have settled. Returns whether every reconcile
+    /// group is satisfied (all saved titles matched a present window) so the polling
+    /// [`crate::session::SessionManager::schedule_title_reconcile`] timer can stop.
+    ///
+    /// Browsers restore their own windows asynchronously and title them only after the
+    /// page loads, so the map-time matcher can't order same-app windows reliably; this
+    /// fixes the order after the fact by matching each window's current title to the
+    /// saved column order. Idempotent — a no-op once the windows are already ordered.
+    pub fn reconcile_restored_titles(&mut self) -> bool {
+        use crate::utils::with_toplevel_role;
+
+        let entries: Vec<crate::session::WindowEntry> = match self.session_manager.as_ref() {
+            Some(sm) if !sm.title_reconcile_entries().is_empty() => {
+                sm.title_reconcile_entries().to_vec()
+            }
+            _ => return true,
+        };
+        let app_ids: std::collections::HashSet<&str> =
+            entries.iter().map(|e| e.app_id.as_str()).collect();
+
+        // Collect (workspace, desired window order) ops under an immutable layout borrow.
+        let mut ops: Vec<(WorkspaceId, Vec<Window>)> = Vec::new();
+        let mut satisfied = true;
+
+        for (mon, ws_idx, ws) in self.layout.workspaces() {
+            let output_name = mon.map(|m| m.output_name().as_str());
+            let ws_name = ws.name().map(String::as_str);
+            let ws_id = ws.id();
+
+            // Current windows of each reconcile app_id on this workspace, with titles.
+            let mut current: std::collections::HashMap<String, Vec<(Window, Option<String>)>> =
+                std::collections::HashMap::new();
+            for w in ws.windows() {
+                let (app, title) =
+                    with_toplevel_role(w.toplevel(), |r| (r.app_id.clone(), r.title.clone()));
+                let Some(app) = app else { continue };
+                if !app_ids.contains(app.as_str()) {
+                    continue;
+                }
+                let title = title.filter(|t| !t.is_empty());
+                current.entry(app).or_default().push((w.window.clone(), title));
+            }
+
+            for app_id in &app_ids {
+                // Saved titles for this (app_id, workspace), in saved column order.
+                let mut desired: Vec<(usize, Option<String>)> = entries
+                    .iter()
+                    .filter(|e| e.app_id.as_str() == *app_id)
+                    .filter(|e| match &e.workspace {
+                        crate::session::WorkspaceRef::Name { name } => {
+                            ws_name == Some(name.as_str())
+                        }
+                        crate::session::WorkspaceRef::Index { index } => {
+                            *index == ws_idx && e.output.as_deref() == output_name
+                        }
+                    })
+                    .filter_map(|e| match &e.placement {
+                        crate::session::Placement::Tiled { column_index, .. } => {
+                            Some((*column_index, e.title.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if desired.len() < 2 {
+                    continue;
+                }
+                desired.sort_by_key(|(col, _)| *col);
+                let desired_titles: Vec<Option<String>> =
+                    desired.into_iter().map(|(_, t)| t).collect();
+
+                let Some(cur) = current.get(*app_id) else {
+                    satisfied = false; // windows haven't appeared yet
+                    continue;
+                };
+
+                let (order, fully_matched) = order_windows_by_saved_titles(&desired_titles, cur);
+                if !fully_matched {
+                    satisfied = false; // some titles haven't settled / windows missing
+                }
+                if order.len() >= 2 {
+                    ops.push((ws_id, order));
+                }
+            }
+        }
+
+        // Apply the reorders and redraw if anything actually moved.
+        let mut moved = false;
+        for (ws_id, order) in ops {
+            moved |= self
+                .layout
+                .reorder_workspace_single_window_columns(ws_id, &order);
+        }
+        if moved {
+            self.queue_redraw_all();
+        }
+        satisfied
     }
 
     pub fn find_window_by_id(&self, id: MappedId) -> Option<Window> {
@@ -6688,5 +6797,77 @@ naru_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+    }
+}
+
+/// Order `current` windows to follow `desired_titles`: greedily assign each saved title
+/// (in saved column order) to a current window carrying that exact non-empty title, then
+/// append the windows that matched no saved title in their original order. Returns the
+/// ordered ids and whether every saved title found a window — i.e. the titles have
+/// settled and all the windows are present, so the reconcile can stop polling.
+fn order_windows_by_saved_titles<Id: Clone>(
+    desired_titles: &[Option<String>],
+    current: &[(Id, Option<String>)],
+) -> (Vec<Id>, bool) {
+    let mut used = vec![false; current.len()];
+    let mut order: Vec<Id> = Vec::new();
+    let mut matched = 0usize;
+    for dt in desired_titles {
+        let Some(dt) = dt.as_deref() else { continue };
+        if let Some(i) =
+            (0..current.len()).find(|&i| !used[i] && current[i].1.as_deref() == Some(dt))
+        {
+            used[i] = true;
+            order.push(current[i].0.clone());
+            matched += 1;
+        }
+    }
+    for (i, slot) in current.iter().enumerate() {
+        if !used[i] {
+            order.push(slot.0.clone());
+        }
+    }
+    let want = desired_titles.iter().filter(|t| t.is_some()).count();
+    (order, want > 0 && matched == want)
+}
+
+#[cfg(test)]
+mod title_reconcile_tests {
+    use super::order_windows_by_saved_titles;
+
+    fn cur(items: &[(u32, Option<&str>)]) -> Vec<(u32, Option<String>)> {
+        items
+            .iter()
+            .map(|(id, t)| (*id, t.map(String::from)))
+            .collect()
+    }
+
+    #[test]
+    fn reorders_windows_into_saved_title_order() {
+        // Saved order Mail, Docs, News; the windows mapped shuffled.
+        let desired = vec![Some("Mail".into()), Some("Docs".into()), Some("News".into())];
+        let current = cur(&[(10, Some("Docs")), (11, Some("News")), (12, Some("Mail"))]);
+        let (order, done) = order_windows_by_saved_titles(&desired, &current);
+        assert_eq!(order, vec![12, 10, 11], "ids arranged Mail, Docs, News");
+        assert!(done);
+    }
+
+    #[test]
+    fn unsettled_title_is_not_yet_satisfied() {
+        // One window still shows a loading title, so a saved title is unmatched.
+        let desired = vec![Some("Mail".into()), Some("Docs".into())];
+        let current = cur(&[(10, Some("Mail")), (11, Some("New Tab"))]);
+        let (order, done) = order_windows_by_saved_titles(&desired, &current);
+        assert_eq!(order, vec![10, 11], "matched first, unmatched appended");
+        assert!(!done, "an unmatched saved title means titles are still settling");
+    }
+
+    #[test]
+    fn duplicate_titles_consume_one_window_each() {
+        let desired = vec![Some("Same".into()), Some("Same".into())];
+        let current = cur(&[(1, Some("Same")), (2, Some("Same"))]);
+        let (order, done) = order_windows_by_saved_titles(&desired, &current);
+        assert_eq!(order, vec![1, 2]);
+        assert!(done);
     }
 }
