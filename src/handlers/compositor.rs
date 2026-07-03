@@ -387,6 +387,9 @@ impl CompositorHandler for State {
                     if restore_drained {
                         self.naru.layout.end_session_restore();
                         self.stack_restored_columns();
+                        // Every restored window is now placed and activated in map
+                        // order; return focus to the workspace the user left active.
+                        self.naru.restore_active_workspace();
                     }
 
                     // Session-restore: window appearing changes what we'd persist.

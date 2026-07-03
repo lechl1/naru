@@ -36,5 +36,7 @@ pub use desktop::{index_startup_wm_classes, ssb_launch_argv};
 pub use manager::SessionManager;
 pub use restore::{resolve_launch_argv, restore_apps};
 pub use snapshot::build_from_naru;
-pub use state::{Placement, PanelSide, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION};
+pub use state::{
+    ActiveWorkspace, Placement, PanelSide, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION,
+};
 pub use storage::{default_state_path, load, save_atomic};

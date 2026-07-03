@@ -176,6 +176,7 @@ mod tests {
                     is_maximized: false,
                 },
             }],
+            active_workspace: None,
         };
         save_atomic(&path, &state).unwrap();
         let loaded = load(&path).unwrap().expect("file should exist");

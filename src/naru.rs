@@ -3705,6 +3705,59 @@ impl Naru {
         Some((target_output.cloned(), target_workspace_index))
     }
 
+    /// Return focus to the workspace that was active at save time, once session
+    /// restore has settled. Consumes the pending value so it applies at most once;
+    /// no-op when session-restore is off, nothing was recorded, or the saved
+    /// workspace can't be resolved. Called after the last restored window is placed
+    /// (and, as a backstop, from the restore-settle timer) so the switch lands after
+    /// per-window activation rather than being clobbered by it.
+    pub fn restore_active_workspace(&mut self) {
+        let Some(active) = self
+            .session_manager
+            .as_mut()
+            .and_then(|sm| sm.take_pending_active_workspace())
+        else {
+            return;
+        };
+
+        // Resolve the target output and per-output workspace index.
+        let (output, index): (Option<Output>, usize) = match &active.workspace {
+            crate::session::WorkspaceRef::Name { name } => {
+                match self.layout.find_workspace_by_name(name) {
+                    Some((idx, ws)) => (ws.current_output().cloned(), idx),
+                    None => {
+                        debug!(
+                            "session-restore: saved active workspace {name:?} is gone; \
+                             leaving focus as-is"
+                        );
+                        return;
+                    }
+                }
+            }
+            crate::session::WorkspaceRef::Index { index } => {
+                // An empty active workspace has no window to materialize it during
+                // restore, so create it (and any below it) on its saved output.
+                self.layout
+                    .materialize_workspace_id_at(active.output.as_deref(), *index);
+                let output = active
+                    .output
+                    .as_deref()
+                    .and_then(|n| self.output_by_name_match(n).cloned());
+                (output, *index)
+            }
+        };
+
+        // Focus the target output first so the per-output index resolves there, then
+        // activate the workspace.
+        if let Some(output) = output {
+            if self.layout.active_output() != Some(&output) {
+                self.layout.focus_output(&output);
+            }
+        }
+        self.layout.switch_workspace(index);
+        debug!("session-restore: restored active workspace at index {index}");
+    }
+
     pub fn find_window_by_id(&self, id: MappedId) -> Option<Window> {
         self.layout
             .windows()

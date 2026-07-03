@@ -27,6 +27,12 @@ pub struct SessionState {
     /// i-th saved entry. Captured `cwd` is informational; matching does not consult it
     /// (avoids surprising mismatches if the user’s shell `cd`’d after window creation).
     pub windows: Vec<WindowEntry>,
+
+    /// The workspace that was active (globally focused) at save time, so restore can
+    /// return focus to it once the windows are back. `None` in files written before this
+    /// field existed, or when there was no active workspace to record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace: Option<ActiveWorkspace>,
 }
 
 impl SessionState {
@@ -34,8 +40,22 @@ impl SessionState {
         Self {
             version: SCHEMA_VERSION,
             windows: Vec::new(),
+            active_workspace: None,
         }
     }
+}
+
+/// The globally-focused workspace at save time. Restored last, once every window is
+/// back, so focus lands where the user left it regardless of window map order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveWorkspace {
+    /// Which workspace — by name (preferred) or per-output index. Same identity scheme
+    /// as [`WindowEntry::workspace`].
+    pub workspace: WorkspaceRef,
+    /// Connector name of the output it was on, e.g. `"HDMI-A-1"`. `None` means resolve
+    /// against the active output (single-monitor, or the index carries no output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 impl Default for SessionState {
@@ -316,6 +336,7 @@ mod tests {
                     is_maximized: false,
                 },
             }],
+            active_workspace: None,
         };
         let json = serde_json::to_string_pretty(&s).unwrap();
         // Spot-check a couple of stable fields appear in the JSON.
@@ -527,6 +548,8 @@ mod tests {
         }"#;
         let s: SessionState = serde_json::from_str(json).unwrap();
         assert_eq!(s.windows.len(), 1);
+        // `active_workspace` absent in the old format defaults to None.
+        assert_eq!(s.active_workspace, None);
         let p = &s.windows[0].placement;
         match p {
             Placement::Tiled {
@@ -544,5 +567,23 @@ mod tests {
             }
             _ => panic!("expected Tiled"),
         }
+    }
+
+    #[test]
+    fn active_workspace_round_trips_and_omits_when_none() {
+        // Present: survives a serialize/deserialize round-trip.
+        let mut s = SessionState::empty();
+        s.active_workspace = Some(ActiveWorkspace {
+            workspace: WorkspaceRef::Index { index: 2 },
+            output: Some("HDMI-A-1".into()),
+        });
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"active_workspace\""));
+        assert_eq!(serde_json::from_str::<SessionState>(&json).unwrap(), s);
+
+        // Absent: the field is omitted from the JSON entirely.
+        let empty = SessionState::empty();
+        let json = serde_json::to_string(&empty).unwrap();
+        assert!(!json.contains("active_workspace"));
     }
 }

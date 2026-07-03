@@ -15,7 +15,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 
 use super::snapshot::build_from_naru;
-use super::state::{SessionState, WindowEntry};
+use super::state::{ActiveWorkspace, SessionState, WindowEntry};
 use super::storage::{default_state_path, load, save_atomic};
 
 /// Debounce window: delay between the last `mark_dirty` call and the actual save.
@@ -83,6 +83,11 @@ pub struct SessionManager {
     /// formalized here.
     pub pending_restore: VecDeque<WindowEntry>,
 
+    /// The workspace that was active at save time, awaiting restore-settle to be
+    /// re-focused. Taken once via [`SessionManager::take_pending_active_workspace`];
+    /// `None` after that, or when the prior session recorded no active workspace.
+    pub pending_active_workspace: Option<ActiveWorkspace>,
+
     /// The snapshot most recently written to disk, used to skip redundant writes.
     ///
     /// The periodic timer rebuilds the snapshot every [`PERIODIC_SAVE`]; comparing
@@ -111,17 +116,18 @@ impl SessionManager {
 
         // Load the prior session into memory once. From here on, `pending_restore` is
         // consumed entry-by-entry as new windows map; entries that never match (e.g.
-        // an app the user uninstalled) just sit there until compositor exit.
-        let pending_restore = match load(&state_path) {
-            Ok(Some(s)) => VecDeque::from(s.windows),
-            Ok(None) => VecDeque::new(),
+        // an app the user uninstalled) just sit there until compositor exit. The
+        // saved active workspace is stashed too, applied once restore settles.
+        let (pending_restore, pending_active_workspace) = match load(&state_path) {
+            Ok(Some(s)) => (VecDeque::from(s.windows), s.active_workspace),
+            Ok(None) => (VecDeque::new(), None),
             Err(e) => {
                 warn!(
                     "session-restore: load failed at {}: {e:#}; starting with no \
                      pending entries",
                     state_path.display()
                 );
-                VecDeque::new()
+                (VecDeque::new(), None)
             }
         };
 
@@ -130,8 +136,16 @@ impl SessionManager {
             dirty: false,
             pending_save_token: None,
             pending_restore,
+            pending_active_workspace,
             last_saved: None,
         })
+    }
+
+    /// Take the saved active workspace, if any, leaving `None` behind so it is applied
+    /// at most once. Called when restore settles (all windows placed, or the settle
+    /// timeout) to return focus to the workspace the user left active.
+    pub fn take_pending_active_workspace(&mut self) -> Option<ActiveWorkspace> {
+        self.pending_active_workspace.take()
     }
 
     /// Register the recurring [`PERIODIC_SAVE`] timer on the event loop.
@@ -167,6 +181,10 @@ impl SessionManager {
         let timer = Timer::from_duration(RESTORE_SETTLE);
         let res = loop_handle.insert_source(timer, |_deadline, _, state| {
             state.naru.layout.end_session_restore();
+            // Backstop the active-workspace restore too, in case some saved windows
+            // never reappeared and the map-order path above never drained. No-op if
+            // that path already consumed the pending value.
+            state.naru.restore_active_workspace();
             TimeoutAction::Drop
         });
         if let Err(e) = res {
@@ -343,6 +361,7 @@ mod tests {
         let empty = SessionState {
             version: SCHEMA_VERSION,
             windows: vec![],
+            active_workspace: None,
         };
         // First write goes through; an identical follow-up is skipped.
         assert!(m.persist_if_changed(empty.clone()), "first write happens");
@@ -374,6 +393,7 @@ mod tests {
                     is_maximized: false,
                 },
             }],
+            active_workspace: None,
         };
         assert!(
             m.persist_if_changed(with_window.clone()),

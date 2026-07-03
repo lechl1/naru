@@ -39,7 +39,8 @@ use crate::layout::workspace::Workspace as LayoutWorkspace;
 use crate::layout::LayoutElement;
 use crate::naru::Naru;
 use crate::session::state::{
-    PanelSide, Placement, SessionState, TmuxAttach, WindowEntry, WorkspaceRef, SCHEMA_VERSION,
+    ActiveWorkspace, PanelSide, Placement, SessionState, TmuxAttach, WindowEntry, WorkspaceRef,
+    SCHEMA_VERSION,
 };
 use crate::utils::with_toplevel_role;
 use crate::window::Mapped;
@@ -65,8 +66,21 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
     // Reused to map each terminal window to the session it's attached to.
     let mut socket_maps = crate::session::tmux::SocketMaps::new();
 
+    // Identify the globally-focused workspace so restore can return focus to it.
+    // Captured by id here, then matched against each workspace in the walk below
+    // (the walk already has the per-output index and monitor we need to record).
+    let active_ws_id = naru.layout.active_workspace().map(|ws| ws.id());
+    let mut active_workspace = None;
+
     for (mon, ws_idx, ws) in naru.layout.workspaces() {
         let output = mon.map(|m| m.output_name().clone());
+
+        if Some(ws.id()) == active_ws_id {
+            active_workspace = Some(ActiveWorkspace {
+                workspace: workspace_ref_for(ws, ws_idx),
+                output: output.clone(),
+            });
+        }
         let workspace = workspace_ref_for(ws, ws_idx);
 
         // Carousel + floating windows.
@@ -164,6 +178,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
     SessionState {
         version: SCHEMA_VERSION,
         windows,
+        active_workspace,
     }
 }
 
