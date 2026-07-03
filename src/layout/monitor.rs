@@ -663,6 +663,27 @@ impl<W: LayoutElement> Monitor<W> {
         moved
     }
 
+    /// If the active `side` strip's focused column holds more than one window,
+    /// peel the active window off into a new column at the strip's inner
+    /// (carousel-facing) edge and return true. A single-window column returns
+    /// false so the caller falls through to the eject-to-carousel / move-within
+    /// routing. This mirrors the carousel's rule that only a single-window
+    /// column crosses the panel boundary whole: a move toward the carousel from
+    /// a multi-window column first creates a second column inside the panel.
+    pub(super) fn split_active_strip_toward_carousel(&mut self, side: FixedSide) -> bool {
+        if self.panels.active_fixed_side() != Some(side) {
+            return false;
+        }
+        if !self.panels.active_column_is_multi_window(side) {
+            return false;
+        }
+        let split = self.panels.split_active_toward_inner_edge(side);
+        if split {
+            self.sync_panel_insets_to_workspaces();
+        }
+        split
+    }
+
     // --- Panel-aware focus traversal -----------------------------------------
 
     pub(super) fn focus_left(&mut self) -> bool {

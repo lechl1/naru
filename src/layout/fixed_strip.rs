@@ -441,6 +441,29 @@ impl<W: LayoutElement> FixedStrip<W> {
         self.inner_edge_idx() == Some(self.inner.active_column_index())
     }
 
+    /// Whether the strip's active column holds more than one window. Mirrors
+    /// the carousel's split predicate: only a *single-window* column may be
+    /// handed to the carousel whole, so a move toward the carousel from a
+    /// multi-window column peels one window off first (see
+    /// [`FixedStrip::split_active_toward_inner_edge`]).
+    pub fn active_column_is_multi_window(&self) -> bool {
+        self.inner.active_column_is_multi_window()
+    }
+
+    /// Split the active window out of its column into a new single-window
+    /// column at this strip's inner (carousel-facing) side — the left strip's
+    /// rightmost end, the right strip's leftmost end. This is how a stack-move
+    /// toward the carousel creates a *second column in the panel* instead of
+    /// ejecting the whole multi-window column. Returns false if nothing moved.
+    pub fn split_active_toward_inner_edge(&mut self) -> bool {
+        let moved = match self.side {
+            FixedSide::Right => self.inner.move_active_window_to_new_column_left(),
+            FixedSide::Left => self.inner.move_active_window_to_new_column_right(),
+        };
+        self.repin();
+        moved
+    }
+
     /// Insert a column extracted from the carousel at this strip's inner
     /// (carousel-facing) edge. The new column becomes the focused column
     /// inside the strip.
@@ -1146,6 +1169,14 @@ impl<W: LayoutElement> FixedPanels<W> {
 
     pub fn move_active_neighbor_as_new_row(&mut self, side: FixedSide, to_left: bool) -> bool {
         self.strip_mut(side).move_active_neighbor_as_new_row(to_left)
+    }
+
+    pub fn active_column_is_multi_window(&self, side: FixedSide) -> bool {
+        self.strip(side).active_column_is_multi_window()
+    }
+
+    pub fn split_active_toward_inner_edge(&mut self, side: FixedSide) -> bool {
+        self.strip_mut(side).split_active_toward_inner_edge()
     }
 
     // --- Render --------------------------------------------------------------

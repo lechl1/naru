@@ -1345,6 +1345,130 @@ mod tests {
         assert_eq!(sim.active_fixed_side(), Some(FixedSide::Left));
     }
 
+    /// A multi-window column that is *already inside* a fixed-side panel must
+    /// split, not eject, when moved toward the carousel: the active window peels
+    /// off into a *second column in the panel*, and only the resulting
+    /// single-window column crosses back into the carousel on a following move.
+    /// Regression: a two-window panel column at the inner edge slid wholesale
+    /// into the carousel on the first move.
+    #[test]
+    fn stack_move_toward_carousel_splits_panel_column_instead_of_ejecting() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let a = sim.add_window();
+        let b = sim.add_window();
+
+        // Park `a` into the left panel, then `b` beside it — [a][b] in the strip.
+        sim.focus_column_first();
+        sim.move_window_left_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        sim.focus_window(b);
+        sim.move_window_left_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        sim.assert_slot(a, WindowLayer::FixedLeft);
+        sim.assert_slot(b, WindowLayer::FixedLeft);
+
+        // Merge `b` into `a`'s column (toward the outer edge) so the panel holds
+        // one two-window column — the exact state the bug mishandled.
+        sim.move_window_left_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        assert_eq!(
+            column_occupancy(&sim, b),
+            2,
+            "precondition: a and b share one two-window panel column",
+        );
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Left));
+
+        // Move toward the carousel: `b` splits into its own column but STAYS in
+        // the panel — nothing is ejected, and the panel now has two columns.
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        sim.assert_slot(a, WindowLayer::FixedLeft);
+        sim.assert_slot(b, WindowLayer::FixedLeft);
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Left));
+        assert_eq!(column_occupancy(&sim, b), 1, "b split into its own column");
+        assert_eq!(column_occupancy(&sim, a), 1, "a left alone in its column");
+        assert!(
+            (sim.window_x(a) - sim.window_x(b)).abs() > 1.0,
+            "a and b must now be in separate panel columns",
+        );
+
+        // Only now — a single-window column at the inner edge — does the next
+        // move hand `b` back to the carousel.
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        sim.assert_slot(b, WindowLayer::Scrolling);
+        sim.assert_slot(a, WindowLayer::FixedLeft);
+    }
+
+    /// Right-panel mirror of
+    /// [`stack_move_toward_carousel_splits_panel_column_instead_of_ejecting`].
+    /// `mover` is the window pushed toward the carousel; `other` is left behind.
+    #[test]
+    fn stack_move_toward_carousel_splits_right_panel_column_instead_of_ejecting() {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let mover = sim.add_window();
+        let other = sim.add_window();
+
+        // Park `other` (the rightmost, so a right-move parks rather than
+        // overlaps), then `mover` beside it at the inner edge.
+        sim.focus_window(other);
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        sim.focus_window(mover);
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        sim.assert_slot(mover, WindowLayer::FixedRight);
+        sim.assert_slot(other, WindowLayer::FixedRight);
+
+        // Merge into one two-window column (toward the outer/right edge).
+        sim.move_window_right_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        assert_eq!(column_occupancy(&sim, mover), 2, "precondition: one two-window column");
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+
+        // Toward the carousel (leftward): split within the panel, don't eject.
+        sim.move_window_left_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        sim.assert_slot(mover, WindowLayer::FixedRight);
+        sim.assert_slot(other, WindowLayer::FixedRight);
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+        assert_eq!(column_occupancy(&sim, mover), 1, "mover split into its own column");
+        assert!(
+            (sim.window_x(mover) - sim.window_x(other)).abs() > 1.0,
+            "mover and other must now be in separate panel columns",
+        );
+
+        // Next move hands the single-window column back to the carousel.
+        sim.move_window_left_stacked();
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        sim.assert_slot(mover, WindowLayer::Scrolling);
+        sim.assert_slot(other, WindowLayer::FixedRight);
+    }
+
     /// Each new window opens in its own column to the right of the active one.
     #[test]
     fn new_placement_opens_new_window_in_new_column() {

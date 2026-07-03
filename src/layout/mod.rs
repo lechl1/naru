@@ -2521,9 +2521,12 @@ impl<W: LayoutElement> Layout<W> {
         if let Some(monitor) = self.active_monitor() {
             match monitor.panels_active_fixed_side() {
                 Some(FixedSide::Right) => {
-                    // Toward inner edge of right strip. At inner edge OUT to
-                    // the carousel; otherwise move one column within strip.
-                    let _ = monitor.move_active_strip_column_back_to_carousel_right()
+                    // Toward inner edge of the right strip. A multi-window column
+                    // first peels the active window into a new column inside the
+                    // panel; only a single-window column at the inner edge goes
+                    // OUT to the carousel; otherwise move one column within strip.
+                    let _ = monitor.split_active_strip_toward_carousel(FixedSide::Right)
+                        || monitor.move_active_strip_column_back_to_carousel_right()
                         || monitor.move_active_window_within_right_strip(true);
                     self.stacking_move_state = None;
                     return;
@@ -2624,7 +2627,12 @@ impl<W: LayoutElement> Layout<W> {
         if let Some(monitor) = self.active_monitor() {
             match monitor.panels_active_fixed_side() {
                 Some(FixedSide::Left) => {
-                    let _ = monitor.move_active_strip_column_back_to_carousel_left()
+                    // Toward inner edge of the left strip. A multi-window column
+                    // first peels the active window into a new column inside the
+                    // panel; only a single-window column at the inner edge is
+                    // handed to the carousel whole; otherwise move within strip.
+                    let _ = monitor.split_active_strip_toward_carousel(FixedSide::Left)
+                        || monitor.move_active_strip_column_back_to_carousel_left()
                         || monitor.move_active_window_within_left_strip(false);
                     self.stacking_move_state = None;
                     return;

@@ -589,6 +589,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         Some(col.tiles.len())
     }
 
+    /// Whether the active column holds more than one window — either several
+    /// tiles, or a single tile that is itself a stack of several windows. This is
+    /// the `split_into_new_column` predicate the stack-move routing uses to decide
+    /// whether a move peels one window off into its own column (multi) or relocates
+    /// the whole column (single).
+    pub fn active_column_is_multi_window(&self) -> bool {
+        let Some(col) = self.columns.get(self.active_column_idx) else {
+            return false;
+        };
+        col.tiles.len() > 1 || col.tiles[col.active_tile_idx].stack_len() > 1
+    }
+
     pub fn active_tile_mut(&mut self) -> Option<&mut Tile<W>> {
         if self.columns.is_empty() {
             return None;
