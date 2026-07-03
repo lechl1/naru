@@ -84,6 +84,12 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
             });
             let placement = placement_from_ipc_layout(&layout, w, persisted_height(portrait, h));
             let (flatpak_id, exec) = launch_info(mapped);
+            let command = crate::session::ssb_launch_argv(
+                &app_id,
+                flatpak_id.as_deref(),
+                exec.as_deref(),
+                &wm_class_index,
+            );
             let (cwd, tmux_session, claude_session) =
                 resolve_terminal_state(mapped, &app_id, session_restore, &mut socket_maps);
 
@@ -93,7 +99,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 cwd,
                 flatpak_id,
                 exec,
-                command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
+                command,
                 tmux_session,
                 claude_session,
                 output: output.clone(),
@@ -125,6 +131,12 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
             };
             let h = persisted_height(portrait, h);
             let (flatpak_id, exec) = launch_info(mapped);
+            let command = crate::session::ssb_launch_argv(
+                &app_id,
+                flatpak_id.as_deref(),
+                exec.as_deref(),
+                &wm_class_index,
+            );
             let (cwd, tmux_session, claude_session) =
                 resolve_terminal_state(mapped, &app_id, session_restore, &mut socket_maps);
             windows.push(WindowEntry {
@@ -133,7 +145,7 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
                 cwd,
                 flatpak_id,
                 exec,
-                command: crate::session::ssb_launch_argv(&app_id, &wm_class_index),
+                command,
                 tmux_session,
                 claude_session,
                 output: output.clone(),
