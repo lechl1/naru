@@ -20,15 +20,27 @@
 //! ```
 //!
 //! Chromium sets the Wayland `app_id` to that same `StartupWMClass`, so matching the
-//! window's `app_id` against `StartupWMClass` recovers the exact relaunch command.
+//! window's `app_id` against `StartupWMClass` recovers the exact relaunch command — for
+//! *most* PWAs. Brave/Helium "flextop" PWAs are the exception (see below).
+//!
+//! ## When the window app_id isn't the StartupWMClass
+//!
+//! Brave-on-Flatpak "flextop" PWAs report a Wayland `app_id` of the launcher's
+//! `Icon` / desktop-file id — e.g. `brave-<id>-Default` — which never equals their
+//! `StartupWMClass` (`crx_<id>`). Matching only on `StartupWMClass` misses them entirely,
+//! so the whole browser reopens instead of the app. To cover them, an SSB launcher is
+//! indexed under several keys the `app_id` might present as: its `StartupWMClass`, its
+//! `Icon`, its desktop-file id (filename stem), and that id's last dot-separated
+//! component (the `brave-<id>-Default` tail). Handily, that tail embeds the browser name,
+//! so it disambiguates colliding launchers on its own.
 //!
 //! ## Scope
 //!
 //! This is a deliberately small slice of desktop-file tracking (the codebase otherwise
-//! has none — see `src/dbus/gnome_shell_introspect.rs`). It indexes only the
-//! `[Desktop Entry]` group's `StartupWMClass` + `Exec`, and [`ssb_launch_argv`] gates
-//! on the SSB markers `--app-id=` / `--app=` so only PWA windows ever get the captured
-//! command; everything else keeps the existing generic relaunch behaviour.
+//! has none — see `src/dbus/gnome_shell_introspect.rs`). It reads only the
+//! `[Desktop Entry]` group's `StartupWMClass`, `Icon`, and `Exec`, and [`ssb_launch_argv`]
+//! gates on the SSB markers `--app-id=` / `--app=` so only PWA windows ever get the
+//! captured command; everything else keeps the existing generic relaunch behaviour.
 //!
 //! ## Colliding launchers
 //!
@@ -44,7 +56,7 @@
 //! highest-precedence entry.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Field codes a desktop `Exec` may contain (per the Desktop Entry Spec). They are
 /// expanded by the *launcher* with file/URL arguments; for a respawn we have none, so
@@ -153,10 +165,22 @@ fn application_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Scan `dirs` in order, returning the `StartupWMClass` → candidate-argvs index. All
-/// matching desktop files are kept per class, in scan order (highest-precedence first),
-/// so colliding launchers can be disambiguated later. Split out from
-/// [`index_startup_wm_classes`] so tests can point it at a fixture dir.
+/// A parsed `[Desktop Entry]`: its `Exec`, plus the identifiers a window's Wayland
+/// `app_id` might equal so we can match the two.
+struct DesktopEntry {
+    /// `StartupWMClass` — the canonical app_id ↔ window mapping, e.g. `crx_<id>`.
+    wm_class: Option<String>,
+    /// `Icon` — Chromium/Brave "flextop" PWAs set the *window* app_id to this
+    /// (e.g. `brave-<id>-Default`), which does NOT equal their `StartupWMClass`.
+    icon: Option<String>,
+    exec: String,
+}
+
+/// Scan `dirs` in order, returning an app_id → candidate-argvs index. Each desktop file
+/// is indexed under every identifier a window's `app_id` might present as (see
+/// [`DesktopEntry`]); all matching launchers are kept per key, in scan order
+/// (highest-precedence first), so colliding launchers can be disambiguated later. Split
+/// out from [`index_startup_wm_classes`] so tests can point it at a fixture dir.
 fn index_dirs(dirs: &[PathBuf]) -> HashMap<String, Vec<Vec<String>>> {
     let mut map: HashMap<String, Vec<Vec<String>>> = HashMap::new();
 
@@ -173,15 +197,19 @@ fn index_dirs(dirs: &[PathBuf]) -> HashMap<String, Vec<Vec<String>>> {
             let Ok(contents) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let Some((wm_class, exec)) = parse_desktop_entry(&contents) else {
+            let Some(parsed) = parse_desktop_entry(&contents) else {
                 continue;
             };
-            let argv = parse_exec(&exec);
-            // Keep every launcher for the class; identical duplicates (the same app
-            // exported into several dirs) collapse so they don't crowd the candidates.
-            let candidates = map.entry(wm_class).or_default();
-            if !candidates.contains(&argv) {
-                candidates.push(argv);
+            let argv = parse_exec(&parsed.exec);
+
+            for key in app_id_keys(&path, &parsed, &argv) {
+                // Keep every launcher for a key; identical duplicates (the same
+                // app exported into several dirs) collapse so they don't crowd
+                // the candidates.
+                let candidates = map.entry(key).or_default();
+                if !candidates.contains(&argv) {
+                    candidates.push(argv.clone());
+                }
             }
         }
     }
@@ -189,13 +217,43 @@ fn index_dirs(dirs: &[PathBuf]) -> HashMap<String, Vec<Vec<String>>> {
     map
 }
 
-/// Extract `(StartupWMClass, Exec)` from the `[Desktop Entry]` group only.
+/// The keys a window's `app_id` might equal for this desktop file.
+///
+/// `StartupWMClass` is the canonical mapping and is always indexed. For SSB launchers we
+/// *also* index the identifiers browsers use when the window app_id isn't the
+/// `StartupWMClass`: the `Icon` value and the desktop-file id (its filename stem) plus the
+/// stem's last dot-separated component — that tail is exactly the `brave-<id>-Default`
+/// form a Brave "flextop" PWA reports. Restricting the extra keys to SSB launchers keeps
+/// generic app icons/filenames out of the index.
+fn app_id_keys(path: &Path, parsed: &DesktopEntry, argv: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    if let Some(wm) = &parsed.wm_class {
+        keys.push(wm.clone());
+    }
+    if is_ssb(argv) {
+        if let Some(icon) = &parsed.icon {
+            keys.push(icon.clone());
+        }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            keys.push(stem.to_owned());
+            if let Some(tail) = stem.rsplit('.').next() {
+                keys.push(tail.to_owned());
+            }
+        }
+    }
+    keys.dedup();
+    keys
+}
+
+/// Extract the [`DesktopEntry`] from the `[Desktop Entry]` group only.
 ///
 /// Stops at the first action/other group header (`[Desktop Action …]`) so per-action
-/// `Exec` lines don't shadow the main one. Returns `None` unless both keys are present.
-fn parse_desktop_entry(contents: &str) -> Option<(String, String)> {
+/// `Exec` lines don't shadow the main one. Returns `None` unless `Exec` is present
+/// (`StartupWMClass`/`Icon` are optional — a launcher can still be matched by filename).
+fn parse_desktop_entry(contents: &str) -> Option<DesktopEntry> {
     let mut in_entry = false;
     let mut wm_class = None;
+    let mut icon = None;
     let mut exec = None;
 
     for line in contents.lines() {
@@ -212,12 +270,17 @@ fn parse_desktop_entry(contents: &str) -> Option<(String, String)> {
         };
         match key.trim() {
             "StartupWMClass" => wm_class = Some(value.trim().to_string()),
+            "Icon" => icon = Some(value.trim().to_string()),
             "Exec" => exec = Some(value.trim().to_string()),
             _ => {}
         }
     }
 
-    Some((wm_class?, exec?))
+    Some(DesktopEntry {
+        wm_class,
+        icon,
+        exec: exec?,
+    })
 }
 
 /// Tokenize a desktop `Exec` value into an argv, stripping field codes.
@@ -335,22 +398,26 @@ mod tests {
 [Desktop Entry]
 Name=YouTube
 StartupWMClass=crx_abc
+Icon=brave-abc-Default
 Exec=flatpak run net.imput.helium --app-id=abc
 
 [Desktop Action Search]
 Name=Search
 Exec=flatpak run net.imput.helium --app-id=abc --app-launch-url=https://x/search
 ";
-        let (wm, exec) = parse_desktop_entry(contents).unwrap();
-        assert_eq!(wm, "crx_abc");
+        let parsed = parse_desktop_entry(contents).unwrap();
+        assert_eq!(parsed.wm_class.as_deref(), Some("crx_abc"));
+        assert_eq!(parsed.icon.as_deref(), Some("brave-abc-Default"));
         // The action group's Exec must NOT shadow the main one.
-        assert_eq!(exec, "flatpak run net.imput.helium --app-id=abc");
+        assert_eq!(parsed.exec, "flatpak run net.imput.helium --app-id=abc");
     }
 
     #[test]
-    fn parse_desktop_entry_requires_both_keys() {
-        assert!(parse_desktop_entry("[Desktop Entry]\nExec=foo\n").is_none());
+    fn parse_desktop_entry_requires_exec() {
+        // Exec is mandatory; the identifying keys are optional (a launcher can
+        // still be matched by its filename).
         assert!(parse_desktop_entry("[Desktop Entry]\nStartupWMClass=bar\n").is_none());
+        assert!(parse_desktop_entry("[Desktop Entry]\nExec=foo\n").is_some());
     }
 
     #[test]
@@ -390,6 +457,69 @@ Exec=flatpak run net.imput.helium --app-id=abc --app-launch-url=https://x/search
         assert_eq!(ssb_launch_argv("org.kde.konsole", None, None, &index), None);
         // Unknown class: absent.
         assert_eq!(ssb_launch_argv("crx_missing", None, None, &index), None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flextop_pwa_matched_by_window_app_id_not_startup_wm_class() {
+        // The real Brave/Helium "flextop" case: the window's Wayland app_id is the
+        // launcher's Icon / desktop-file id (`<browser>-<id>-Default`), NOT the
+        // `StartupWMClass` (`crx_<id>`). Both browsers exported the same web app,
+        // so their StartupWMClass collides — but the app_id embeds the browser,
+        // so it resolves the right launcher on its own.
+        let dir = tmp_dir();
+        std::fs::write(
+            dir.join("com.brave.Browser.flextop.brave-yt-Default.desktop"),
+            "[Desktop Entry]\nName=YouTube\nStartupWMClass=crx_yt\n\
+             Icon=brave-yt-Default\n\
+             Exec=flatpak 'run' '--command=brave' 'com.brave.Browser' '--app-id=yt'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("net.imput.helium.flextop.chrome-yt-Default.desktop"),
+            "[Desktop Entry]\nName=YouTube\nStartupWMClass=crx_yt\n\
+             Icon=chrome-yt-Default\n\
+             Exec=flatpak 'run' '--command=/app/bin/helium' 'net.imput.helium' '--app-id=yt'\n",
+        )
+        .unwrap();
+
+        let index = index_dirs(&[dir.clone()]);
+
+        let brave = vec![
+            "flatpak".to_string(),
+            "run".into(),
+            "--command=brave".into(),
+            "com.brave.Browser".into(),
+            "--app-id=yt".into(),
+        ];
+
+        // The Brave window's actual app_id — matched via Icon and the desktop-file
+        // id's trailing component, resolving to Brave's launcher unambiguously.
+        assert_eq!(
+            ssb_launch_argv("brave-yt-Default", Some("com.brave.Browser"), None, &index),
+            Some(brave.clone()),
+        );
+        assert_eq!(
+            ssb_launch_argv(
+                "com.brave.Browser.flextop.brave-yt-Default",
+                Some("com.brave.Browser"),
+                None,
+                &index,
+            ),
+            Some(brave),
+        );
+        // Helium's app_id resolves to Helium's launcher.
+        assert_eq!(
+            ssb_launch_argv("chrome-yt-Default", Some("net.imput.helium"), None, &index),
+            Some(vec![
+                "flatpak".into(),
+                "run".into(),
+                "--command=/app/bin/helium".into(),
+                "net.imput.helium".into(),
+                "--app-id=yt".into(),
+            ]),
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -517,3 +647,4 @@ Exec=flatpak run net.imput.helium --app-id=abc --app-launch-url=https://x/search
         let _ = std::fs::remove_dir_all(low);
     }
 }
+
