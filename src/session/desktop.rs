@@ -109,6 +109,17 @@ fn is_ssb(argv: &[String]) -> bool {
         .any(|a| a.starts_with("--app-id=") || a.starts_with("--app="))
 }
 
+/// Whether a window's `app_id` belongs to an installed PWA / site-specific browser —
+/// i.e. it matches an indexed `.desktop` launcher carrying an SSB marker
+/// (`--app-id=`/`--app=`). Same matching keys as [`ssb_launch_argv`] (StartupWMClass,
+/// Icon, desktop-file id), without needing the owner hints. Build the `index` once with
+/// [`index_startup_wm_classes`].
+pub fn is_pwa(app_id: &str, index: &HashMap<String, Vec<Vec<String>>>) -> bool {
+    index
+        .get(app_id)
+        .is_some_and(|candidates| candidates.iter().any(|a| is_ssb(a)))
+}
+
 /// Pick the candidate whose launcher belongs to the running window's owner.
 ///
 /// A flatpak PWA's `Exec` carries its browser's flatpak id as a bare token
@@ -457,6 +468,33 @@ Exec=flatpak run net.imput.helium --app-id=abc --app-launch-url=https://x/search
         assert_eq!(ssb_launch_argv("org.kde.konsole", None, None, &index), None);
         // Unknown class: absent.
         assert_eq!(ssb_launch_argv("crx_missing", None, None, &index), None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_pwa_detects_ssb_launchers_only() {
+        let dir = tmp_dir();
+        std::fs::write(
+            dir.join("pwa.desktop"),
+            "[Desktop Entry]\nStartupWMClass=crx_abc\nIcon=brave-abc-Default\n\
+             Exec=flatpak run com.brave.Browser --app-id=abc\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("plain.desktop"),
+            "[Desktop Entry]\nStartupWMClass=org.kde.konsole\nExec=konsole %u\n",
+        )
+        .unwrap();
+        let index = index_dirs(&[dir.clone()]);
+
+        // PWA app_id — via StartupWMClass and via the Icon / flextop app_id form.
+        assert!(is_pwa("crx_abc", &index));
+        assert!(is_pwa("brave-abc-Default", &index));
+        // Plain app: indexed but not an SSB, so not a PWA.
+        assert!(!is_pwa("org.kde.konsole", &index));
+        // Unknown app_id.
+        assert!(!is_pwa("firefox", &index));
 
         let _ = std::fs::remove_dir_all(dir);
     }

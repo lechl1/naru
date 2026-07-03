@@ -168,7 +168,21 @@ impl CompositorHandler for State {
                             ws.map(|ws| ws.has_window_with_app_id(&app))
                         })
                         .unwrap_or(false);
-                    let is_floating = rules.compute_open_floating(toplevel, same_app);
+                    let mut is_floating = rules.compute_open_floating(toplevel, same_app);
+                    // PWAs (Chromium site-specific browsers) should open tiled as a
+                    // new column, not floating — a PWA otherwise auto-floats as a
+                    // fixed-size or same-app secondary window. Only override the
+                    // *auto* decision (an explicit `open-floating` window rule still
+                    // wins), and only pay for the `.desktop` scan when a window would
+                    // actually float, which is the uncommon case.
+                    if is_floating && rules.open_floating.is_none() {
+                        if let Some(app_id) = with_toplevel_role(toplevel, |r| r.app_id.clone()) {
+                            let index = crate::session::index_startup_wm_classes();
+                            if crate::session::is_pwa(&app_id, &index) {
+                                is_floating = false;
+                            }
+                        }
+                    }
 
                     // Figure out if we should activate the window.
                     let activate = rules.open_focused.map(|focus| {
