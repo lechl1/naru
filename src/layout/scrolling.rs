@@ -1940,12 +1940,25 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             perm[*slot_idx] = old_slot_of(&present[k]).expect("present id has a slot");
         }
 
+        // Each column's on-screen x before the permute, so the ones that move can
+        // animate from where they were rather than snapping to their new slot.
+        let old_x: Vec<f64> = (0..self.columns.len()).map(|i| self.column_x(i)).collect();
+
         // Apply the permutation to columns + their cached data in lockstep.
         let mut cols: Vec<Option<Column<W>>> = self.columns.drain(..).map(Some).collect();
         let mut data: Vec<Option<ColumnData>> = self.data.drain(..).map(Some).collect();
         for &src in &perm {
             self.columns.push(cols[src].take().expect("permutation visits each once"));
             self.data.push(data[src].take().expect("permutation visits each once"));
+        }
+
+        // Slide each moved column from its old x to its new one so the windows visibly
+        // reposition instead of jumping.
+        for (new_idx, &src) in perm.iter().enumerate() {
+            if src != new_idx {
+                let from = old_x[src] - self.column_x(new_idx);
+                self.columns[new_idx].animate_move_from(from);
+            }
         }
 
         // Keep the same window active.

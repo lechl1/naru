@@ -1515,8 +1515,14 @@ mod tests {
         let changed = sim
             .layout
             .reorder_workspace_single_window_columns(ws, &[d, b]);
-        sim.settle();
         assert!(changed, "reorder reported a change");
+        // The swapped columns reposition with an animation rather than snapping.
+        sim.update_render_elements();
+        assert!(
+            sim.are_animations_ongoing(),
+            "swapped windows should slide into place, not jump",
+        );
+        sim.settle();
         assert_eq!(order(&sim), vec![a, d, c, b]);
         // The active window is unchanged even though its column moved.
         sim.assert_active(Some(d));
