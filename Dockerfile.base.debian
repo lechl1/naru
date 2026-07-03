@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.7
+# EXPERIMENTAL comparison base — Debian, official `rust` image.
+#
+# This mirrors Dockerfile.base but starts from the Docker Official `rust` image
+# (Debian) instead of ubuntu:26.04 + rustup. Purpose: compare image size and
+# build time against the Ubuntu base.
+#
+#   docker buildx build -f Dockerfile.base.debian -t naru-build-base:debian .
+#   docker image ls naru-build-base   # size comparison
+#
+# ⚠️  NOT a drop-in for the production build. Dockerfile.base is pinned to
+#     ubuntu:26.04 by digest *on purpose* (see its header): the export binary's
+#     NEEDED sonames must match the host runtime. Built here on Debian, the
+#     binary links against Debian's glibc/library versions and may fail to load
+#     on the Ubuntu 26.04 host. Only ship a Debian-built binary if the runtime
+#     image is the matching Debian too.
+#
+# The `rust` image ships cargo + rustc + rustup, so the rustup curl-install step
+# from Dockerfile.base is gone. `1.96.1` is the newest stable at time of writing
+# (2026-06-26); it tracks 1.96.x patch releases — use `rust:1.96.1` for an exact
+# pin. `-slim` drops docs/extra components we don't need (we install our own
+# build toolchain below anyway).
+FROM rust:1.96.1-slim-bookworm
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Same Wayland/graphics *-dev set as Dockerfile.base. Package names are identical
+# to Ubuntu's for all of these EXCEPT possibly `libdisplay-info-dev`, which is
+# newer — verify it resolves on your Debian release; if not, switch the base tag
+# to `-trixie` (Debian 13) or enable bookworm-backports for it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config ca-certificates \
+        build-essential clang libclang-dev \
+        libssl-dev libsystemd-dev \
+        libudev-dev libseat-dev libinput-dev \
+        libwayland-dev wayland-protocols libxkbcommon-dev \
+        libdrm-dev libgbm-dev libegl-dev libgles-dev \
+        libpixman-1-dev libdisplay-info-dev libdbus-1-dev \
+        libcairo2-dev libpango1.0-dev \
+        libpipewire-0.3-dev libspa-0.2-dev \
+        libxcb1-dev libxkbcommon-x11-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# rustc/cargo already on PATH from the base image. Sanity-print the version so a
+# tag bump is visible in the build log.
+RUN rustc --version && cargo --version

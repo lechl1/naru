@@ -38,7 +38,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxcb1-dev libxkbcommon-x11-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Pin rust via rustup (Ubuntu's apt-shipped rustc lags behind upstream).
+# Pin rust via rustup (Ubuntu's apt-shipped rustc lags behind upstream). 1.96.1
+# is the newest stable (2026-06-26); rustup pins it exactly. Well above the
+# workspace MSRV (Cargo.toml `rust-version`), which stays lower on purpose.
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain 1.88.0 --profile minimal --no-modify-path
+    | sh -s -- -y --default-toolchain 1.96.1 --profile minimal --no-modify-path
