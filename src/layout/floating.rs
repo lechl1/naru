@@ -404,11 +404,26 @@ impl<W: LayoutElement> FloatingSpace<W> {
         self.tiles.is_empty()
     }
 
-    pub fn add_tile(&mut self, tile: Tile<W>, activate: bool) {
-        self.add_tile_at(0, tile, activate);
+    /// Add a floating tile. `center_on`, when set, is the rectangle a fresh (no stored
+    /// position) window should be centered over — used to drop a popup/dialog on top of
+    /// its owning window instead of the middle of the screen. Ignored if the window
+    /// already has a remembered position.
+    pub fn add_tile(
+        &mut self,
+        tile: Tile<W>,
+        activate: bool,
+        center_on: Option<Rectangle<f64, Logical>>,
+    ) {
+        self.add_tile_at(0, tile, activate, center_on);
     }
 
-    fn add_tile_at(&mut self, mut idx: usize, mut tile: Tile<W>, activate: bool) {
+    fn add_tile_at(
+        &mut self,
+        mut idx: usize,
+        mut tile: Tile<W>,
+        activate: bool,
+        center_on: Option<Rectangle<f64, Logical>>,
+    ) {
         tile.update_config(self.view_size, self.scale, self.options.clone());
 
         // Restore the previous floating window size, and in case the tile is fullscreen,
@@ -447,7 +462,17 @@ impl<W: LayoutElement> FloatingSpace<W> {
         }
 
         let pos = self.stored_or_default_tile_pos(&tile).unwrap_or_else(|| {
-            center_preferring_top_left_in_area(self.working_area, tile.tile_size())
+            let size = tile.tile_size();
+            match center_on {
+                // Center over the owner window, then keep it fully on-screen.
+                Some(owner) => {
+                    let mut rect =
+                        Rectangle::new(center_preferring_top_left_in_area(owner, size), size);
+                    clamp_preferring_top_left_in_area(self.working_area, &mut rect);
+                    rect.loc
+                }
+                None => center_preferring_top_left_in_area(self.working_area, size),
+            }
         });
 
         let data = Data::new(self.working_area, &tile, pos);
@@ -467,7 +492,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let pos = self.clamp_within_working_area(pos, tile_size);
         tile.floating_pos = Some(self.logical_to_size_frac(pos));
 
-        self.add_tile_at(idx, tile, activate);
+        self.add_tile_at(idx, tile, activate, None);
     }
 
     fn bring_up_descendants_of(&mut self, idx: usize) {

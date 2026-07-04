@@ -913,6 +913,28 @@ impl<W: LayoutElement> Workspace<W> {
         )
     }
 
+    /// The visual rectangle a newly-floating popup should be centered over: its declared
+    /// parent window if it has one, otherwise the active window when that shares the
+    /// popup's `app_id` — a fixed-size dialog (color picker, open-file, …) that didn't
+    /// declare a parent but plainly belongs to the app the user was just using. Centering
+    /// on this drops the popup on top of its owner instead of the middle of the screen.
+    /// `None` when no owner is found, in which case placement falls back to screen-center.
+    fn floating_owner_rect(&self, popup: &W) -> Option<Rectangle<f64, Logical>> {
+        let owner_id = self
+            .windows()
+            .find(|w| popup.is_child_of(w))
+            .map(|w| w.id().clone())
+            .or_else(|| {
+                let app_id = popup.app_id()?;
+                self.active_window()
+                    .filter(|w| {
+                        w.id() != popup.id() && w.app_id().as_deref() == Some(app_id.as_str())
+                    })
+                    .map(|w| w.id().clone())
+            })?;
+        self.popup_target_rect(&owner_id)
+    }
+
     pub fn add_tile(
         &mut self,
         mut tile: Tile<W>,
@@ -933,7 +955,8 @@ impl<W: LayoutElement> Workspace<W> {
                 // If the tile is pending maximized or fullscreen, open it in the scrolling layout
                 // where it can do that.
                 if is_floating && tile.window().pending_sizing_mode().is_normal() {
-                    self.floating.add_tile(tile, activate);
+                    let center_on = self.floating_owner_rect(tile.window());
+                    self.floating.add_tile(tile, activate, center_on);
 
                     if activate || self.scrolling.is_empty() {
                         self.floating_is_active = FloatingActive::Yes;
@@ -999,7 +1022,7 @@ impl<W: LayoutElement> Workspace<W> {
                         let pos = self.floating.logical_to_size_frac(pos);
                         tile.floating_pos = Some(pos);
 
-                        self.floating.add_tile(tile, activate);
+                        self.floating.add_tile(tile, activate, None);
                     }
 
                     if activate || self.scrolling.is_empty() {
@@ -2067,7 +2090,7 @@ impl<W: LayoutElement> Workspace<W> {
                 removed.tile.floating_pos = Some(pos);
             }
 
-            self.floating.add_tile(removed.tile, target_is_active);
+            self.floating.add_tile(removed.tile, target_is_active, None);
             if target_is_active {
                 self.floating_is_active = FloatingActive::Yes;
             }
