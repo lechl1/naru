@@ -3756,7 +3756,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     ///
     /// Re-centers the row afterwards. No-op when the carousel is enabled or
     /// empty.
-    pub fn fit_columns_to_parent(&mut self) {
+    pub fn fit_columns_to_parent(&mut self, animate: bool) {
         if !self.options.layout.disable_carousel || self.columns.is_empty() {
             return;
         }
@@ -3797,7 +3797,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         };
 
         for (col, data) in zip(&mut self.columns, &mut self.data) {
-            col.set_fit_scale(factor, true);
+            col.set_fit_scale(factor, animate);
             cancel_resize_for_column(&mut self.interactive_resize, col);
             data.update(col);
         }
