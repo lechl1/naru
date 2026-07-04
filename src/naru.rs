@@ -6822,13 +6822,27 @@ fn order_windows_by_saved_titles<Id: Clone>(
     let mut used = vec![false; n];
     let mut matched = 0usize;
 
-    // Assign each saved slot the current window with that exact, non-empty title.
+    // Count each current title. A title shared by two or more current windows is
+    // ambiguous — the windows can't be told apart by name — so we never match, and thus
+    // never move, a window by such a title. Two same-named windows (e.g. two Konsoles
+    // showing the same title) therefore stay where they are instead of swapping places
+    // forever.
+    let mut title_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for (_, t) in current {
+        if let Some(t) = t.as_deref().filter(|t| !t.is_empty()) {
+            *title_counts.entry(t).or_insert(0) += 1;
+        }
+    }
+    let unique = |t: &str| title_counts.get(t) == Some(&1);
+
+    // Assign each saved slot the current window with that exact, non-empty, *unique* title.
     let slots: Vec<Option<usize>> = desired_titles
         .iter()
         .map(|dt| {
             let pick = dt
                 .as_deref()
-                .filter(|t| !t.is_empty())
+                .filter(|t| !t.is_empty() && unique(t))
                 .and_then(|t| (0..n).find(|&i| !used[i] && current[i].1.as_deref() == Some(t)));
             if let Some(i) = pick {
                 used[i] = true;
@@ -6851,11 +6865,18 @@ fn order_windows_by_saved_titles<Id: Clone>(
         order.push(current[i].0.clone());
     }
 
+    // A saved title whose name is duplicated among the current windows can never be
+    // satisfied, so drop it from the target — otherwise a same-name group would poll
+    // forever. A title that simply hasn't appeared yet (count 0, still loading) stays
+    // counted, so we keep polling until it settles.
     let want = desired_titles
         .iter()
-        .filter(|t| t.as_deref().is_some_and(|t| !t.is_empty()))
+        .filter(|t| {
+            t.as_deref()
+                .is_some_and(|t| !t.is_empty() && title_counts.get(t).copied().unwrap_or(0) <= 1)
+        })
         .count();
-    (order, want > 0 && matched == want)
+    (order, matched == want)
 }
 
 #[cfg(test)]
@@ -6890,11 +6911,34 @@ mod title_reconcile_tests {
     }
 
     #[test]
-    fn duplicate_titles_consume_one_window_each() {
-        let desired = vec![Some("Same".into()), Some("Same".into())];
-        let current = cur(&[(1, Some("Same")), (2, Some("Same"))]);
-        let (order, done) = order_windows_by_saved_titles(&desired, &current);
-        assert_eq!(order, vec![1, 2]);
+    fn same_name_windows_are_never_swapped() {
+        // Two windows with the same title can't be told apart, so they must keep their
+        // *current* order regardless of the saved order — the function returns them
+        // unchanged either way, so the reorder is a no-op and they never swap forever.
+        let desired = vec![Some("Konsole".into()), Some("Konsole".into())];
+        let (order_a, done_a) =
+            order_windows_by_saved_titles(&desired, &cur(&[(1, Some("Konsole")), (2, Some("Konsole"))]));
+        let (order_b, done_b) =
+            order_windows_by_saved_titles(&desired, &cur(&[(2, Some("Konsole")), (1, Some("Konsole"))]));
+        assert_eq!(order_a, vec![1, 2], "kept in current order");
+        assert_eq!(order_b, vec![2, 1], "kept in current order (reversed), not swapped back");
+        assert!(done_a && done_b, "nothing orderable → stop polling, don't churn");
+    }
+
+    #[test]
+    fn same_name_windows_stay_put_while_a_unique_one_is_placed() {
+        // The uniquely-named window is ordered to its saved slot; the two same-named
+        // windows keep their current relative order (never swapped with each other).
+        let desired = vec![
+            Some("Editor".into()),
+            Some("Konsole".into()),
+            Some("Konsole".into()),
+        ];
+        let (order, done) = order_windows_by_saved_titles(
+            &desired,
+            &cur(&[(1, Some("Konsole")), (2, Some("Konsole")), (3, Some("Editor"))]),
+        );
+        assert_eq!(order, vec![3, 1, 2], "Editor to slot 0; Konsoles stay 1-before-2");
         assert!(done);
     }
 
