@@ -1,22 +1,31 @@
 #!/usr/bin/env bash
 # Installs the naru binary and session resources system-wide on Debian/Ubuntu.
-# Run with: sudo ./scripts/install.sh
+# Run with: ./scripts/install.sh  (it re-runs the install step under sudo itself).
 #
+# Standalone: if the binary isn't built yet it builds it first via
+# scripts/build.sh (a plain `cargo build`), so no external tooling is needed.
 # This makes naru appear as a Wayland session option in your display manager.
 set -euo pipefail
 
-if [[ $EUID -ne 0 ]]; then
-    echo "Re-running with sudo..."
-    exec sudo --preserve-env=PATH "$0" "$@"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="$REPO_ROOT/target/debug/naru"
+
+# Build the binary if it isn't present. Done before the sudo re-exec so the
+# build runs as the invoking user (cargo artifacts stay user-owned) — when the
+# script is launched directly as root, build as $SUDO_USER for the same reason.
+if [[ ! -x "$BIN" ]]; then
+    echo "$BIN not found — building it first."
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" "$REPO_ROOT/scripts/build.sh"
+    else
+        "$REPO_ROOT/scripts/build.sh"
+    fi
 fi
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$REPO_ROOT/target/release/naru"
-
-if [[ ! -x "$BIN" ]]; then
-    echo "ERROR: $BIN not found. Build first with:"
-    echo "  cargo build --release --bin naru"
-    exit 1
+# Everything below writes system paths, so it needs root.
+if [[ $EUID -ne 0 ]]; then
+    echo "Re-running install step with sudo..."
+    exec sudo --preserve-env=PATH "$0" "$@"
 fi
 
 echo "Installing naru from $REPO_ROOT ..."

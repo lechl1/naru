@@ -2,16 +2,10 @@
 #
 # Recipes:
 #   just setup    — install build dependencies (auto-detects apt / dnf / pacman / apk).
-#                   Only needed for `just test` and host-side hacking; `just build`
-#                   runs inside the Docker builder image so the host does not need
-#                   rustup or any of the *-dev packages.
-#   just build-base — (re)build the prebuilt apt + rust base image. Run this
-#                   after changing the dep set or Rust pin in Dockerfile.base;
-#                   `just build` builds it automatically when it is missing.
-#   just build    — build the naru binary via docker buildx using Dockerfile.alloy
-#                   (FROM the prebuilt base) and extract it into target/release/naru
+#                   Needed for `just build`, `just test`, and host-side hacking.
+#   just build    — build the naru binary with cargo (dev profile) into target/debug/naru
 #   just test     — run the workspace test suite (excludes naru-visual-tests)
-#   just install  — build (docker buildx) and install system-wide via scripts/install.sh
+#   just install  — build (cargo) and install system-wide via scripts/install.sh
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
@@ -72,26 +66,11 @@ setup:
 # and doesn't re-run on every code build. Rebuild after changing the dep set or
 # the Rust pin in Dockerfile.base; `build` below does this automatically when
 # the image is missing.
-build-base:
-    docker buildx build --file Dockerfile.base --tag naru-build-base:26.04 --load .
-
+# Dev build via cargo into target/debug/naru. Needs the host toolchain + build
+# deps (`just setup`). scripts/build.sh is the same one-liner, reused by
+# scripts/install.sh so a bare `./scripts/install.sh` builds on its own.
 build:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Ensure the prebuilt base exists (apt + rust). Built once, then reused by
-    # every code build — this is what keeps the package install off the hot path.
-    if ! docker image inspect naru-build-base:26.04 >/dev/null 2>&1; then
-        docker buildx build --file Dockerfile.base --tag naru-build-base:26.04 --load .
-    fi
-    out=$(mktemp -d -t naru-build-XXXXXX)
-    trap 'rm -rf "$out"' EXIT
-    docker buildx build \
-        --target export \
-        --file Dockerfile.alloy \
-        --output "type=local,dest=$out" \
-        .
-    mkdir -p target/release
-    install -m 0755 "$out/naru" target/release/naru
+    ./scripts/build.sh
 
 # Run the workspace test suite. Excludes naru-visual-tests (development-only).
 test:
@@ -102,13 +81,13 @@ test:
 # Dark and the display manager to SDDM *only when neither is already set* —
 # existing, working choices are never overridden.
 #
-# The sudo password is prompted up front (before the slow docker build) so
+# The sudo password is prompted up front (before the slow release build) so
 # the install does not stall at a password prompt minutes later. A
 # background keep-alive refreshes the sudo timestamp for the duration of the
 # build, so the privileged step still runs without re-prompting even if the
 # build outlasts sudo's default credential timeout.
 #
-# Install system-wide: build (docker buildx), then install under sudo.
+# Install system-wide: build (cargo), then install under sudo.
 install:
     #!/usr/bin/env bash
     set -euo pipefail
