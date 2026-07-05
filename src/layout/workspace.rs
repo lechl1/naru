@@ -96,6 +96,31 @@ fn ultrawide_default_column_width(
     })
 }
 
+/// Default column width for a media-player window (app_id in `media_player_app_ids`): the
+/// `ultrawide` width on ultrawide views (≥ 21:9), otherwise the `normal` width. Unlike the
+/// terminal ultrawide default, this applies on every aspect ratio and takes precedence over the
+/// global `default-column-width`. Returns `None` when the window isn't a media player, so the
+/// caller falls through to the usual width defaults.
+fn media_player_default_column_width(
+    view_size: Size<f64, Logical>,
+    app_id: Option<&str>,
+    media_player_app_ids: &[String],
+    normal: PresetSize,
+    ultrawide: PresetSize,
+) -> Option<PresetSize> {
+    let is_media = app_id
+        .map(|id| media_player_app_ids.iter().any(|t| t == id))
+        .unwrap_or(false);
+    if !is_media {
+        return None;
+    }
+    Some(if is_ultrawide_view(view_size) {
+        ultrawide
+    } else {
+        normal
+    })
+}
+
 #[derive(Debug)]
 pub struct Workspace<W: LayoutElement> {
     /// The scrollable-tiling layout.
@@ -1165,7 +1190,18 @@ impl<W: LayoutElement> Workspace<W> {
             Some(Some(width)) => Some(width),
             Some(None) => None,
             None if is_floating => None,
-            None => self.options.layout.default_column_width.or_else(|| {
+            // Media players get a narrower default (1/5 ultrawide, 1/3 otherwise) that overrides
+            // the global `default-column-width`; other windows fall back to the global default,
+            // then to the ultrawide-only terminal/non-terminal defaults.
+            None => media_player_default_column_width(
+                self.view_size,
+                app_id,
+                &self.options.layout.media_player_app_ids,
+                self.options.layout.media_player_column_width,
+                self.options.layout.media_player_ultrawide_column_width,
+            )
+            .or(self.options.layout.default_column_width)
+            .or_else(|| {
                 ultrawide_default_column_width(
                     self.view_size,
                     app_id,
@@ -3018,4 +3054,62 @@ fn compute_workspace_shadow_config(
     config.offset.y.0 *= norm;
 
     config
+}
+
+#[cfg(test)]
+mod media_player_width_tests {
+    use super::*;
+
+    const NORMAL: PresetSize = PresetSize::Proportion(1. / 3.);
+    const ULTRA: PresetSize = PresetSize::Proportion(1. / 5.);
+
+    fn ids() -> Vec<String> {
+        vec!["mpv".to_owned(), "org.videolan.VLC".to_owned()]
+    }
+
+    #[test]
+    fn non_media_player_falls_through() {
+        // A window not in the list yields None regardless of aspect ratio, so the
+        // caller falls back to the usual default-width resolution.
+        let wide = Size::from((3440., 1440.));
+        assert_eq!(
+            media_player_default_column_width(wide, Some("firefox"), &ids(), NORMAL, ULTRA),
+            None
+        );
+        let hd = Size::from((1920., 1080.));
+        assert_eq!(
+            media_player_default_column_width(hd, Some("firefox"), &ids(), NORMAL, ULTRA),
+            None
+        );
+        assert_eq!(
+            media_player_default_column_width(hd, None, &ids(), NORMAL, ULTRA),
+            None
+        );
+    }
+
+    #[test]
+    fn media_player_narrow_on_normal_wide_on_ultrawide() {
+        // 16:9 → 1/3; 21:9 and 32:10 → 1/5.
+        let hd = Size::from((1920., 1080.));
+        assert_eq!(
+            media_player_default_column_width(hd, Some("mpv"), &ids(), NORMAL, ULTRA),
+            Some(NORMAL)
+        );
+        let uw = Size::from((3440., 1440.)); // ~21.5:9
+        assert_eq!(
+            media_player_default_column_width(uw, Some("mpv"), &ids(), NORMAL, ULTRA),
+            Some(ULTRA)
+        );
+        let superuw = Size::from((5120., 1440.)); // 32:9
+        assert_eq!(
+            media_player_default_column_width(
+                superuw,
+                Some("org.videolan.VLC"),
+                &ids(),
+                NORMAL,
+                ULTRA
+            ),
+            Some(ULTRA)
+        );
+    }
 }

@@ -352,6 +352,44 @@ impl CompositorHandler for State {
                         }
                     };
 
+                    // Media-player default placement: for a freshly-opened window (no
+                    // session entry steering it) whose app_id is configured as a media
+                    // player, and which no window-rule has already given an
+                    // `open-in-fixed-side`, route it into the preferred fixed-side panel
+                    // (default left). Steer the target to the window's output so it
+                    // resolves to `Auto` on that monitor — the panel routing only fires on
+                    // an Auto/Output target, so a named-workspace target would otherwise
+                    // drop the media player into the carousel. The narrower default width
+                    // (1/5 ultrawide, 1/3 otherwise) is applied separately in
+                    // `resolve_default_width`.
+                    let target = if saved_entry.is_none()
+                        && mapped.rules().open_in_fixed_side.is_none()
+                    {
+                        let (media_ids, media_side) = {
+                            let config = self.naru.config.borrow();
+                            (
+                                config.layout.media_player_app_ids.clone(),
+                                config.layout.media_player_open_in_fixed_side,
+                            )
+                        };
+                        match media_side {
+                            Some(side)
+                                if mapped
+                                    .app_id()
+                                    .is_some_and(|id| media_ids.iter().any(|m| m == &id)) =>
+                            {
+                                mapped.set_open_in_fixed_side(Some(side));
+                                match &output {
+                                    Some(o) => AddWindowTarget::Output(o),
+                                    None => AddWindowTarget::Auto,
+                                }
+                            }
+                            _ => target,
+                        }
+                    } else {
+                        target
+                    };
+
                     // If this was the last pending restore entry, leave restore
                     // mode so the placeholder-protection lifts and any never-filled
                     // workspaces are reclaimed. (A bounded settle timer is the

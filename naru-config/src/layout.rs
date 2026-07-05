@@ -1,5 +1,7 @@
+use std::str::FromStr;
+
 use knuffel::errors::DecodeError;
-use naru_ipc::{ColumnDisplay, SizeChange};
+use naru_ipc::{ColumnDisplay, OpenInFixedSide, SizeChange};
 
 use crate::appearance::{
     Border, FocusRing, InsertHint, Shadow, TabIndicator, DEFAULT_BACKGROUND_COLOR,
@@ -51,6 +53,23 @@ pub struct Layout {
     /// ultrawide outputs (≥ 21:9), used only when the global `default-column-width` is unset.
     /// Default is 1/5 of the view width.
     pub ultrawide_terminal_column_width: PresetSize,
+    /// XDG app IDs treated as media players. A window in this list opens at
+    /// `media_player_ultrawide_column_width` (default 1/5) on ultrawide outputs (≥ 21:9), or
+    /// `media_player_column_width` (default 1/3) otherwise — overriding the global
+    /// `default-column-width` — and, unless a window-rule already sets `open-in-fixed-side`, is
+    /// routed into the `media_player_open_in_fixed_side` panel (default left). Default is empty;
+    /// populate via `layout { media-player-app-ids "mpv" "vlc" ... }`.
+    pub media_player_app_ids: Vec<String>,
+    /// Default column width for media-player windows on non-ultrawide outputs. Applied over the
+    /// global `default-column-width` unless a window-rule sets one explicitly. Default is 1/3.
+    pub media_player_column_width: PresetSize,
+    /// Default column width for media-player windows on ultrawide outputs (≥ 21:9). Applied over
+    /// the global `default-column-width` unless a window-rule sets one explicitly. Default is 1/5.
+    pub media_player_ultrawide_column_width: PresetSize,
+    /// Fixed-side panel that media-player windows prefer to open in, unless a window-rule sets
+    /// `open-in-fixed-side` explicitly. `None` disables the routing (media players then open in
+    /// the carousel like any other window). Default is `Some(Left)`.
+    pub media_player_open_in_fixed_side: Option<OpenInFixedSide>,
 }
 
 impl Default for Layout {
@@ -84,6 +103,10 @@ impl Default for Layout {
             terminal_app_ids: Vec::new(),
             ultrawide_default_column_width: PresetSize::Proportion(1. / 3.),
             ultrawide_terminal_column_width: PresetSize::Proportion(1. / 5.),
+            media_player_app_ids: Vec::new(),
+            media_player_column_width: PresetSize::Proportion(1. / 3.),
+            media_player_ultrawide_column_width: PresetSize::Proportion(1. / 5.),
+            media_player_open_in_fixed_side: Some(OpenInFixedSide::Left),
         }
     }
 }
@@ -132,6 +155,26 @@ impl MergeWith<LayoutPart> for Layout {
             if let Some(v) = x.0 {
                 self.ultrawide_terminal_column_width = v;
             }
+        }
+
+        if let Some(x) = &part.media_player_app_ids {
+            self.media_player_app_ids = x.0.clone();
+        }
+
+        if let Some(x) = part.media_player_column_width {
+            if let Some(v) = x.0 {
+                self.media_player_column_width = v;
+            }
+        }
+
+        if let Some(x) = part.media_player_ultrawide_column_width {
+            if let Some(v) = x.0 {
+                self.media_player_ultrawide_column_width = v;
+            }
+        }
+
+        if let Some(x) = &part.media_player_open_in_fixed_side {
+            self.media_player_open_in_fixed_side = x.to_option();
         }
 
         if self.preset_column_widths.is_empty() {
@@ -186,10 +229,45 @@ pub struct LayoutPart {
     pub ultrawide_default_column_width: Option<DefaultPresetSize>,
     #[knuffel(child)]
     pub ultrawide_terminal_column_width: Option<DefaultPresetSize>,
+    #[knuffel(child)]
+    pub media_player_app_ids: Option<MediaPlayerAppIds>,
+    #[knuffel(child)]
+    pub media_player_column_width: Option<DefaultPresetSize>,
+    #[knuffel(child)]
+    pub media_player_ultrawide_column_width: Option<DefaultPresetSize>,
+    #[knuffel(child, unwrap(argument, str))]
+    pub media_player_open_in_fixed_side: Option<MediaPlayerFixedSide>,
 }
 
 #[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
 pub struct TerminalAppIds(#[knuffel(arguments)] pub Vec<String>);
+
+#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
+pub struct MediaPlayerAppIds(#[knuffel(arguments)] pub Vec<String>);
+
+/// Parsed value of `layout { media-player-open-in-fixed-side "..." }`. Accepts `"left"`,
+/// `"right"`, or `"none"`/`"off"` (the latter disables the media-player panel routing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaPlayerFixedSide(pub Option<OpenInFixedSide>);
+
+impl MediaPlayerFixedSide {
+    pub fn to_option(self) -> Option<OpenInFixedSide> {
+        self.0
+    }
+}
+
+impl FromStr for MediaPlayerFixedSide {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "left" => Ok(Self(Some(OpenInFixedSide::Left))),
+            "right" => Ok(Self(Some(OpenInFixedSide::Right))),
+            "none" | "off" => Ok(Self(None)),
+            _ => Err(r#"invalid media-player fixed side, can be "left", "right", or "none""#),
+        }
+    }
+}
 
 #[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
 pub enum PresetSize {

@@ -827,6 +827,66 @@ mod tests {
     }
 
     #[test]
+    fn parse_media_player_layout() {
+        let config = do_parse(
+            r##"
+            layout {
+                media-player-app-ids "mpv" "org.videolan.VLC"
+                media-player-column-width { proportion 0.25; }
+                media-player-ultrawide-column-width { proportion 0.15; }
+                media-player-open-in-fixed-side "right"
+            }
+            "##,
+        );
+        assert_eq!(
+            config.layout.media_player_app_ids,
+            vec!["mpv".to_owned(), "org.videolan.VLC".to_owned()]
+        );
+        assert_eq!(
+            config.layout.media_player_column_width,
+            PresetSize::Proportion(0.25)
+        );
+        assert_eq!(
+            config.layout.media_player_ultrawide_column_width,
+            PresetSize::Proportion(0.15)
+        );
+        assert_eq!(
+            config.layout.media_player_open_in_fixed_side,
+            Some(naru_ipc::OpenInFixedSide::Right)
+        );
+    }
+
+    #[test]
+    fn media_player_fixed_side_none_disables_routing() {
+        let config = do_parse(
+            r##"
+            layout {
+                media-player-open-in-fixed-side "none"
+            }
+            "##,
+        );
+        assert_eq!(config.layout.media_player_open_in_fixed_side, None);
+    }
+
+    #[test]
+    fn media_player_defaults() {
+        let config = Config::parse_mem("").unwrap();
+        assert!(config.layout.media_player_app_ids.is_empty());
+        assert_eq!(
+            config.layout.media_player_column_width,
+            PresetSize::Proportion(1. / 3.)
+        );
+        assert_eq!(
+            config.layout.media_player_ultrawide_column_width,
+            PresetSize::Proportion(1. / 5.)
+        );
+        assert_eq!(
+            config.layout.media_player_open_in_fixed_side,
+            Some(naru_ipc::OpenInFixedSide::Left)
+        );
+    }
+
+    #[test]
     fn default_repeat_params() {
         let config = Config::parse_mem("").unwrap();
         assert_eq!(config.input.keyboard.repeat_delay, 600);
@@ -1666,6 +1726,16 @@ mod tests {
                 ),
                 ultrawide_terminal_column_width: Proportion(
                     0.2,
+                ),
+                media_player_app_ids: [],
+                media_player_column_width: Proportion(
+                    0.3333333333333333,
+                ),
+                media_player_ultrawide_column_width: Proportion(
+                    0.2,
+                ),
+                media_player_open_in_fixed_side: Some(
+                    Left,
                 ),
             },
             prefer_no_csd: true,
