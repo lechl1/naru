@@ -1482,14 +1482,20 @@ impl<W: LayoutElement> Monitor<W> {
             }
         };
 
-        // Landscape: keep the moved window alone. When the upper neighbour already
-        // holds windows, splice a fresh empty workspace directly above the source
-        // (between the neighbour and the source) and move into it — mirroring how a
-        // horizontal move gives the window its own column. An already-empty upper
-        // neighbour is used directly. Inserting at `source_workspace_idx` shifts the
-        // source down and bumps `active_workspace_idx`, so the new empty workspace is
-        // the one now sitting at `source_workspace_idx`.
-        let dest_idx = if self.is_landscape() && self.workspaces[dest_idx].has_windows() {
+        // Landscape: keep the moved window alone *only when the source workspace still
+        // holds other windows* after this tile leaves. Splitting one window off a
+        // multi-window workspace should give it its own workspace (mirroring how a
+        // horizontal move gives it its own column) rather than merging it into the
+        // populated upper neighbour. But when the source held only this window, the
+        // source is now empty and about to be reclaimed, so merging into the neighbour
+        // is the right move — inserting a workspace there would just leave two of them.
+        // An already-empty upper neighbour is likewise used directly. Splicing at
+        // `source_workspace_idx` shifts the source down and bumps `active_workspace_idx`,
+        // so the new empty workspace is the one now sitting at `source_workspace_idx`.
+        let dest_idx = if self.is_landscape()
+            && self.workspaces[dest_idx].has_windows()
+            && self.workspaces[source_workspace_idx].has_windows()
+        {
             self.add_workspace_at(source_workspace_idx);
             source_workspace_idx
         } else {
@@ -1535,12 +1541,19 @@ impl<W: LayoutElement> Monitor<W> {
             }
         };
 
-        // Landscape: a window moved to an adjacent workspace lands alone. If the
-        // destination already holds windows, splice a fresh empty workspace between
-        // the two and move into that. An already-empty destination — e.g. the
-        // trailing empty workspace — is used directly. `dest_idx` is below the active
-        // workspace, so inserting there leaves `active_workspace_idx` unchanged.
-        if self.is_landscape() && self.workspaces[dest_idx].has_windows() {
+        // Landscape: a window split off a *multi-window* source lands alone. If the
+        // destination already holds windows and the source still holds others after
+        // this tile leaves, splice a fresh empty workspace between the two and move
+        // into that. When the source held only this window it is now empty and about
+        // to be reclaimed, so merging into the populated destination is right — a
+        // spliced workspace would just leave two of them. An already-empty destination
+        // — e.g. the trailing empty workspace — is used directly. `dest_idx` is below
+        // the active workspace, so inserting there leaves `active_workspace_idx`
+        // unchanged.
+        if self.is_landscape()
+            && self.workspaces[dest_idx].has_windows()
+            && self.workspaces[source_workspace_idx].has_windows()
+        {
             self.add_workspace_at(dest_idx);
         }
         let new_id = self.workspaces[dest_idx].id();

@@ -2066,11 +2066,11 @@ fn move_to_workspace_by_idx_does_not_leave_empty_workspaces() {
 }
 
 #[test]
-fn landscape_move_to_workspace_down_splices_empty_when_destination_populated() {
-    // Two windows on adjacent workspaces (win0 on ws0, win1 on ws1). On a landscape
-    // output, moving win0 down onto the populated ws1 must splice a fresh workspace
-    // between them rather than merging, so each window ends up alone in its own
-    // workspace — i.e. two populated workspaces, not one holding both.
+fn landscape_move_to_workspace_down_merges_when_source_is_single_window() {
+    // Single window on each of two adjacent workspaces (win0 on ws0, win1 on ws1).
+    // Moving win0 down empties ws0, so it should merge into the populated ws1 rather
+    // than splice a new workspace between them — one populated workspace holding both,
+    // not two. (Splicing here would just strand the now-empty source.)
     let ops = [
         Op::AddOutput(1), // 1280×720 landscape
         Op::AddWindow {
@@ -2093,13 +2093,13 @@ fn landscape_move_to_workspace_down_splices_empty_when_destination_populated() {
         .iter()
         .filter(|ws| ws.has_windows())
         .count();
-    assert_eq!(populated, 2, "each window should be alone in its own workspace");
+    assert_eq!(populated, 1, "the single-window source merges into the destination");
 }
 
 #[test]
-fn landscape_move_to_workspace_up_splices_empty_when_destination_populated() {
-    // Symmetric to the down case: moving the lower window up onto a populated upper
-    // workspace splices a fresh workspace between them instead of merging.
+fn landscape_move_to_workspace_up_merges_when_source_is_single_window() {
+    // Symmetric to the down case: moving the lower workspace's only window up onto a
+    // populated upper workspace merges into it instead of splicing a new workspace.
     let ops = [
         Op::AddOutput(1),
         Op::AddWindow {
@@ -2121,7 +2121,79 @@ fn landscape_move_to_workspace_up_splices_empty_when_destination_populated() {
         .iter()
         .filter(|ws| ws.has_windows())
         .count();
-    assert_eq!(populated, 2, "each window should be alone in its own workspace");
+    assert_eq!(populated, 1, "the single-window source merges into the destination");
+}
+
+#[test]
+fn landscape_move_to_workspace_down_splices_when_source_has_other_windows() {
+    // ws0 holds two windows, ws1 holds one. Moving one window down off ws0 leaves ws0
+    // still populated, so the moved window must land alone in a freshly spliced
+    // workspace between ws0 and ws1 rather than merging into ws1 — three populated
+    // workspaces (ws0 keeps one, the split-off window gets its own, ws1 keeps one).
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWorkspaceUp,
+        Op::MoveWindowToWorkspaceDown(true),
+    ];
+
+    let layout = check_ops(ops);
+    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+        unreachable!()
+    };
+    let populated = monitors[0]
+        .workspaces
+        .iter()
+        .filter(|ws| ws.has_windows())
+        .count();
+    assert_eq!(
+        populated, 3,
+        "a window split off a multi-window source gets its own workspace",
+    );
+}
+
+#[test]
+fn landscape_move_to_workspace_up_splices_when_source_has_other_windows() {
+    // Symmetric to the down case: ws1 holds two windows, ws0 holds one. Moving one
+    // window up off ws1 leaves ws1 populated, so the moved window lands alone in a
+    // spliced workspace instead of merging into ws0.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::MoveWindowToWorkspaceUp(true),
+    ];
+
+    let layout = check_ops(ops);
+    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+        unreachable!()
+    };
+    let populated = monitors[0]
+        .workspaces
+        .iter()
+        .filter(|ws| ws.has_windows())
+        .count();
+    assert_eq!(
+        populated, 3,
+        "a window split off a multi-window source gets its own workspace",
+    );
 }
 
 #[test]
