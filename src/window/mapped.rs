@@ -216,6 +216,14 @@ pub struct Mapped {
 
     /// Most recent monotonic time when the window had the focus.
     focus_timestamp: Option<Duration>,
+
+    /// Whether a graceful close has already been requested for this window.
+    ///
+    /// Set the first time the user issues the close shortcut (which sends the polite
+    /// xdg-toplevel close). A second close request while the window is still alive
+    /// then escalates to a SIGKILL of the client process. `Cell` because the close
+    /// path only has shared (`&self`) access through the layout.
+    close_requested: Cell<bool>,
 }
 
 naru_render_elements! {
@@ -339,6 +347,7 @@ impl Mapped {
             is_pending_maximized: false,
             uncommitted_maximized: Vec::new(),
             focus_timestamp: None,
+            close_requested: Cell::new(false),
         };
 
         rv.is_maximized = rv.sizing_mode().is_maximized();
@@ -412,6 +421,18 @@ impl Mapped {
 
     pub fn credentials(&self) -> Option<&Credentials> {
         self.credentials.as_ref()
+    }
+
+    /// Whether a graceful close has already been requested for this window (i.e. the
+    /// close shortcut was issued at least once). The close path uses this to decide
+    /// whether a repeat request should escalate to a SIGKILL.
+    pub fn close_requested(&self) -> bool {
+        self.close_requested.get()
+    }
+
+    /// Record that a graceful close has been requested for this window.
+    pub fn mark_close_requested(&self) {
+        self.close_requested.set(true);
     }
 
     /// Working directory captured from the client process at this `Mapped`'s

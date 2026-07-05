@@ -713,6 +713,66 @@ impl State {
         }
     }
 
+    /// Handle a close request for `mapped`.
+    ///
+    /// The close shortcut escalates: the first request sends the graceful
+    /// xdg-toplevel close and latches the window (`mark_close_requested`). If the
+    /// window is still alive when the shortcut is issued again, this returns
+    /// `Some((pid, restore_entry))` so the caller can SIGKILL the client and respawn
+    /// it via the session-restore path. Returns `None` on the graceful first pass (a
+    /// well-behaved app closes then and the window is gone before any escalation).
+    fn request_close(
+        &self,
+        mapped: &crate::window::Mapped,
+    ) -> Option<(Option<i32>, Option<crate::session::WindowEntry>)> {
+        if mapped.close_requested() {
+            Some((
+                mapped.credentials().map(|c| c.pid),
+                crate::session::entry_for_mapped(&self.naru, mapped),
+            ))
+        } else {
+            mapped.toplevel().send_close();
+            mapped.mark_close_requested();
+            None
+        }
+    }
+
+    /// Force-kill a window's client and auto-restore it, reusing session-restore.
+    ///
+    /// SIGKILLs `pid` (the graceful close was already sent and ignored) and respawns
+    /// `entry` through the normal restore launch path. The entry is registered as a
+    /// pending restore first, so the add_window matcher places the respawned window
+    /// back into the same slot it was killed from — exactly as a startup restore does.
+    fn kill_and_restore(&mut self, pid: Option<i32>, entry: Option<crate::session::WindowEntry>) {
+        if let Some(pid) = pid {
+            // SAFETY: kill(2) is a plain syscall with no memory-safety concerns; an
+            // already-dead or invalid pid simply returns ESRCH, which we ignore.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+
+        let Some(entry) = entry else {
+            return;
+        };
+        let argv = {
+            let config = self.naru.config.borrow();
+            crate::session::resolve_launch_argv(&entry, &config.session_restore)
+        };
+        if argv.is_empty() {
+            return;
+        }
+        let cwd = entry.cwd.clone();
+        // Register the entry as pending so the respawned window is matched back to its
+        // saved slot by the map path (the same mechanism startup restore uses). When
+        // session-restore is disabled there's no manager, so the window still comes
+        // back but takes the layout's default placement.
+        if let Some(sm) = self.naru.session_manager.as_mut() {
+            sm.pending_restore.push_back(entry);
+        }
+        crate::utils::spawning::spawn_with_cwd(argv, None, cwd);
+    }
+
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool) {
         if self.naru.is_locked() && !(allow_when_locked || allowed_when_locked(&action)) {
             return;
@@ -889,14 +949,24 @@ impl State {
                 }
             }
             Action::CloseWindow => {
-                if let Some(mapped) = self.naru.layout.focus() {
-                    mapped.toplevel().send_close();
+                let escalate = self
+                    .naru
+                    .layout
+                    .focus()
+                    .and_then(|mapped| self.request_close(mapped));
+                if let Some((pid, entry)) = escalate {
+                    self.kill_and_restore(pid, entry);
                 }
             }
             Action::CloseWindowById(id) => {
-                let window = self.naru.layout.windows().find(|(_, m)| m.id().get() == id);
-                if let Some((_, mapped)) = window {
-                    mapped.toplevel().send_close();
+                let escalate = self
+                    .naru
+                    .layout
+                    .windows()
+                    .find(|(_, m)| m.id().get() == id)
+                    .and_then(|(_, mapped)| self.request_close(mapped));
+                if let Some((pid, entry)) = escalate {
+                    self.kill_and_restore(pid, entry);
                 }
             }
             Action::FullscreenWindow => {

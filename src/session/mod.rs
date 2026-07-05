@@ -35,7 +35,7 @@ pub use cwd::{
 pub use desktop::{index_startup_wm_classes, is_pwa, ssb_launch_argv};
 pub use manager::SessionManager;
 pub use restore::{resolve_launch_argv, restore_apps};
-pub use snapshot::build_from_naru;
+pub use snapshot::{build_from_naru, entry_for_mapped};
 pub use state::{
     ActiveWorkspace, Placement, PanelSide, SessionState, WindowEntry, WorkspaceRef, SCHEMA_VERSION,
 };

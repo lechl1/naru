@@ -181,6 +181,29 @@ pub fn build_from_naru(naru: &Naru) -> SessionState {
     }
 }
 
+/// Build the [`WindowEntry`] describing a single live window, capturing everything
+/// session-restore needs to relaunch it *and* place it back where it was.
+///
+/// Used by the close-window SIGKILL escalation to respawn a force-killed window
+/// through the normal restore path. Rather than duplicate the capture logic, this
+/// takes a full snapshot and picks out the entry for `target`: an exact
+/// `(app_id, title)` match distinguishes it from other windows of the same app, and
+/// failing that (e.g. the title is still settling) the first entry sharing its
+/// `app_id` — same-app windows relaunch identically, so the choice among them is
+/// immaterial. Returns `None` for a window with no usable `app_id` (nothing to
+/// launch it by) or when the window can't be found in the snapshot.
+pub fn entry_for_mapped(naru: &Naru, target: &Mapped) -> Option<WindowEntry> {
+    let app_id = target.app_id().filter(|s| !s.is_empty())?;
+    let title = window_title(target);
+
+    let windows = build_from_naru(naru).windows;
+    windows
+        .iter()
+        .find(|e| e.app_id == app_id && e.title == title)
+        .cloned()
+        .or_else(|| windows.into_iter().find(|e| e.app_id == app_id))
+}
+
 /// Resolve the working directory and any tmux / Claude Code session for a window,
 /// sharing a single Konsole D-Bus query across all three.
 ///
