@@ -3715,6 +3715,59 @@ impl Naru {
         Some((target_output.cloned(), target_workspace_index))
     }
 
+    /// Rebuild the multi-window columns of a restored session. Each restored
+    /// window was added as its own single-window column and positioned in saved
+    /// `(column, tile)` order, so windows that shared a saved column sit in
+    /// adjacent columns sorted by tile. Consuming every non-leader into its left
+    /// neighbour — walking each workspace's restored windows in `(column, tile)`
+    /// order — collapses each run back into one column, with the tiles in their
+    /// saved order (consume appends to the bottom of the target column).
+    ///
+    /// Runs **exactly once** per restore, gated by
+    /// [`SessionManager::claim_column_stacking`]: it is called both when the last
+    /// pending window drains (the map handler) *and* from the restore-settle timer
+    /// backstop, so that a session where some saved windows never reappear — and
+    /// thus never drains — still gets its columns stacked. Without the gate the
+    /// timer's second pass would see already-stacked columns and *expel* their
+    /// tiles back apart. No-op when session-restore is off.
+    ///
+    /// Window heights are intentionally not restored (see `snapshot.rs`), so the
+    /// rebuilt columns split their height evenly.
+    ///
+    /// [`SessionManager::claim_column_stacking`]: crate::session::SessionManager::claim_column_stacking
+    pub fn stack_restored_columns(&mut self) {
+        let claimed = self
+            .session_manager
+            .as_mut()
+            .is_some_and(|sm| sm.claim_column_stacking());
+        if !claimed {
+            return;
+        }
+
+        // Collect the consume targets first (immutable borrow of the layout),
+        // then apply them (mutable). Grouping is per-workspace so two windows
+        // that shared a saved column index on *different* workspaces are never
+        // merged together.
+        let mut to_consume = Vec::new();
+        for (_mon, _idx, ws) in self.layout.workspaces() {
+            let mut entries: Vec<_> = ws
+                .windows()
+                .filter_map(|w| w.restore_pos().map(|pos| (w.window.clone(), pos)))
+                .collect();
+            entries.sort_by_key(|(_, pos)| *pos);
+            let mut prev_col: Option<usize> = None;
+            for (id, (col, _tile)) in &entries {
+                if Some(*col) == prev_col {
+                    to_consume.push(id.clone());
+                }
+                prev_col = Some(*col);
+            }
+        }
+        for id in to_consume {
+            self.layout.consume_or_expel_window_left(Some(&id));
+        }
+    }
+
     /// Return focus to the workspace that was active at save time, once session
     /// restore has settled. Consumes the pending value so it applies at most once;
     /// no-op when session-restore is off, nothing was recorded, or the saved

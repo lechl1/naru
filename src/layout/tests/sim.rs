@@ -809,6 +809,106 @@ mod tests {
         );
     }
 
+    /// Drive the *full* restore flow the compositor performs — not just the
+    /// final consume pass. As each saved window "maps" (in an arbitrary order),
+    /// it is placed with the same `before`-count + `move_column_to_index` the
+    /// `handlers/compositor.rs` matcher uses, then `stack_restored_columns`'s
+    /// collect-then-consume pass rebuilds the columns. `saved` is `(col, tile)`
+    /// per window; `map_order` is the order the windows map in. Returns the sim
+    /// plus the per-window sim ids (indexed by the original window index).
+    fn run_restore(saved: &[(usize, usize)], map_order: &[usize]) -> (LayoutSim, Vec<usize>) {
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+
+        // (sim id, saved (col, tile)) for every window placed so far — the
+        // stand-in for `Mapped::restore_pos`, which the real count reads.
+        let mut placed: Vec<(usize, (usize, usize))> = Vec::new();
+        let mut id_of = vec![usize::MAX; saved.len()];
+
+        for &wi in map_order {
+            let key = saved[wi];
+            let id = sim.add_window();
+            id_of[wi] = id;
+            // Exactly the compositor's placement: count already-placed restored
+            // windows whose saved (col, tile) sorts before this one, then move
+            // this (active) window's column to that 1-based slot.
+            let before = placed.iter().filter(|(_, p)| *p < key).count();
+            sim.focus_window(id);
+            sim.move_column_to_index(before + 1);
+            placed.push((id, key));
+        }
+        sim.settle();
+
+        // `stack_restored_columns`: sort by (col, tile), mark every non-leader
+        // (shares its predecessor's column) for a consume-left, then apply.
+        let mut entries = placed.clone();
+        entries.sort_by_key(|(_, p)| *p);
+        let mut to_consume = Vec::new();
+        let mut prev_col: Option<usize> = None;
+        for (id, (col, _tile)) in &entries {
+            if Some(*col) == prev_col {
+                to_consume.push(*id);
+            }
+            prev_col = Some(*col);
+        }
+        for id in to_consume {
+            sim.apply(Op::ConsumeOrExpelWindowLeft { id: Some(id) });
+        }
+        sim.settle();
+
+        (sim, id_of)
+    }
+
+    /// The full restore flow — placement *and* stacking — reconstructs
+    /// multi-window columns for every map order, with tiles in saved top-to-
+    /// bottom order. This covers what `restore_stacks_same_column_windows`
+    /// deliberately skips: the `before`-count `move_column_to_index` placement
+    /// that runs as each window maps, which the compositor performs but no
+    /// prior sim test exercised alongside the consume pass.
+    #[test]
+    fn restore_places_and_stacks_multi_window_columns() {
+        // Saved layout: col 0 = [w0, w1], col 1 = [w2], col 2 = [w3, w4, w5].
+        let saved = [(0, 0), (0, 1), (1, 0), (2, 0), (2, 1), (2, 2)];
+        // A few representative map orders, including fully reversed and
+        // interleaved-across-columns — the orders clients really map in.
+        let orders: [Vec<usize>; 4] = [
+            vec![0, 1, 2, 3, 4, 5],
+            vec![5, 4, 3, 2, 1, 0],
+            vec![2, 5, 0, 3, 1, 4],
+            vec![4, 1, 5, 0, 2, 3],
+        ];
+
+        for order in &orders {
+            let (sim, id) = run_restore(&saved, order);
+
+            // Same-column windows share a column; distinct columns stay distinct.
+            for &(a, b) in &[(0usize, 1usize), (3, 4), (3, 5), (4, 5)] {
+                assert_eq!(
+                    sim.scrolling_column_index(id[a]),
+                    sim.scrolling_column_index(id[b]),
+                    "order {order:?}: w{a} and w{b} share a column",
+                );
+            }
+            let cols: Vec<Option<usize>> = (0..6).map(|i| sim.scrolling_column_index(id[i])).collect();
+            assert_ne!(cols[0], cols[2], "order {order:?}: col 0 and col 1 distinct");
+            assert_ne!(cols[2], cols[3], "order {order:?}: col 1 and col 2 distinct");
+            assert_ne!(cols[0], cols[3], "order {order:?}: col 0 and col 2 distinct");
+
+            // Columns land left-to-right in saved order.
+            assert!(
+                cols[0] < cols[2] && cols[2] < cols[3],
+                "order {order:?}: columns in saved left-to-right order, got {cols:?}",
+            );
+
+            // Tiles stack top-to-bottom in saved tile order (w0 above w1;
+            // w3 above w4 above w5).
+            let y = |i: usize| sim.window_geometry(&id[i]).expect("geometry").loc.y;
+            assert!(y(0) < y(1), "order {order:?}: w0 sits above w1");
+            assert!(y(3) < y(4), "order {order:?}: w3 sits above w4");
+            assert!(y(4) < y(5), "order {order:?}: w4 sits above w5");
+        }
+    }
+
     /// Animations are genuinely simulated frame by frame: an animated action
     /// leaves work in flight, frame-stepping makes observable progress in
     /// `window_geometry`, and the animation eventually settles at a rest
