@@ -206,8 +206,8 @@ window-rule {
 This is sugar for OR'ing the entries together; the two blocks below are equivalent:
 
 ```kdl
-window-rule { match app-id="firefox, chromium" }
-window-rule { match app-id=r#"(?:firefox)|(?:chromium)"# }
+window-rule { match app-id="firefox, chromium"; }
+window-rule { match app-id=r#"(?:firefox)|(?:chromium)"#; }
 ```
 
 If you need a single regex that legitimately contains a comma (for example the `{1,3}` repetition quantifier), it keeps working: the list split is only applied when every comma-separated piece is itself a valid regex, otherwise the whole value is parsed as one expression.
