@@ -106,6 +106,7 @@ fn full_save_load_roundtrip_preserves_diverse_windows() {
 
     let state = SessionState {
         version: SCHEMA_VERSION,
+        active_workspace: None,
         windows: vec![
             entry(
                 "org.kde.dolphin",
@@ -217,6 +218,7 @@ fn pending_restore_is_fifo_per_app_id() {
     // Three konsoles in saved order, distinguishable by cwd.
     let state = SessionState {
         version: SCHEMA_VERSION,
+        active_workspace: None,
         windows: vec![
             entry(
                 "org.kde.konsole",
@@ -248,18 +250,18 @@ fn pending_restore_is_fifo_per_app_id() {
     };
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
-    // i-th `take_pending_for("org.kde.konsole", None)` returns the i-th saved entry.
-    let first = sm.take_pending_for("org.kde.konsole", None).unwrap();
+    // i-th `take_pending_for("org.kde.konsole", None, None)` returns the i-th saved entry.
+    let first = sm.take_pending_for("org.kde.konsole", None, None).unwrap();
     assert_eq!(first.cwd.as_deref(), Some(std::path::Path::new("/first")));
 
-    let second = sm.take_pending_for("org.kde.konsole", None).unwrap();
+    let second = sm.take_pending_for("org.kde.konsole", None, None).unwrap();
     assert_eq!(second.cwd.as_deref(), Some(std::path::Path::new("/second")));
 
-    let third = sm.take_pending_for("org.kde.konsole", None).unwrap();
+    let third = sm.take_pending_for("org.kde.konsole", None, None).unwrap();
     assert_eq!(third.cwd.as_deref(), Some(std::path::Path::new("/third")));
 
     // Queue exhausted.
-    assert!(sm.take_pending_for("org.kde.konsole", None).is_none());
+    assert!(sm.take_pending_for("org.kde.konsole", None, None).is_none());
     cleanup(&dir);
 }
 
@@ -271,6 +273,7 @@ fn pending_restore_matches_by_cwd_when_available() {
     // Three konsoles saved at columns 0/1/2, each in a distinct directory.
     let state = SessionState {
         version: SCHEMA_VERSION,
+        active_workspace: None,
         windows: vec![
             entry(
                 "org.kde.konsole",
@@ -306,7 +309,7 @@ fn pending_restore_matches_by_cwd_when_available() {
     // Matching on cwd returns *that* window's saved entry — and crucially its saved
     // column — instead of FIFO's i-th entry, so the on-screen slot is stable.
     let second = sm
-        .take_pending_for("org.kde.konsole", Some(std::path::Path::new("/second")))
+        .take_pending_for("org.kde.konsole", Some(std::path::Path::new("/second")), None)
         .unwrap();
     assert_eq!(second.cwd.as_deref(), Some(std::path::Path::new("/second")));
     assert!(matches!(
@@ -315,7 +318,7 @@ fn pending_restore_matches_by_cwd_when_available() {
     ));
 
     let third = sm
-        .take_pending_for("org.kde.konsole", Some(std::path::Path::new("/third")))
+        .take_pending_for("org.kde.konsole", Some(std::path::Path::new("/third")), None)
         .unwrap();
     assert!(matches!(
         third.placement,
@@ -324,10 +327,10 @@ fn pending_restore_matches_by_cwd_when_available() {
 
     // The remaining "/first" entry still matches by cwd, or by FIFO when cwd is absent.
     let first = sm
-        .take_pending_for("org.kde.konsole", Some(std::path::Path::new("/first")))
+        .take_pending_for("org.kde.konsole", Some(std::path::Path::new("/first")), None)
         .unwrap();
     assert_eq!(first.cwd.as_deref(), Some(std::path::Path::new("/first")));
-    assert!(sm.take_pending_for("org.kde.konsole", None).is_none());
+    assert!(sm.take_pending_for("org.kde.konsole", None, None).is_none());
     cleanup(&dir);
 }
 
@@ -338,6 +341,7 @@ fn pending_restore_only_pops_matching_app_id() {
 
     let state = SessionState {
         version: SCHEMA_VERSION,
+        active_workspace: None,
         windows: vec![
             entry(
                 "org.kde.dolphin",
@@ -370,16 +374,16 @@ fn pending_restore_only_pops_matching_app_id() {
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
     // Dolphin pops both dolphins in saved order, skipping the konsole between.
-    assert!(sm.take_pending_for("org.kde.dolphin", None).is_some());
-    assert!(sm.take_pending_for("org.kde.dolphin", None).is_some());
-    assert!(sm.take_pending_for("org.kde.dolphin", None).is_none());
+    assert!(sm.take_pending_for("org.kde.dolphin", None, None).is_some());
+    assert!(sm.take_pending_for("org.kde.dolphin", None, None).is_some());
+    assert!(sm.take_pending_for("org.kde.dolphin", None, None).is_none());
 
     // Konsole still there.
-    assert!(sm.take_pending_for("org.kde.konsole", None).is_some());
-    assert!(sm.take_pending_for("org.kde.konsole", None).is_none());
+    assert!(sm.take_pending_for("org.kde.konsole", None, None).is_some());
+    assert!(sm.take_pending_for("org.kde.konsole", None, None).is_none());
 
     // Unknown app: never matches.
-    assert!(sm.take_pending_for("nonexistent", None).is_none());
+    assert!(sm.take_pending_for("nonexistent", None, None).is_none());
 
     cleanup(&dir);
 }
@@ -398,7 +402,7 @@ fn manager_starts_empty_when_no_state_file() {
     let mut sm = SessionManager::new(&cfg).expect("manager");
 
     // No file → no pending entries; matcher always returns None.
-    assert!(sm.take_pending_for("anything", None).is_none());
+    assert!(sm.take_pending_for("anything", None, None).is_none());
     cleanup(&dir);
 }
 
@@ -426,7 +430,7 @@ fn manager_treats_version_mismatch_as_fresh_start() {
 
     // load() returned Ok(None) → pending_restore is empty, won't try to restore
     // a windowfrom an incompatible schema.
-    assert!(sm.take_pending_for("x", None).is_none());
+    assert!(sm.take_pending_for("x", None, None).is_none());
     cleanup(&dir);
 }
 
@@ -452,6 +456,7 @@ fn save_then_reopen_simulates_full_session_cycle() {
     // Phase: pretend two terminals and a file manager are open, shutdown.
     let live_state = SessionState {
         version: SCHEMA_VERSION,
+        active_workspace: None,
         windows: vec![
             entry(
                 "org.kde.konsole",
