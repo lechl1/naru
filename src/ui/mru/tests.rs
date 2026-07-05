@@ -38,6 +38,24 @@ fn remove_last_window_out_of_two() {
     check_ops(&mut mru, &ops);
 }
 
+#[test]
+fn fanout_centers_best_match() {
+    // Rank-sorted best→worst, so the value == its rank. The fan-out must place
+    // rank 0 in the centre with the 2nd-best (rank 1) immediately to its right
+    // and the 3rd-best (rank 2) immediately to its left.
+    assert_eq!(fanout::<i32>(vec![]), Vec::<i32>::new());
+    assert_eq!(fanout(vec![0]), vec![0]);
+    assert_eq!(fanout(vec![0, 1]), vec![0, 1]);
+    assert_eq!(fanout(vec![0, 1, 2]), vec![2, 0, 1]);
+    assert_eq!(fanout(vec![0, 1, 2, 3, 4]), vec![4, 2, 0, 1, 3]);
+
+    // Rank 0 always sits between rank 2 (left) and rank 1 (right).
+    let out = fanout(vec![0, 1, 2, 3, 4, 5]);
+    let zero = out.iter().position(|&r| r == 0).unwrap();
+    assert_eq!(out[zero + 1], 1, "2nd-best sits immediately right of best");
+    assert_eq!(out[zero - 1], 2, "3rd-best sits immediately left of best");
+}
+
 fn arbitrary_scope() -> impl Strategy<Value = MruScope> {
     prop_oneof![
         Just(MruScope::All),

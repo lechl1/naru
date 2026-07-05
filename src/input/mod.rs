@@ -506,18 +506,27 @@ impl State {
                 }
 
                 // All modifiers released while the MRU UI is open. Two regimes:
-                //   - If only Tab/Shift+Tab cycling happened during the chord, behave like
-                //     legacy Niri Alt+Tab: commit the current selection and close the UI.
-                //   - If the user pressed any other MRU key (search char, Home/End, scope
-                //     switch, etc.), flip into persistent search-mode and keep the UI open.
-                //     Confirmation is then explicit: Enter, Escape, or click outside.
+                //   - If the chord was a slow, deliberate hold with only Tab/Shift+Tab
+                //     cycling, behave like legacy Niri Alt+Tab: commit the current
+                //     selection and close the UI.
+                //   - Otherwise — the user pressed some other MRU key (search char,
+                //     Home/End, scope switch, …), OR it was a quick Alt+Tab *tap*
+                //     (modifier let go within QUICK_RELEASE of opening) — flip into
+                //     persistent search-mode and keep the UI open so the user can
+                //     fuzzy-type a window name after releasing Alt. Confirmation is
+                //     then explicit: Enter, Escape, or click outside.
                 //
                 // Just consume the key release if it was suppressed during the chord,
                 // otherwise forward it. Don't fall through into binding lookup — there are
                 // no binds for a bare modifier release.
                 if this.naru.window_mru_ui.is_open() && !pressed && modifiers.is_empty() {
-                    if this.naru.window_mru_ui.interacted_beyond_tab() {
+                    if this.naru.window_mru_ui.interacted_beyond_tab()
+                        || this.naru.window_mru_ui.released_quickly()
+                    {
                         this.naru.window_mru_ui.set_persistent();
+                        // Redraw so the search-mode text box appears immediately, even
+                        // before the first character is typed.
+                        this.naru.queue_redraw_mru_output();
                     } else {
                         this.confirm_mru();
                     }

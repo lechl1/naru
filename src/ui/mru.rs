@@ -77,6 +77,12 @@ const BACKDROP_COLOR: Color32F = Color32F::new(0., 0., 0., 0.8);
 /// `config.appearance.font_size`.
 const FONT_FAMILY: &str = "sans";
 
+/// Releasing the activation modifier within this long of triggering the switcher
+/// counts as a quick tap: instead of confirming and closing, the switcher stays
+/// open in persistent search-mode so the user can fuzzy-type a window name after
+/// letting go of Alt. A longer hold keeps the classic cycle-then-confirm feel.
+const QUICK_RELEASE: Duration = Duration::from_millis(500);
+
 /// Scopes in the order they are cycled through.
 ///
 /// Count must match one defined in `generate_scope_panels()`.
@@ -160,6 +166,12 @@ struct Inner {
 
     /// Time when the UI should appear.
     open_at: Duration,
+
+    /// Time the switcher was triggered (the Alt+Tab press). Used to decide, on
+    /// modifier release, whether it was a quick tap — a release within
+    /// [`QUICK_RELEASE`] drops straight into persistent search-mode so the user
+    /// can fuzzy-type after letting go of Alt, rather than confirming and closing.
+    opened_at: Duration,
 
     /// Output the UI was opened on.
     output: Output,
@@ -890,6 +902,35 @@ fn match_filter(scope: MruScope, app_id_filter: Option<&str>) -> impl Fn(&Thumbn
     move |thumbnail| matches(scope, app_id_filter, thumbnail)
 }
 
+/// Reorder a rank-sorted list (best first) into the fan-out display order
+/// `[…, r4, r2, r0, r1, r3, r5, …]`: the best match (rank 0) sits in the centre,
+/// odd ranks fan out to its right, even ranks to its left. So the 2nd-best lands
+/// immediately right of centre and the 3rd-best immediately left — "best match
+/// centred, next-best flanking". Pure, so the arrangement is unit-tested directly.
+fn fanout<T>(ranked: Vec<T>) -> Vec<T> {
+    let mut center: Option<T> = None;
+    let mut left: Vec<T> = Vec::with_capacity(ranked.len() / 2);
+    let mut right: Vec<T> = Vec::with_capacity(ranked.len() / 2 + 1);
+    for (rank, t) in ranked.into_iter().enumerate() {
+        if rank == 0 {
+            center = Some(t);
+        } else if rank % 2 == 1 {
+            right.push(t);
+        } else {
+            left.push(t);
+        }
+    }
+    left.reverse();
+
+    let mut out = Vec::with_capacity(left.len() + right.len() + 1);
+    out.extend(left);
+    if let Some(c) = center {
+        out.push(c);
+    }
+    out.extend(right);
+    out
+}
+
 impl ViewPos {
     fn current(&self) -> f64 {
         match self {
@@ -983,6 +1024,7 @@ impl WindowMruUi {
             view_pos: ViewPos::Static(0.),
             freeze_view: false,
             open_at: clock.now_unadjusted() + open_delay,
+            opened_at: clock.now_unadjusted(),
             clock,
             config: self.config.clone(),
             output,
@@ -1145,6 +1187,19 @@ impl WindowMruUi {
     /// other interaction switches to persistent search-mode.
     pub fn interacted_beyond_tab(&self) -> bool {
         matches!(&self.state, UiState::Open(inner) if inner.interacted_beyond_tab)
+    }
+
+    /// True if the activation modifier is being released within [`QUICK_RELEASE`]
+    /// of the switcher opening — a quick Alt+Tab tap. The input layer treats this
+    /// like [`Self::interacted_beyond_tab`]: keep the UI open in persistent
+    /// search-mode instead of confirming, so the user can fuzzy-type after
+    /// letting go of Alt. A slower release keeps the classic confirm-on-release.
+    pub fn released_quickly(&self) -> bool {
+        matches!(
+            &self.state,
+            UiState::Open(inner)
+                if inner.clock.now_unadjusted().saturating_sub(inner.opened_at) < QUICK_RELEASE
+        )
     }
 
     /// Mark the UI as having transitioned into persistent search-mode.
@@ -1668,29 +1723,7 @@ impl Inner {
         if self.search.is_empty() {
             return self.wmru.thumbnails().collect();
         }
-
-        let ranked = self.ranked_thumbnails();
-        let mut center: Option<&Thumbnail> = None;
-        let mut left: Vec<&Thumbnail> = Vec::with_capacity(ranked.len() / 2);
-        let mut right: Vec<&Thumbnail> = Vec::with_capacity(ranked.len() / 2 + 1);
-        for (rank, t) in ranked.into_iter().enumerate() {
-            if rank == 0 {
-                center = Some(t);
-            } else if rank % 2 == 1 {
-                right.push(t);
-            } else {
-                left.push(t);
-            }
-        }
-        left.reverse();
-
-        let mut out = Vec::with_capacity(left.len() + right.len() + 1);
-        out.extend(left);
-        if let Some(c) = center {
-            out.push(c);
-        }
-        out.extend(right);
-        out
+        fanout(self.ranked_thumbnails())
     }
 
     /// Cycle current_id through the rank-ordered list (used by Tab/Shift+Tab when
@@ -1715,9 +1748,14 @@ impl Inner {
     /// current selection to the top match (so the user sees their best hit
     /// without having to navigate). If there are no matches, the previous
     /// selection is left untouched so a Backspace can recover it.
+    ///
+    /// Selection tracks the *rank-0* match, not `ordered_thumbnails().first()`:
+    /// the latter is the leftmost of the fan-out (a lower-ranked hit), whereas
+    /// the best match sits in the fan-out's centre. Making it current is what
+    /// centres the best match on screen (via `compute_view_pos`) and highlights it.
     fn on_search_changed(&mut self) {
         self.freeze_view = false;
-        let top = self.ordered_thumbnails().first().map(|t| t.id);
+        let top = self.ranked_thumbnails().first().map(|t| t.id);
         if let Some(top) = top {
             self.wmru.set_current(top);
         }
@@ -1800,8 +1838,11 @@ impl Inner {
             push(WindowMruUiRenderElement::TextureElement(elem));
         }
 
-        // Search bar (bottom-centre) — only when the user has typed something.
-        if !self.search.is_empty() {
+        // Search bar (bottom-centre). Shown for the whole of persistent search-mode
+        // — including before the first keystroke — so it doubles as the mode
+        // indicator: the moment Alt is released into search-mode the box appears,
+        // making it clear the switcher is now waiting for a typed window name.
+        if self.persistent || !self.search.is_empty() {
             let search_texture = self.search_texture.borrow_mut().get(
                 ctx.as_gles().renderer,
                 &self.search,
@@ -2003,13 +2044,19 @@ impl SearchBarTexture {
 
         self.texture
             .get_or_insert_with(|| {
-                // Pango interprets <, >, & as markup; escape so the user's literal
-                // search string survives untouched.
-                let escaped = text
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;");
-                let label = format!("<b>Search:</b> {escaped}");
+                let label = if text.is_empty() {
+                    // Persistent search-mode just entered, nothing typed yet: label the
+                    // mode and prompt for input so it's obvious what to do.
+                    "<b>Search:</b> <i>type a window name…</i>".to_owned()
+                } else {
+                    // Pango interprets <, >, & as markup; escape so the user's literal
+                    // search string survives untouched.
+                    let escaped = text
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    format!("<b>Search:</b> {escaped}")
+                };
                 render_panel(renderer, scale, font_size, &label).ok()
             })
             .clone()
