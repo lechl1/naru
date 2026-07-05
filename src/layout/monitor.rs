@@ -1456,19 +1456,46 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    /// Whether this monitor's view is landscape (wider than tall). Used to scope the
+    /// "vertical moves land the window alone in its own workspace" behavior, which
+    /// only makes sense when workspaces stack vertically on a wide view.
+    fn is_landscape(&self) -> bool {
+        let s = self.view_size();
+        s.w > s.h
+    }
+
     pub fn move_to_workspace_up(&mut self, focus: bool) {
         let source_workspace_idx = self.active_workspace_idx;
 
-        let new_idx = source_workspace_idx.saturating_sub(1);
-        if new_idx == source_workspace_idx {
+        let dest_idx = source_workspace_idx.saturating_sub(1);
+        if dest_idx == source_workspace_idx {
             return;
         }
-        let new_id = self.workspaces[new_idx].id();
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
-        let Some(removed) = workspace.remove_active_tile(Transaction::new()) else {
-            return;
+        // Remove the tile up front so an early-out (empty source) never leaves a
+        // freshly-inserted empty workspace behind.
+        let removed = {
+            let workspace = &mut self.workspaces[source_workspace_idx];
+            match workspace.remove_active_tile(Transaction::new()) {
+                Some(removed) => removed,
+                None => return,
+            }
         };
+
+        // Landscape: keep the moved window alone. When the upper neighbour already
+        // holds windows, splice a fresh empty workspace directly above the source
+        // (between the neighbour and the source) and move into it — mirroring how a
+        // horizontal move gives the window its own column. An already-empty upper
+        // neighbour is used directly. Inserting at `source_workspace_idx` shifts the
+        // source down and bumps `active_workspace_idx`, so the new empty workspace is
+        // the one now sitting at `source_workspace_idx`.
+        let dest_idx = if self.is_landscape() && self.workspaces[dest_idx].has_windows() {
+            self.add_workspace_at(source_workspace_idx);
+            source_workspace_idx
+        } else {
+            dest_idx
+        };
+        let new_id = self.workspaces[dest_idx].id();
 
         let activate = if focus {
             ActivateWindow::Yes
@@ -1493,16 +1520,30 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn move_to_workspace_down(&mut self, focus: bool) {
         let source_workspace_idx = self.active_workspace_idx;
 
-        let new_idx = min(source_workspace_idx + 1, self.workspaces.len() - 1);
-        if new_idx == source_workspace_idx {
+        let dest_idx = min(source_workspace_idx + 1, self.workspaces.len() - 1);
+        if dest_idx == source_workspace_idx {
             return;
         }
-        let new_id = self.workspaces[new_idx].id();
 
-        let workspace = &mut self.workspaces[source_workspace_idx];
-        let Some(removed) = workspace.remove_active_tile(Transaction::new()) else {
-            return;
+        // Remove the tile up front so an early-out (empty source) never leaves a
+        // freshly-inserted empty workspace behind.
+        let removed = {
+            let workspace = &mut self.workspaces[source_workspace_idx];
+            match workspace.remove_active_tile(Transaction::new()) {
+                Some(removed) => removed,
+                None => return,
+            }
         };
+
+        // Landscape: a window moved to an adjacent workspace lands alone. If the
+        // destination already holds windows, splice a fresh empty workspace between
+        // the two and move into that. An already-empty destination — e.g. the
+        // trailing empty workspace — is used directly. `dest_idx` is below the active
+        // workspace, so inserting there leaves `active_workspace_idx` unchanged.
+        if self.is_landscape() && self.workspaces[dest_idx].has_windows() {
+            self.add_workspace_at(dest_idx);
+        }
+        let new_id = self.workspaces[dest_idx].id();
 
         let activate = if focus {
             ActivateWindow::Yes

@@ -2066,6 +2066,65 @@ fn move_to_workspace_by_idx_does_not_leave_empty_workspaces() {
 }
 
 #[test]
+fn landscape_move_to_workspace_down_splices_empty_when_destination_populated() {
+    // Two windows on adjacent workspaces (win0 on ws0, win1 on ws1). On a landscape
+    // output, moving win0 down onto the populated ws1 must splice a fresh workspace
+    // between them rather than merging, so each window ends up alone in its own
+    // workspace — i.e. two populated workspaces, not one holding both.
+    let ops = [
+        Op::AddOutput(1), // 1280×720 landscape
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceUp,
+        Op::MoveWindowToWorkspaceDown(true),
+    ];
+
+    let layout = check_ops(ops);
+    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+        unreachable!()
+    };
+    let populated = monitors[0]
+        .workspaces
+        .iter()
+        .filter(|ws| ws.has_windows())
+        .count();
+    assert_eq!(populated, 2, "each window should be alone in its own workspace");
+}
+
+#[test]
+fn landscape_move_to_workspace_up_splices_empty_when_destination_populated() {
+    // Symmetric to the down case: moving the lower window up onto a populated upper
+    // workspace splices a fresh workspace between them instead of merging.
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveWindowToWorkspaceUp(true),
+    ];
+
+    let layout = check_ops(ops);
+    let MonitorSet::Normal { monitors, .. } = layout.monitor_set else {
+        unreachable!()
+    };
+    let populated = monitors[0]
+        .workspaces
+        .iter()
+        .filter(|ws| ws.has_windows())
+        .count();
+    assert_eq!(populated, 2, "each window should be alone in its own workspace");
+}
+
+#[test]
 fn empty_workspaces_dont_move_back_to_original_output() {
     let ops = [
         Op::AddOutput(1),
