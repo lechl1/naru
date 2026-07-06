@@ -512,7 +512,20 @@ impl<W: LayoutElement> FixedStrip<W> {
     }
 
     pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> + '_ {
-        self.inner.tiles_with_ipc_layouts()
+        // Panel windows are output-owned side strips, not part of any workspace's
+        // scrolling carousel. The inner ScrollingSpace stamps a real-looking
+        // `pos_in_scrolling_layout` (column 1, tile 1, …) which would collide with
+        // the active workspace's genuine columns — a full-height panel and the real
+        // column 1 both reporting `[1, 1]`, so IPC consumers double-count and
+        // mis-locate windows. Clear it, mirroring how floating windows report no
+        // scrolling position.
+        self.inner.tiles_with_ipc_layouts().map(|(tile, layout)| {
+            let layout = WindowLayout {
+                pos_in_scrolling_layout: None,
+                ..layout
+            };
+            (tile, layout)
+        })
     }
 
     pub fn tiles_mut(&mut self) -> impl Iterator<Item = &mut Tile<W>> + '_ {

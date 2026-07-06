@@ -55,7 +55,7 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use super::{Op, TestWindow, TestWindowParams};
 use crate::animation::Clock;
 use crate::layout::fixed_strip::FixedSide;
-use crate::layout::workspace::WindowLayer;
+use crate::layout::workspace::{WindowLayer, WorkspaceId};
 use crate::layout::{Layout, LayoutElement, Options};
 use crate::window::ResolvedWindowRules;
 
@@ -2700,6 +2700,58 @@ mod tests {
         sim.assert_slot(carousel, WindowLayer::Scrolling);
         sim.assert_slot(right, WindowLayer::FixedRight);
         sim.assert_slot(left, WindowLayer::FixedLeft);
+    }
+
+    /// Panel (fixed-side) windows are output-owned, not part of any workspace's
+    /// scrolling carousel, so the IPC `windows` listing must report them with no
+    /// `pos_in_scrolling_layout`. Otherwise a panel and the workspace's genuine
+    /// column 1 both advertise `[1, 1]`, so consumers (e.g. resize-toward-center,
+    /// which counts a column's tiles to find the on-screen midpoint) double-count
+    /// and mis-locate windows. Regression test for panels colliding with column 1.
+    #[test]
+    fn panel_windows_report_no_scrolling_position() {
+        let mut sim = LayoutSim::new_stacking(); // panels need stacking
+        sim.add_output(1);
+
+        // Two real carousel columns plus a panel steered into each side.
+        let col1 = sim.add_window();
+        let col2 = sim.add_window();
+        let right = sim.add_window_in_fixed_side(OpenInFixedSide::Right);
+        let left = sim.add_window_in_fixed_side(OpenInFixedSide::Left);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        // Collect (id, workspace_id, pos_in_scrolling_layout) as the IPC server sees them.
+        let mut seen: Vec<(usize, Option<WorkspaceId>, Option<(usize, usize)>)> = Vec::new();
+        sim.layout.with_windows(|w, _output, ws, layout| {
+            seen.push((*w.id(), ws, layout.pos_in_scrolling_layout));
+        });
+        let pos_of = |id: usize| {
+            seen.iter()
+                .find(|(wid, ..)| *wid == id)
+                .unwrap_or_else(|| panic!("window {id} missing from IPC listing"))
+        };
+
+        // Panel windows advertise no scrolling position.
+        assert_eq!(pos_of(right).2, None, "right panel must have no scrolling pos");
+        assert_eq!(pos_of(left).2, None, "left panel must have no scrolling pos");
+
+        // The real carousel columns keep their 1-based positions…
+        assert_eq!(pos_of(col1).2, Some((1, 1)));
+        assert_eq!(pos_of(col2).2, Some((2, 1)));
+
+        // …and no two windows in the same workspace collide on a scrolling position.
+        let mut occupied: Vec<(WorkspaceId, (usize, usize))> = Vec::new();
+        for (_, ws, pos) in &seen {
+            if let (Some(ws), Some(pos)) = (ws, pos) {
+                assert!(
+                    !occupied.contains(&(*ws, *pos)),
+                    "two windows collide at workspace {ws:?} pos {pos:?}",
+                );
+                occupied.push((*ws, *pos));
+            }
+        }
     }
 
     /// End-to-end-ish replay of a session restore's *column placement*. Windows
