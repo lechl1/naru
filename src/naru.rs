@@ -3715,53 +3715,61 @@ impl Naru {
         Some((target_output.cloned(), target_workspace_index))
     }
 
-    /// Rebuild the multi-window columns of a restored session. Each restored
-    /// window was added as its own single-window column and positioned in saved
-    /// `(column, tile)` order, so windows that shared a saved column sit in
-    /// adjacent columns sorted by tile. Consuming every non-leader into its left
-    /// neighbour — walking each workspace's restored windows in `(column, tile)`
-    /// order — collapses each run back into one column, with the tiles in their
-    /// saved order (consume appends to the bottom of the target column).
+    /// Rebuild multi-window columns from restored windows' saved `(column, tile)`
+    /// slots by consuming each non-leader tile into its column's leader.
     ///
-    /// Runs **exactly once** per restore, gated by
-    /// [`SessionManager::claim_column_stacking`]: it is called both when the last
-    /// pending window drains (the map handler) *and* from the restore-settle timer
-    /// backstop, so that a session where some saved windows never reappear — and
-    /// thus never drains — still gets its columns stacked. Without the gate the
-    /// timer's second pass would see already-stacked columns and *expel* their
-    /// tiles back apart. No-op when session-restore is off.
+    /// Stacks only *deterministically-matched* apps (terminals, matched by cwd).
+    /// Apps still awaiting async title reconcile (browsers, matched by title) are
+    /// deferred to [`Self::stack_all_restored_columns`], which the reconcile poll
+    /// runs once their window order has settled: stacking them earlier would merge
+    /// tiles by whatever order they happened to map in, and once a column is
+    /// stacked it is no longer reorderable by the single-window title reconcile.
     ///
-    /// Window heights are intentionally not restored (see `snapshot.rs`), so the
-    /// rebuilt columns split their height evenly.
-    ///
-    /// [`SessionManager::claim_column_stacking`]: crate::session::SessionManager::claim_column_stacking
+    /// Idempotent, so it is safe to run from every restore backstop (map-drain,
+    /// settle timer, reconcile poll): a tile already sharing its leader's live
+    /// column is skipped, so re-running never expels an already-stacked tile.
     pub fn stack_restored_columns(&mut self) {
-        let claimed = self
+        let deferred: HashSet<String> = self
             .session_manager
-            .as_mut()
-            .is_some_and(|sm| sm.claim_column_stacking());
-        if !claimed {
-            return;
-        }
+            .as_ref()
+            .map(|sm| {
+                sm.title_reconcile_entries()
+                    .iter()
+                    .map(|e| e.app_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.stack_restored_columns_impl(&deferred);
+    }
 
-        // Collect the consume targets first (immutable borrow of the layout),
-        // then apply them (mutable). Grouping is per-workspace so two windows
-        // that shared a saved column index on *different* workspaces are never
-        // merged together.
+    /// Stack every restored column, including apps that needed title reconcile.
+    /// Called from the reconcile poll once same-app window order has settled, so
+    /// the browser tiles that [`Self::stack_restored_columns`] deferred are now
+    /// safe to merge. Idempotent — a no-op once the columns are already stacked.
+    pub fn stack_all_restored_columns(&mut self) {
+        self.stack_restored_columns_impl(&HashSet::new());
+    }
+
+    fn stack_restored_columns_impl(&mut self, deferred_apps: &HashSet<String>) {
+        // Collect the consume targets under an immutable layout borrow, then
+        // apply them (mutable). Grouping is per-workspace so two windows that
+        // shared a saved column index on *different* workspaces are never merged.
         let mut to_consume = Vec::new();
         for (_mon, _idx, ws) in self.layout.workspaces() {
-            let mut entries: Vec<_> = ws
-                .windows()
-                .filter_map(|w| w.restore_pos().map(|pos| (w.window.clone(), pos)))
+            let windows: Vec<_> = ws
+                .tiles_with_ipc_layouts()
+                .filter_map(|(tile, layout)| {
+                    let mapped = tile.window();
+                    let saved = mapped.restore_pos()?;
+                    let (cur_col, _) = layout.pos_in_scrolling_layout?;
+                    let stackable = mapped
+                        .app_id()
+                        .map(|a| !deferred_apps.contains(&a))
+                        .unwrap_or(true);
+                    Some((mapped.window.clone(), saved, cur_col, stackable))
+                })
                 .collect();
-            entries.sort_by_key(|(_, pos)| *pos);
-            let mut prev_col: Option<usize> = None;
-            for (id, (col, _tile)) in &entries {
-                if Some(*col) == prev_col {
-                    to_consume.push(id.clone());
-                }
-                prev_col = Some(*col);
-            }
+            to_consume.extend(restore_columns_to_consume(windows));
         }
         for id in to_consume {
             self.layout.consume_or_expel_window_left(Some(&id));
@@ -6930,6 +6938,38 @@ fn order_windows_by_saved_titles<Id: Clone>(
         })
         .count();
     (order, matched == want)
+}
+
+/// Decide which restored windows to consume-left to rebuild their saved
+/// multi-window columns. Each element is
+/// `(id, saved_(column, tile), current_column, stackable_now)` for one
+/// restore-tagged window on a single workspace; the returned ids are consumed
+/// left-to-right by the caller.
+///
+/// A window is consumed when it shares the saved *column* of the entry directly
+/// before it (in saved `(column, tile)` order) but does not yet share that
+/// entry's *live* column — i.e. it is a not-yet-stacked tile of the same saved
+/// column, sitting immediately to its leader's right (restore placement keeps
+/// single-window columns in saved order, so it is adjacent). Windows flagged
+/// `!stackable_now` are left in place for a later pass.
+///
+/// Idempotent: once a tile sits in its leader's live column it is skipped, so
+/// re-running never expels an already-stacked tile.
+pub(crate) fn restore_columns_to_consume<Id: Clone>(
+    mut windows: Vec<(Id, (usize, usize), usize, bool)>,
+) -> Vec<Id> {
+    windows.sort_by_key(|(_, saved, _, _)| *saved);
+    let mut out = Vec::new();
+    let mut prev: Option<(usize, usize)> = None; // (saved column, live column)
+    for (id, (saved_col, _saved_tile), cur_col, stackable) in &windows {
+        if let Some((prev_saved_col, prev_cur_col)) = prev {
+            if *saved_col == prev_saved_col && *stackable && *cur_col != prev_cur_col {
+                out.push(id.clone());
+            }
+        }
+        prev = Some((*saved_col, *cur_col));
+    }
+    out
 }
 
 #[cfg(test)]

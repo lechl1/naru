@@ -140,17 +140,6 @@ pub struct SessionManager {
     /// against this lets an idle (or layout-stable, cwd-stable) session avoid an
     /// fsync every minute. `None` until the first successful save.
     last_saved: Option<SessionState>,
-
-    /// Whether the post-restore multi-window-column stacking pass has already run.
-    ///
-    /// Stacking is driven from two places — the map handler when the last pending
-    /// window drains, and the restore-settle timer as a backstop when some saved
-    /// windows never reappear — and the timer fires even after a healthy drain. A
-    /// second pass would see already-stacked (multi-tile) columns and *expel*
-    /// their tiles back into separate columns, undoing the restore, so this gate
-    /// makes the pass run exactly once. See
-    /// [`crate::naru::Naru::stack_restored_columns`].
-    columns_stacked: bool,
 }
 
 impl SessionManager {
@@ -200,7 +189,6 @@ impl SessionManager {
             pending_active_workspace,
             title_reconcile,
             last_saved: None,
-            columns_stacked: false,
         })
     }
 
@@ -216,20 +204,6 @@ impl SessionManager {
     /// timeout) to return focus to the workspace the user left active.
     pub fn take_pending_active_workspace(&mut self) -> Option<ActiveWorkspace> {
         self.pending_active_workspace.take()
-    }
-
-    /// Claim the one-shot right to run the post-restore column-stacking pass.
-    ///
-    /// Returns `true` exactly once — the first caller runs the pass; every later
-    /// caller gets `false` and must skip it. See the [`columns_stacked`] field.
-    ///
-    /// [`columns_stacked`]: Self::columns_stacked
-    pub fn claim_column_stacking(&mut self) -> bool {
-        if self.columns_stacked {
-            return false;
-        }
-        self.columns_stacked = true;
-        true
     }
 
     /// Register the recurring [`PERIODIC_SAVE`] timer on the event loop.
@@ -296,6 +270,12 @@ impl SessionManager {
         let res = loop_handle.insert_source(timer, move |_deadline, _, state| {
             ticks += 1;
             let done = state.naru.reconcile_restored_titles();
+            if done {
+                // Same-app window order has settled, so the browser tiles that
+                // the map-drain/settle stacking deferred are now sitting in their
+                // saved single-window order — safe to merge into their columns.
+                state.naru.stack_all_restored_columns();
+            }
             if done || ticks >= RECONCILE_MAX_TICKS {
                 TimeoutAction::Drop
             } else {
@@ -461,21 +441,6 @@ mod tests {
     fn off_returns_none() {
         let c = cfg(true, None);
         assert!(SessionManager::new(&c).is_none());
-    }
-
-    #[test]
-    fn claim_column_stacking_grants_exactly_once() {
-        let path = std::env::temp_dir()
-            .join(format!("naru-stack-claim-{}.json", std::process::id()));
-        let c = cfg(false, path.to_str());
-        let mut m = SessionManager::new(&c).expect("manager");
-
-        assert!(m.claim_column_stacking(), "first claim runs the stacking pass");
-        assert!(
-            !m.claim_column_stacking(),
-            "the settle-timer backstop must not re-stack after a healthy drain",
-        );
-        assert!(!m.claim_column_stacking(), "still a no-op on every later call");
     }
 
     #[test]

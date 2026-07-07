@@ -839,24 +839,50 @@ mod tests {
         }
         sim.settle();
 
-        // `stack_restored_columns`: sort by (col, tile), mark every non-leader
-        // (shares its predecessor's column) for a consume-left, then apply.
-        let mut entries = placed.clone();
-        entries.sort_by_key(|(_, p)| *p);
-        let mut to_consume = Vec::new();
-        let mut prev_col: Option<usize> = None;
-        for (id, (col, _tile)) in &entries {
-            if Some(*col) == prev_col {
-                to_consume.push(*id);
-            }
-            prev_col = Some(*col);
-        }
-        for id in to_consume {
+        // `stack_restored_columns`, driven by the real decision function on the
+        // live column indices. Run it twice and require the second pass to leave
+        // the columns unchanged — proof the pass is idempotent and never expels an
+        // already-stacked tile (the bug the old one-shot gate guarded against).
+        run_stack_pass(&mut sim, &placed, |_| true);
+        let after_first: Vec<_> = placed
+            .iter()
+            .map(|(id, _)| sim.scrolling_column_index(*id))
+            .collect();
+        run_stack_pass(&mut sim, &placed, |_| true);
+        let after_second: Vec<_> = placed
+            .iter()
+            .map(|(id, _)| sim.scrolling_column_index(*id))
+            .collect();
+        assert_eq!(
+            after_first, after_second,
+            "re-running the stacking pass must be a no-op (idempotent)",
+        );
+
+        (sim, id_of)
+    }
+
+    /// Mirror `Naru::stack_restored_columns_impl`: build
+    /// `(id, saved (col, tile), live column, stackable)` for each placed window
+    /// and consume-left exactly the ids the production `restore_columns_to_consume`
+    /// selects. `stackable(id)` models deferring title-reconcile (browser) apps.
+    fn run_stack_pass(
+        sim: &mut LayoutSim,
+        placed: &[(usize, (usize, usize))],
+        stackable: impl Fn(usize) -> bool,
+    ) {
+        let windows: Vec<(usize, (usize, usize), usize, bool)> = placed
+            .iter()
+            .map(|(id, saved)| {
+                let cur = sim
+                    .scrolling_column_index(*id)
+                    .expect("placed window has a live column");
+                (*id, *saved, cur, stackable(*id))
+            })
+            .collect();
+        for id in crate::naru::restore_columns_to_consume(windows) {
             sim.apply(Op::ConsumeOrExpelWindowLeft { id: Some(id) });
         }
         sim.settle();
-
-        (sim, id_of)
     }
 
     /// The full restore flow — placement *and* stacking — reconstructs
@@ -907,6 +933,56 @@ mod tests {
             assert!(y(3) < y(4), "order {order:?}: w3 sits above w4");
             assert!(y(4) < y(5), "order {order:?}: w4 sits above w5");
         }
+    }
+
+    /// Apps still awaiting async title reconcile (browsers) must not be stacked by
+    /// the early map-drain/settle pass — their tiles could be merged in whatever
+    /// order they mapped, and a stacked column is no longer reorderable by the
+    /// single-window title reconcile. They are stacked only by the later full pass
+    /// the reconcile poll runs once window order has settled. Regression test for
+    /// restored stacked windows landing in neighbouring columns.
+    #[test]
+    fn restore_defers_then_stacks_browser_columns() {
+        // Saved: col 0 = [w0, w1] (a "browser" 2-stack), col 1 = [w2].
+        let saved = [(0, 0), (0, 1), (1, 0)];
+        let order = [2usize, 1, 0];
+
+        let mut sim = LayoutSim::new_stacking();
+        sim.add_output(1);
+        let mut placed: Vec<(usize, (usize, usize))> = Vec::new();
+        let mut id_of = vec![usize::MAX; saved.len()];
+        for &wi in &order {
+            let key = saved[wi];
+            let id = sim.add_window();
+            id_of[wi] = id;
+            let before = placed.iter().filter(|(_, p)| *p < key).count();
+            sim.focus_window(id);
+            sim.move_column_to_index(before + 1);
+            placed.push((id, key));
+        }
+        sim.settle();
+
+        // Deterministic pass defers w0/w1 (the browser stack): nothing merges.
+        let browsers = [id_of[0], id_of[1]];
+        run_stack_pass(&mut sim, &placed, |id| !browsers.contains(&id));
+        assert_ne!(
+            sim.scrolling_column_index(id_of[0]),
+            sim.scrolling_column_index(id_of[1]),
+            "deferred browser tiles stay in separate columns until their order settles",
+        );
+
+        // Full pass (reconcile satisfied) stacks the browser column.
+        run_stack_pass(&mut sim, &placed, |_| true);
+        assert_eq!(
+            sim.scrolling_column_index(id_of[0]),
+            sim.scrolling_column_index(id_of[1]),
+            "the full pass stacks the browser column",
+        );
+        assert_ne!(
+            sim.scrolling_column_index(id_of[0]),
+            sim.scrolling_column_index(id_of[2]),
+            "the single-window column stays distinct",
+        );
     }
 
     /// Animations are genuinely simulated frame by frame: an animated action
