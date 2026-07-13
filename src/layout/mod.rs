@@ -2176,37 +2176,58 @@ impl<W: LayoutElement> Layout<W> {
         self.monitors().map(|mon| &mon.output)
     }
 
+    // The move actions all go through the Monitor rather than straight to the
+    // active Workspace: the Monitor owns the fixed-side panels and is the only
+    // level that knows whether focus is in a strip or in the carousel. See
+    // `Monitor::move_left` for why reaching for the workspace directly moved the
+    // wrong window.
+
     pub fn move_left(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             return;
         };
-        workspace.move_left();
+        monitor.move_left();
     }
 
     pub fn move_right(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             return;
         };
-        workspace.move_right();
+        monitor.move_right();
     }
 
     pub fn move_column_to_first(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             return;
         };
-        workspace.move_column_to_first();
+        // Column *indices* address the carousel; with a panel focused there is
+        // no carousel column to move, so stay a no-op instead of yanking the
+        // last-active carousel column around behind the user's back.
+        if monitor.panel_has_focus() {
+            return;
+        }
+        monitor.active_workspace().move_column_to_first();
     }
 
     pub fn move_column_to_last(&mut self) {
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             return;
         };
-        workspace.move_column_to_last();
+        if monitor.panel_has_focus() {
+            return;
+        }
+        monitor.active_workspace().move_column_to_last();
     }
 
     pub fn move_column_left_or_to_output(&mut self, output: &Output) -> bool {
-        if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.move_left() {
+        if let Some(monitor) = self.active_monitor() {
+            // A panel window never crosses to another output this way — the
+            // strips belong to this monitor. Consume the keypress in the strip.
+            if monitor.panel_has_focus() {
+                monitor.move_left();
+                return false;
+            }
+            if monitor.active_workspace().move_left() {
                 return false;
             }
         }
@@ -2216,8 +2237,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_right_or_to_output(&mut self, output: &Output) -> bool {
-        if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.move_right() {
+        if let Some(monitor) = self.active_monitor() {
+            if monitor.panel_has_focus() {
+                monitor.move_right();
+                return false;
+            }
+            if monitor.active_workspace().move_right() {
                 return false;
             }
         }
@@ -2227,10 +2252,13 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_to_index(&mut self, index: usize) {
-        let Some(workspace) = self.active_workspace_mut() else {
+        let Some(monitor) = self.active_monitor() else {
             return;
         };
-        workspace.move_column_to_index(index);
+        if monitor.panel_has_focus() {
+            return;
+        }
+        monitor.active_workspace().move_column_to_index(index);
     }
 
     /// Reorder the single-window columns holding `ordered_ids` within workspace `ws_id`
@@ -2715,6 +2743,20 @@ impl<W: LayoutElement> Layout<W> {
             self.stacking_move_state = None;
             return;
         }
+
+        // Strip-aware dispatch — the vertical twin of the check in
+        // [`move_window_left_stacked`]. Without it `active_focused_tile_info()`
+        // routes the move to the carousel's stale active column, and the
+        // failure fallback below would hand a carousel tile to the workspace
+        // above while a panel window is focused.
+        if let Some(monitor) = self.active_monitor() {
+            if monitor.panel_has_focus() {
+                let _ = monitor.move_up();
+                self.stacking_move_state = None;
+                return;
+            }
+        }
+
         let direction = StackingMoveDirection::Up;
         let Some((focused_id, focused_stack_len, _column_tile_count)) =
             self.active_focused_tile_info()
@@ -2755,6 +2797,16 @@ impl<W: LayoutElement> Layout<W> {
             self.stacking_move_state = None;
             return;
         }
+
+        // Strip-aware dispatch — see [`move_window_up_stacked`].
+        if let Some(monitor) = self.active_monitor() {
+            if monitor.panel_has_focus() {
+                let _ = monitor.move_down();
+                self.stacking_move_state = None;
+                return;
+            }
+        }
+
         let direction = StackingMoveDirection::Down;
         let Some((focused_id, focused_stack_len, _column_tile_count)) =
             self.active_focused_tile_info()

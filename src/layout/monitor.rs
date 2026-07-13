@@ -684,6 +684,72 @@ impl<W: LayoutElement> Monitor<W> {
         split
     }
 
+    // --- Panel-aware move traversal ------------------------------------------
+    //
+    // The mirror image of the focus traversal below, and it exists for the same
+    // reason: `active_fixed_side` lives on the Monitor (it owns the panels),
+    // while `Workspace::move_*` only knows the carousel and the floating layer.
+    // A `Layout::move_*` that reached for the workspace directly therefore acted
+    // on the carousel's *stale* active column whenever focus had hopped into a
+    // strip — moving the last carousel window instead of the focused panel one.
+    // Every move action now routes through here, so the move always follows the
+    // focus.
+    //
+    // Within a strip a horizontal move reorders the focused column; at the
+    // strip's inner (carousel-facing) edge it hands the column back to the
+    // carousel, which is the same boundary crossing the stacked moves do. At the
+    // outer edge it is a no-op — there is nothing further out.
+
+    pub(super) fn move_left(&mut self) -> bool {
+        match self.panels.active_fixed_side() {
+            Some(FixedSide::Left) => self.panels.move_column_left_in_active(),
+            Some(FixedSide::Right) => {
+                // Left is toward the carousel for the right strip.
+                self.panels.move_column_left_in_active()
+                    || self.move_active_strip_column_back_to_carousel_right()
+            }
+            None => self.active_ws().move_left(),
+        }
+    }
+
+    pub(super) fn move_right(&mut self) -> bool {
+        match self.panels.active_fixed_side() {
+            Some(FixedSide::Right) => self.panels.move_column_right_in_active(),
+            Some(FixedSide::Left) => {
+                // Right is toward the carousel for the left strip.
+                self.panels.move_column_right_in_active()
+                    || self.move_active_strip_column_back_to_carousel_left()
+            }
+            None => self.active_ws().move_right(),
+        }
+    }
+
+    /// Move the focused window up/down: within its strip column when a panel
+    /// has focus, otherwise within the carousel column.
+    pub(super) fn move_up(&mut self) -> bool {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.move_up_in_active()
+        } else {
+            self.active_ws().move_up()
+        }
+    }
+
+    pub(super) fn move_down(&mut self) -> bool {
+        if self.panels.active_fixed_side().is_some() {
+            self.panels.move_down_in_active()
+        } else {
+            self.active_ws().move_down()
+        }
+    }
+
+    /// Whether a fixed-side panel currently holds focus. Move actions that only
+    /// make sense in the carousel (`move-column-to-first`, `…-to-index`, the
+    /// move-to-other-output variants) check this and stay a no-op rather than
+    /// reaching past the focused panel into the carousel.
+    pub(super) fn panel_has_focus(&self) -> bool {
+        self.panels.active_fixed_side().is_some()
+    }
+
     // --- Panel-aware focus traversal -----------------------------------------
 
     pub(super) fn focus_left(&mut self) -> bool {
@@ -1433,12 +1499,23 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn move_down_or_to_workspace_down(&mut self) {
+        // A panel window stays in its strip: the fallback below would hand a
+        // *carousel* tile to the next workspace, and panels aren't per-workspace
+        // anyway, so there is nothing to fall through to.
+        if self.panel_has_focus() {
+            self.move_down();
+            return;
+        }
         if !self.active_workspace().move_down() {
             self.move_to_workspace_down(true);
         }
     }
 
     pub fn move_up_or_to_workspace_up(&mut self) {
+        if self.panel_has_focus() {
+            self.move_up();
+            return;
+        }
         if !self.active_workspace().move_up() {
             self.move_to_workspace_up(true);
         }

@@ -436,6 +436,39 @@ impl<W: LayoutElement> FixedStrip<W> {
         result
     }
 
+    /// Reorder the focused column one slot toward the strip's left/right —
+    /// the within-strip equivalent of `move-column-left` / `move-column-right`
+    /// in the carousel. Returns false at the strip's edge, so the caller can
+    /// decide whether the keypress is a no-op or crosses the panel boundary.
+    pub fn move_column_left(&mut self) -> bool {
+        let moved = self.inner.move_left();
+        self.repin();
+        moved
+    }
+
+    pub fn move_column_right(&mut self) -> bool {
+        let moved = self.inner.move_right();
+        self.repin();
+        moved
+    }
+
+    /// Move the focused window up/down within its column inside the strip —
+    /// the within-strip equivalent of `move-window-up` / `move-window-down`.
+    /// Returns false at the column's top/bottom. Unlike the carousel there is
+    /// no workspace-crossing fallback: panels are owned by the monitor, not by
+    /// a workspace, so there is nowhere for the window to fall through to.
+    pub fn move_active_up(&mut self) -> bool {
+        let moved = self.inner.move_up();
+        self.repin();
+        moved
+    }
+
+    pub fn move_active_down(&mut self) -> bool {
+        let moved = self.inner.move_down();
+        self.repin();
+        moved
+    }
+
     /// Whether the currently focused column inside this strip is the one
     /// closest to the carousel ("inner edge"). When true, a stack-move toward
     /// the carousel should hand the column back to it instead of moving
@@ -1136,6 +1169,25 @@ impl<W: LayoutElement> FixedPanels<W> {
 
     pub fn focus_down_in_active(&mut self) -> bool {
         self.active_strip_mut().is_some_and(|s| s.focus_down())
+    }
+
+    // --- Movement within the active panel ------------------------------------
+
+    pub fn move_column_left_in_active(&mut self) -> bool {
+        self.active_strip_mut().is_some_and(|s| s.move_column_left())
+    }
+
+    pub fn move_column_right_in_active(&mut self) -> bool {
+        self.active_strip_mut()
+            .is_some_and(|s| s.move_column_right())
+    }
+
+    pub fn move_up_in_active(&mut self) -> bool {
+        self.active_strip_mut().is_some_and(|s| s.move_active_up())
+    }
+
+    pub fn move_down_in_active(&mut self) -> bool {
+        self.active_strip_mut().is_some_and(|s| s.move_active_down())
     }
 
     /// Focus the innermost (carousel-facing) column of `side`. Returns `true`

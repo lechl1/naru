@@ -430,6 +430,16 @@ impl LayoutSim {
         self.verify();
     }
 
+    pub fn move_up(&mut self) {
+        self.layout.move_up();
+        self.verify();
+    }
+
+    pub fn move_down(&mut self) {
+        self.layout.move_down();
+        self.verify();
+    }
+
     pub fn focus_column_first(&mut self) {
         self.layout.focus_column_first();
         self.verify();
@@ -3106,5 +3116,87 @@ mod tests {
         assert_eq!(sim.layout.materialize_workspace_id_at(None, 1), Some(ws1));
 
         sim.layout.end_session_restore();
+    }
+
+    /// The reported bug: focus hops carousel → side panel, and the *next move*
+    /// acts on the carousel's last-active window instead of the now-focused
+    /// panel window. The move actions used to reach for `Workspace::move_*`,
+    /// which can only see the carousel and the floating layer — the
+    /// `active_fixed_side` flag lives one level up on the Monitor, so a move
+    /// after a cross-boundary focus silently addressed a stale carousel column.
+    #[test]
+    fn move_after_focus_into_panel_acts_on_the_panel_window() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+
+        let left_win = sim.add_window();
+        let right_win = sim.add_window();
+        // Two columns in the right strip, so a horizontal move reorders inside
+        // the strip instead of handing the column back to the carousel (that
+        // boundary crossing is the next test's job).
+        let outer = sim.add_window_in_fixed_side(OpenInFixedSide::Right);
+        let inner = sim.add_window_in_fixed_side(OpenInFixedSide::Right);
+        sim.settle();
+
+        // Focus a carousel window, then hop right into the panel.
+        sim.focus_window(right_win);
+        sim.focus_right();
+        sim.settle();
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+        assert_eq!(sim.active_window_id(), Some(inner));
+
+        let (left_x, right_x) = (sim.window_x(left_win), sim.window_x(right_win));
+        assert!(left_x < right_x, "precondition: left_win sits left of right_win");
+
+        // Every one of these used to move `right_win` — the carousel's stale
+        // active column — while the panel window sat focused and untouched.
+        sim.move_right(); // within strip: focused column toward the outer edge
+        sim.settle();
+        sim.move_left(); // and back toward the carousel-facing edge
+        sim.settle();
+        sim.move_up();
+        sim.settle();
+        sim.move_down();
+        sim.settle();
+
+        // The carousel is exactly as it was: same slots, same order, nothing
+        // dragged sideways and nothing pulled into the panel.
+        sim.assert_slot(left_win, WindowLayer::Scrolling);
+        sim.assert_slot(right_win, WindowLayer::Scrolling);
+        assert_eq!(
+            (sim.window_x(left_win), sim.window_x(right_win)),
+            (left_x, right_x),
+            "carousel columns must not move while a panel window is focused",
+        );
+
+        // Focus never left the panel, and both panel windows stayed in it.
+        sim.assert_slot(inner, WindowLayer::FixedRight);
+        sim.assert_slot(outer, WindowLayer::FixedRight);
+        assert_eq!(sim.active_window_id(), Some(inner));
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+    }
+
+    /// The move that *does* cross the boundary: a single-window column at the
+    /// right strip's inner edge is handed back to the carousel by a plain
+    /// `move-column-left`, so a panel window is never stranded.
+    #[test]
+    fn move_left_hands_inner_edge_panel_column_back_to_the_carousel() {
+        let mut sim = LayoutSim::new();
+        sim.add_output(1);
+
+        let carousel = sim.add_window();
+        let panel = sim.add_window_in_fixed_side(OpenInFixedSide::Right);
+        sim.settle();
+
+        sim.focus_window(panel);
+        sim.settle();
+        assert_eq!(sim.active_fixed_side(), Some(FixedSide::Right));
+
+        sim.move_left();
+        sim.settle();
+
+        sim.assert_slot(panel, WindowLayer::Scrolling);
+        sim.assert_slot(carousel, WindowLayer::Scrolling);
+        assert_eq!(sim.active_fixed_side(), None, "focus follows the window out");
     }
 }
