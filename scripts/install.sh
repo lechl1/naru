@@ -8,13 +8,37 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$REPO_ROOT/target/debug/naru"
 
-# Build the binary if it isn't present. Done before the sudo re-exec so the
-# build runs as the invoking user (cargo artifacts stay user-owned) — when the
-# script is launched directly as root, build as $SUDO_USER for the same reason.
-if [[ ! -x "$BIN" ]]; then
-    echo "$BIN not found — building it first."
+# Which binary to install, in order:
+#   1. $NARU_BIN            — explicit override.
+#   2. target/release/naru  — what a container/CI build produces.
+#   3. target/debug/naru    — what scripts/build.sh produces locally.
+#
+# Preferring an already-built binary over building matters for callers that
+# cross-build elsewhere and only run this script to place system files: alloy's
+# naru module builds in a rust container precisely so the host needs no
+# toolchain, then calls this script. When BIN was hardcoded to target/debug it
+# never saw that release binary, fell through to scripts/build.sh, and died on
+# "cargo not found" — on a host that was never supposed to need cargo.
+#
+# Standalone use is unchanged: with no prebuilt binary anywhere, this still
+# builds a debug one via scripts/build.sh, exactly as before.
+BIN="${NARU_BIN:-}"
+if [[ -z "$BIN" ]]; then
+    for candidate in "$REPO_ROOT/target/release/naru" "$REPO_ROOT/target/debug/naru"; do
+        if [[ -x "$candidate" ]]; then
+            BIN="$candidate"
+            break
+        fi
+    done
+fi
+
+# Nothing prebuilt — build it. Done before the sudo re-exec so the build runs as
+# the invoking user (cargo artifacts stay user-owned); when the script is
+# launched directly as root, build as $SUDO_USER for the same reason.
+if [[ -z "$BIN" || ! -x "$BIN" ]]; then
+    BIN="$REPO_ROOT/target/debug/naru"
+    echo "no prebuilt naru binary found — building it first."
     if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
         sudo -u "$SUDO_USER" "$REPO_ROOT/scripts/build.sh"
     else
@@ -22,10 +46,14 @@ if [[ ! -x "$BIN" ]]; then
     fi
 fi
 
-# Everything below writes system paths, so it needs root.
+echo "installing naru binary from $BIN"
+
+# Everything below writes system paths, so it needs root. Carry NARU_BIN across
+# the re-exec — without it sudo strips the override and the root pass would
+# re-resolve to a different binary than the one the caller asked for.
 if [[ $EUID -ne 0 ]]; then
     echo "Re-running install step with sudo..."
-    exec sudo --preserve-env=PATH "$0" "$@"
+    exec sudo --preserve-env=PATH NARU_BIN="$BIN" "$0" "$@"
 fi
 
 echo "Installing naru from $REPO_ROOT ..."
