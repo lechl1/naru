@@ -1353,6 +1353,198 @@ mod tests {
             .count()
     }
 
+    /// Asserts the disable-carousel contract on the rendered result: no window
+    /// hangs off either side of the screen, and the row as a whole spans no more
+    /// than the screen. With the carousel disabled there is no scrolling, so a
+    /// window off the edge is a window the user cannot reach.
+    #[track_caller]
+    fn assert_row_within_screen(sim: &LayoutSim, screen_w: f64, what: &str) {
+        let geos: Vec<_> = sim
+            .window_ids()
+            .into_iter()
+            .filter_map(|id| sim.window_geometry(&id).map(|g| (id, g)))
+            .collect();
+        assert!(!geos.is_empty(), "no windows to check ({what})");
+
+        for (id, g) in &geos {
+            assert!(
+                g.loc.x >= -1.0 && g.loc.x + g.size.w <= screen_w + 1.0,
+                "{what}: window {id} spans [{}, {}], off the {screen_w}px screen",
+                g.loc.x,
+                g.loc.x + g.size.w,
+            );
+        }
+
+        let left = geos
+            .iter()
+            .map(|(_, g)| g.loc.x)
+            .fold(f64::INFINITY, f64::min);
+        let right = geos
+            .iter()
+            .map(|(_, g)| g.loc.x + g.size.w)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            right - left <= screen_w + 1.0,
+            "{what}: row spans {}px, wider than the {screen_w}px screen",
+            right - left,
+        );
+    }
+
+    /// Windows that open *next to* an existing one (a dialog opening over its
+    /// parent, `open-next-to` window rules) take a different insertion path than
+    /// windows that open at the end of the row — and that path used to skip the
+    /// disable-carousel re-fit entirely. Every such window pushed the row further
+    /// past the screen edge, which is the "windows opening end up wider than the
+    /// screen" bug.
+    #[test]
+    fn disable_carousel_row_fits_when_windows_open_next_to_parent() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        let parent = sim.add_window();
+        for _ in 0..8 {
+            sim.add_window_with(|params| params.parent_id = Some(parent));
+        }
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        assert_row_within_screen(&sim, 1280.0, "nine windows opened next to their parent");
+    }
+
+    /// A window with a large minimum width cannot be shrunk to its share of the
+    /// row — the client refuses. The fit has to take those pixels out of the
+    /// columns that *can* shrink instead. A shared `usable / total_natural` factor
+    /// can't: it assumes the stubborn column shrank like everyone else, so the row
+    /// silently overflows by whatever that column refused to give up.
+    #[test]
+    fn disable_carousel_row_fits_around_a_window_with_a_large_minimum_width() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        // 600px of the 1280px screen is spoken for and cannot shrink.
+        let stubborn = sim.add_window_with(|params| {
+            params.min_max_size.0.w = 600;
+        });
+        for _ in 0..5 {
+            sim.add_window();
+        }
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let geo = sim.window_geometry(&stubborn).expect("stubborn geo");
+        assert!(
+            geo.size.w >= 600.0,
+            "a window's minimum width must be honored, got {}",
+            geo.size.w,
+        );
+        assert_row_within_screen(&sim, 1280.0, "five windows beside a 600px-minimum window");
+    }
+
+    /// Dragging a window's edge outward must not walk the row off the screen. The
+    /// window still tracks the cursor — the rest of the row shrinks to pay for it —
+    /// and once there's nothing left to take, the window simply stops growing.
+    #[test]
+    fn disable_carousel_interactive_resize_never_overflows_the_screen() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        let _a = sim.add_window();
+        let b = sim.add_window(); // active, rightmost
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        let before = sim.window_geometry(&b).expect("b geo").size.w;
+
+        sim.apply(Op::InteractiveResizeBegin {
+            window: b,
+            edges: crate::layout::ResizeEdge::RIGHT,
+        });
+
+        // Drag far past the screen edge, in steps, checking after each one.
+        for step in 1..=10 {
+            sim.apply(Op::InteractiveResizeUpdate {
+                window: b,
+                dx: 200.0 * f64::from(step),
+                dy: 0.0,
+            });
+            sim.communicate_all();
+            sim.complete_animations();
+            sim.update_render_elements();
+
+            assert_row_within_screen(&sim, 1280.0, &format!("mid-drag, step {step}"));
+        }
+
+        let after = sim.window_geometry(&b).expect("b geo").size.w;
+        assert!(
+            after > before,
+            "the dragged window must still grow: {before} -> {after}",
+        );
+
+        sim.apply(Op::InteractiveResizeEnd { window: b });
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        assert_row_within_screen(&sim, 1280.0, "after the drag ended");
+    }
+
+    /// Expelling a window out of its column creates a new column, which is another
+    /// insertion path that skipped the re-fit. Same for consuming it back in, which
+    /// grows the host column to hold the carried window.
+    #[test]
+    fn disable_carousel_row_fits_after_expel_and_consume() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        for _ in 0..4 {
+            sim.add_window();
+        }
+        // Stack the last two into one column, then push one back out — each move
+        // changes both the column count and the columns' widths.
+        sim.apply(Op::ConsumeWindowIntoColumn);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        assert_row_within_screen(&sim, 1280.0, "after consuming a window into a column");
+
+        sim.apply(Op::ExpelWindowFromColumn);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+        assert_row_within_screen(&sim, 1280.0, "after expelling a window from a column");
+    }
+
+    /// Plenty of apps ask to be maximized as they open. A maximized column takes
+    /// the whole parent area, so next to any other column it hangs off the screen
+    /// unless it, too, takes only its fitted share of the row.
+    #[test]
+    fn disable_carousel_row_fits_when_a_window_opens_maximized() {
+        let mut options = Options::default();
+        options.layout.disable_carousel = true;
+        let mut sim = LayoutSim::with_options(options);
+        sim.add_output(1); // 1280×720
+
+        sim.add_window();
+        sim.add_window();
+        sim.apply(Op::MaximizeColumn);
+        sim.communicate_all();
+        sim.complete_animations();
+        sim.update_render_elements();
+
+        assert_row_within_screen(&sim, 1280.0, "a maximized column beside another column");
+    }
+
     /// Moving a window right out of a column that holds more than one window
     /// must split it into its own new single-window column — not merge it into
     /// the right neighbour's stack. Regression: the default routing pushed the

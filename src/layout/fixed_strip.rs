@@ -72,7 +72,10 @@ impl<W: LayoutElement> FixedStrip<W> {
         // as the carousel) for both sides; the strip's edge anchoring is done
         // by pinning the view offset in `repin`, not by shifting the parent
         // area. So column-width math matches the carousel exactly.
-        let inner = ScrollingSpace::new(view_size, outer_working_area, scale, clock, options);
+        // Not a carousel row: a strip owns its own width and is not part of the row
+        // that `disable-carousel` fits between the panels. See `ScrollingSpace::is_carousel`.
+        let inner =
+            ScrollingSpace::new(view_size, outer_working_area, scale, clock, options).into_strip();
         Self { side, inner }
     }
 

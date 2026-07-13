@@ -668,6 +668,14 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn update_render_elements(&mut self, is_active: bool, panel_focus: Option<FixedSide>) {
         self.sync_carousel_parent_area();
 
+        // Last stop before the row is laid out for display: make sure it fits the
+        // screen. Every path that changes a column's width re-fits explicitly, but
+        // "the row never exceeds the screen" is the whole point of disable-carousel
+        // mode, so it's enforced here as well rather than left to the discipline of
+        // a dozen call sites — including ones added later. Cheap no-op unless a
+        // width actually needs to change, and inert outside disable-carousel mode.
+        self.scrolling.enforce_fit_to_parent();
+
         let tiling_active = is_active && !self.floating_is_active.get();
         let scrolling_focused = tiling_active && panel_focus.is_none();
 
@@ -2692,13 +2700,18 @@ impl<W: LayoutElement> Workspace<W> {
         // re-fit the row to it now — proportionally scaling every column toward
         // its preferred width to fit the available space — and re-center.
         //
-        // Skip while a mouse-driven interactive resize is in flight: re-fitting
-        // cancels the interactive resize, and that path already keeps the view
-        // centered itself.
-        if self.options.layout.disable_carousel
-            && !self.scrolling.is_interactive_resize_ongoing()
-        {
-            self.refit_carousel(false);
+        // During a mouse-driven interactive resize this has to re-fit *without*
+        // cancelling the drag — the plain re-fit cancels it. Skipping the re-fit
+        // entirely (what this used to do) leaves the row fitted to the width the
+        // window had one commit ago: the client acks the drag's new size only now,
+        // so the row is re-fitted and re-centered against a stale width and the
+        // growing window walks off the screen edge.
+        if self.options.layout.disable_carousel {
+            if self.scrolling.is_interactive_resize_ongoing() {
+                self.scrolling.fit_columns_to_parent_keep_resize(false);
+            } else {
+                self.refit_carousel(false);
+            }
             self.scrolling.auto_fit_or_center_view_offset();
         }
     }

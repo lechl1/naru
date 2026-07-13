@@ -131,6 +131,15 @@ pub struct ScrollingSpace<W: LayoutElement> {
     /// Clock for driving animations.
     clock: Clock,
 
+    /// Whether this space is a workspace's carousel row, as opposed to the inner
+    /// space of a [`FixedStrip`](super::fixed_strip::FixedStrip).
+    ///
+    /// Only the carousel is subject to the `disable-carousel` shrink-to-fit: it is
+    /// the row that has to fit between the fixed-side panels. The panels are not
+    /// part of that row — they own their own width — so fitting their inner space
+    /// to the whole working area would fight the strip's own sizing.
+    is_carousel: bool,
+
     /// Configurable properties of the layout.
     options: Rc<Options>,
 }
@@ -358,8 +367,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             parent_area,
             scale,
             clock,
+            // Carousel by default; `FixedStrip` opts out via `into_strip`.
+            is_carousel: true,
             options,
         }
+    }
+
+    /// Mark this space as a fixed-side strip's inner space rather than a carousel
+    /// row, exempting it from the `disable-carousel` fit. See [`Self::is_carousel`].
+    pub(super) fn into_strip(mut self) -> Self {
+        self.is_carousel = false;
+        self
     }
 
     pub fn update_config(
@@ -381,6 +399,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.parent_area = parent_area;
         self.scale = scale;
         self.options = options;
+
+        // The area the row has to fit in just changed — the output was resized or
+        // rescaled, the struts or gaps changed, or `disable-carousel` was toggled on
+        // in a config reload. Re-fit against the new area before anything reads the
+        // column widths, otherwise the row keeps the factor it computed for the old
+        // one. Unanimated: a config reload or output change should already be in its
+        // final state, not tween into it.
+        self.fit_columns_to_parent(false);
 
         // Apply always-center and such right away.
         if !self.columns.is_empty() && !self.view_offset.is_gesture() {
@@ -1130,6 +1156,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 col.animate_move_from(offset);
             }
         }
+
+        // No new column, but the new window's minimum width can raise the whole
+        // column's, taking room from the rest of the disable-carousel row.
+        self.fit_columns_to_parent(false);
     }
 
     pub fn add_tile_right_of(
@@ -1219,6 +1249,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.activate_column_with_anim_config(idx, anim_config);
             self.activate_prev_column_on_removal = prev_offset;
         }
+
+        // Every column insertion in the layout ends up here — a window opening, a
+        // window expelled from its column, a column moved in from another
+        // workspace — so this is where the disable-carousel row is re-fitted to
+        // make room for it. Unanimated: the row must be at its fitted widths
+        // *before* the new window's open animation, or the window plays that
+        // animation at a width that doesn't fit and then jumps.
+        self.fit_columns_to_parent(false);
 
         self.auto_fit_or_center_view_offset();
     }
@@ -1348,6 +1386,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             }
         }
 
+        // Removing a window can lower its column's minimum width, freeing room for
+        // the rest of the row to grow back toward their natural widths. Animated:
+        // the row settling after a close should tween, not snap.
+        self.fit_columns_to_parent(true);
+
         tile
     }
 
@@ -1441,6 +1484,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 view_config,
             );
         }
+
+        // A column left the row: the survivors can grow back toward their natural
+        // widths. Animated — this is the row settling after a close.
+        self.fit_columns_to_parent(true);
 
         self.auto_fit_or_center_view_offset();
 
@@ -2651,6 +2698,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             true,
         );
         self.data[col_idx].update(&self.columns[col_idx]);
+
+        // The host column was just grown to hold the carried window — re-fit, or
+        // that growth comes straight out of the screen's right edge.
+        self.fit_columns_to_parent(true);
     }
 
     /// Restore `col_idx`'s width from the host snapshot, if the carried window had grown
@@ -2660,6 +2711,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         if let Some(snapshot) = snapshot {
             self.columns[col_idx].restore_width_snapshot(&snapshot);
             self.data[col_idx].update(&self.columns[col_idx]);
+            self.fit_columns_to_parent(true);
         }
     }
 
@@ -2675,6 +2727,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             true,
         );
         self.data[col_idx].update(&self.columns[col_idx]);
+
+        // The expelled window got its remembered width back, which may be more than
+        // the row can spare — re-fit.
+        self.fit_columns_to_parent(true);
     }
 
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
@@ -3140,6 +3196,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.set_fullscreen(&window, false);
             self.set_maximized(&window, false);
         }
+
+        // The tab indicator adds to the column's width, so switching display mode
+        // changes how much of the row this column takes.
+        self.fit_columns_to_parent(true);
     }
 
     pub fn center_column(&mut self) {
@@ -3757,52 +3817,204 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     /// Re-centers the row afterwards. No-op when the carousel is enabled or
     /// empty.
     pub fn fit_columns_to_parent(&mut self, animate: bool) {
-        if !self.options.layout.disable_carousel || self.columns.is_empty() {
+        self.fit_columns_to_parent_inner(animate, true);
+    }
+
+    /// [`Self::fit_columns_to_parent`], but leaves an ongoing interactive resize
+    /// alone instead of cancelling it.
+    ///
+    /// The normal fit cancels the resize because it moves the column width out
+    /// from under the drag. That's right for a fit triggered by something *else*
+    /// (a window opened, a panel grew), but wrong for the two paths that have to
+    /// fit *during* a drag — the resize itself, and the per-frame backstop — where
+    /// cancelling would end the user's drag the moment the row hits the screen
+    /// edge. There the drag keeps setting the natural width and the fit keeps
+    /// shrinking the row to fit it; the width the user sees stops growing, which
+    /// is exactly the "never wider than the screen" contract.
+    pub fn fit_columns_to_parent_keep_resize(&mut self, animate: bool) {
+        self.fit_columns_to_parent_inner(animate, false);
+    }
+
+    fn fit_columns_to_parent_inner(&mut self, animate: bool, cancel_resize: bool) {
+        if !self.is_carousel || !self.options.layout.disable_carousel || self.columns.is_empty() {
             return;
         }
-        let available = self.working_area.size.w;
-        if available <= 0.0 {
+        if self.working_area.size.w <= 0.0 {
             return;
         }
 
-        let gaps = self.options.layout.gaps;
-        let n = self.columns.len();
-        // Gaps sit between columns and are not scaled, so the shrink factor
-        // applies only to the column widths: the columns must fit in whatever
-        // space is left after the inter-column gaps. (Total row width =
-        // sum(columns) + gaps; this scales the columns so that total fits
-        // `available`.)
-        let gaps_total = gaps * n.saturating_sub(1) as f64;
-        let total_columns: f64 = self
-            .columns
-            .iter()
-            .map(|col| col.natural_width().max(1.0))
-            .sum();
-        let usable = available - gaps_total;
-
-        // Shrink the row to fit when it would overflow; otherwise show every
-        // column at its preferred (natural) width. The factor is shared, so the
-        // user's relative widths are preserved, and it never exceeds `1.0` (no
-        // column grows past its preferred width).
-        //
-        // Recomputed from scratch every time — never clamped to a previous
-        // value — so that whenever space frees up (a column resized smaller, a
-        // window closed, a fixed-side panel shrunk) the columns grow back
-        // *proportionally* toward their preferred widths rather than staying
-        // stuck at an old, smaller scale. The row is centered below.
-        let factor = if total_columns > usable && usable > 0.0 {
-            usable / total_columns
-        } else {
-            1.0
-        };
+        let factor = self.compute_fit_scale();
 
         for (col, data) in zip(&mut self.columns, &mut self.data) {
             col.set_fit_scale(factor, animate);
-            cancel_resize_for_column(&mut self.interactive_resize, col);
+            if cancel_resize {
+                cancel_resize_for_column(&mut self.interactive_resize, col);
+            }
             data.update(col);
         }
 
         self.auto_fit_or_center_view_offset();
+    }
+
+    /// The shared shrink factor that makes the whole row — columns plus the gaps
+    /// between them — fit the working area. `1.0` when the columns already fit, so
+    /// they sit at their preferred (natural) widths and are never grown past them.
+    ///
+    /// Solved by bisection rather than computed as `usable / total_natural`,
+    /// because a column's rendered width is not `natural × factor`: it is that,
+    /// *clamped* to the column's windows' min/max width. The naive ratio ignores
+    /// those clamps, so a single window with a large minimum width (a terminal with
+    /// a character-cell minimum, a GTK dialog) silently defeats it — the column
+    /// bottoms out at its minimum while the factor keeps assuming it shrank, and
+    /// the row hangs off the screen. Bisecting on the true rendered total instead
+    /// makes the columns that *can* shrink absorb what the pinned ones won't give
+    /// up, and it handles maximum widths (a column that refuses to grow) the same
+    /// way.
+    ///
+    /// Sound because [`Column::fitted_width`] is monotonically non-decreasing in
+    /// the factor: the largest factor whose total fits is well-defined, and it's
+    /// what this returns. If even the minimum widths overflow, no factor can fit
+    /// the row and this returns `0.0` — every column at its minimum, the least
+    /// overflow physically available.
+    fn compute_fit_scale(&self) -> f64 {
+        self.fit_scale_with_natural(None)
+    }
+
+    /// [`Self::compute_fit_scale`], optionally answering the hypothetical "what
+    /// would the factor be if column `idx` wanted `natural` px?" without touching
+    /// the layout. [`Self::natural_width_for_rendered`] needs that to invert the
+    /// fit; `None` just uses the columns' actual natural widths.
+    fn fit_scale_with_natural(&self, hypothetical: Option<(usize, f64)>) -> f64 {
+        let gaps = self.options.layout.gaps;
+        let n = self.columns.len();
+        // Gaps sit between columns and don't scale, so only what's left after them
+        // is available to the columns themselves.
+        let usable = self.working_area.size.w - gaps * n.saturating_sub(1) as f64;
+
+        let natural_of = |idx: usize, col: &Column<W>| match hypothetical {
+            Some((i, natural)) if i == idx => natural,
+            _ => col.natural_width(),
+        };
+
+        let total_at = |factor: f64| -> f64 {
+            self.columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| col.fitted_width_for(natural_of(idx, col), factor))
+                .sum()
+        };
+
+        // The common case: everything fits at natural width, nothing to shrink.
+        if total_at(1.0) <= usable {
+            return 1.0;
+        }
+
+        // Otherwise find the largest factor that fits. 40 halvings of [0, 1] land
+        // far below one physical pixel, and `total_at` is cheap (a handful of
+        // columns), so this is a rounding error next to a single tile resize.
+        let mut lo = 0.0;
+        let mut hi = 1.0;
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if total_at(mid) <= usable {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// The natural width to give column `idx` so that it *renders* `target` px wide.
+    ///
+    /// Needed because in disable-carousel mode the two aren't the same and aren't
+    /// even proportional: rendered = natural × factor, and the factor is shared and
+    /// depends on every column's natural width — so widening a column shrinks the
+    /// factor, which shrinks the column back. An interactive resize that just added
+    /// the cursor delta to the natural width would therefore *not* track the cursor;
+    /// scaling the delta by the current factor (what the code used to do) tracks it
+    /// only by ignoring the factor's own change, which is how a drag used to push
+    /// the row off the screen. Inverting the fit gives the width the cursor is
+    /// actually asking for, with the rest of the row absorbing it.
+    ///
+    /// Rendered width is monotonically non-decreasing in natural width, so bisection
+    /// finds it. When `target` is unreachable — the other columns have shrunk to
+    /// their minimums and there's nothing left to take — this returns the largest
+    /// natural width worth having, and the column simply stops growing at the screen
+    /// edge, which is the whole point.
+    ///
+    /// Outside disable-carousel mode rendered *is* natural, so this returns `target`.
+    fn natural_width_for_rendered(&self, idx: usize, target: f64) -> f64 {
+        if !self.is_carousel || !self.options.layout.disable_carousel {
+            return target;
+        }
+
+        let rendered_at = |natural: f64| -> f64 {
+            let factor = self.fit_scale_with_natural(Some((idx, natural)));
+            self.columns[idx].fitted_width_for(natural, factor)
+        };
+
+        // Cap the search: a natural width far past the screen is meaningless here
+        // (the fit clamps it back anyway) and would follow the column to a scrolling
+        // workspace as an absurd preferred width. Four screens is well past anything
+        // reachable on screen and keeps the number sane.
+        let cap = (self.working_area.size.w * 4.0).max(target);
+        if rendered_at(cap) <= target {
+            return cap;
+        }
+
+        let mut lo: f64 = 1.0;
+        let mut hi = cap;
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if rendered_at(mid) <= target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Enforce the disable-carousel fit before the row is rendered.
+    ///
+    /// The fit is a layout-wide invariant — "the row never exceeds the screen" —
+    /// but the natural widths it depends on are changed from a long tail of places:
+    /// windows opening, columns moving in from another workspace, a window being
+    /// consumed into or expelled from a column, an interactive resize. Any one of
+    /// them that forgets to re-fit puts a window off-screen, and that's exactly the
+    /// bug this guards against. So instead of trusting every current and future
+    /// call site, re-fit here, on the path everything must pass through to be seen.
+    ///
+    /// Cheap: it early-outs unless the factor actually needs to change, and
+    /// [`Column::set_fit_scale`] is itself a no-op when the factor is unchanged, so
+    /// the steady-state frame does one arithmetic pass over the columns and stops.
+    /// Paths that re-fit explicitly (with animation) therefore find nothing to do
+    /// here; this only bites for the ones that didn't.
+    pub fn enforce_fit_to_parent(&mut self) {
+        if !self.is_carousel || !self.options.layout.disable_carousel || self.columns.is_empty() {
+            return;
+        }
+        if self.working_area.size.w <= 0.0 {
+            return;
+        }
+
+        let factor = self.compute_fit_scale();
+        if self.columns.iter().all(|col| col.fit_scale == factor) {
+            // Widths are already fitted. The row still has to be *positioned* on
+            // screen, though — with no scrolling, the view offset is the only thing
+            // holding it there, and a window that committed a size we didn't ask for
+            // moves the row without changing the factor. Cheap: this no-ops when the
+            // offset is already within a pixel of its target.
+            self.auto_fit_or_center_view_offset();
+            return;
+        }
+
+        // Don't animate: this is the path that catches a width change nobody fitted,
+        // and the row must be on-screen in *this* frame, not tween toward it. Don't
+        // cancel an ongoing resize either — a drag past the screen edge is a
+        // legitimate way to get here.
+        self.fit_columns_to_parent_keep_resize(false);
     }
 
     /// Whether a mouse-driven interactive resize is currently in progress. Used
@@ -4771,22 +4983,18 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return false;
         }
 
-        // In disable-carousel mode the rendered tile width is the *natural*
-        // column width times `fit_scale`, while the update path sets the natural
-        // width via `set_column_width(SetFixed(..))`. Capture the natural window
-        // width as the resize base so feeding it straight back is a no-op at zero
-        // delta. Capturing the scaled `window_size()` instead would be re-scaled
-        // on the first motion and snap the window to a smaller fixed width.
-        let natural_col_width = col.natural_width();
-
         let tile = col
             .tiles
             .iter_mut()
             .find(|tile| tile.window().id() == &window)
             .unwrap();
 
-        let mut original_window_size = tile.window_size();
-        original_window_size.w = tile.window_width_for_tile_width(natural_col_width);
+        // The on-screen size, which is what the cursor is dragging. In
+        // disable-carousel mode that's the *fitted* width, not the column's natural
+        // width; the update path inverts the fit to find the natural width that
+        // renders here, so the base has to be in the same (rendered) space the
+        // cursor delta is in.
+        let original_window_size = tile.window_size();
 
         let resize = InteractiveResize {
             window,
@@ -4813,23 +5021,26 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return false;
         }
 
+        let edges = resize.data.edges;
+        let original_window_size = resize.original_window_size;
+
         let is_centering = self.is_centering_focused_column();
 
-        let col = self
+        let col_idx = self
             .columns
-            .iter_mut()
-            .find(|col| col.contains(window))
+            .iter()
+            .position(|col| col.contains(window))
             .unwrap();
 
-        let tile_idx = col
+        let tile_idx = self.columns[col_idx]
             .tiles
             .iter()
             .position(|tile| tile.window().id() == window)
             .unwrap();
 
-        if resize.data.edges.intersects(ResizeEdge::LEFT_RIGHT) {
+        let resized_width = if edges.intersects(ResizeEdge::LEFT_RIGHT) {
             let mut dx = delta.x;
-            if resize.data.edges.contains(ResizeEdge::LEFT) {
+            if edges.contains(ResizeEdge::LEFT) {
                 dx = -dx;
             };
 
@@ -4837,34 +5048,60 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 dx *= 2.;
             }
 
-            // The cursor delta is in rendered (post-`fit_scale`) space; convert it
-            // back to natural width so the SetFixed below — which sets the natural
-            // column width — tracks the cursor instead of being re-scaled by the
-            // disable-carousel fit. `fit_scale` is 1.0 in every other mode.
-            let fit_scale = col.fit_scale;
-            if fit_scale > 0.0 {
-                dx /= fit_scale;
-            }
+            // Where the cursor wants the window's edge, on screen.
+            let target_window_width = original_window_size.w + dx;
 
-            let window_width = (resize.original_window_size.w + dx).round() as i32;
-            col.set_column_width(SizeChange::SetFixed(window_width), Some(tile_idx), false);
-        }
+            // `set_column_width` takes a *natural* width, but in disable-carousel
+            // mode the window renders at natural × the shared fit factor — and that
+            // factor moves as this column grows. Ask what natural width renders at
+            // the width the cursor is asking for, so the drag tracks the cursor
+            // while the rest of the row shrinks to make room, instead of the row
+            // sliding off the screen. Identity when the carousel is enabled.
+            let tile = &self.columns[col_idx].tiles[tile_idx];
+            let target_tile_width = tile.tile_width_for_window_width(target_window_width);
+            let natural_tile_width = self.natural_width_for_rendered(col_idx, target_tile_width);
+            let natural_window_width = self.columns[col_idx].tiles[tile_idx]
+                .window_width_for_tile_width(natural_tile_width);
 
-        if resize.data.edges.intersects(ResizeEdge::TOP_BOTTOM) {
+            let window_width = natural_window_width.round() as i32;
+            self.columns[col_idx].set_column_width(
+                SizeChange::SetFixed(window_width),
+                Some(tile_idx),
+                false,
+            );
+            true
+        } else {
+            false
+        };
+
+        let col = &mut self.columns[col_idx];
+
+        if edges.intersects(ResizeEdge::TOP_BOTTOM) {
             // Prevent the simplest case of weird resizing (top edge when this is the topmost
             // window).
-            if !(resize.data.edges.contains(ResizeEdge::TOP) && tile_idx == 0) {
+            if !(edges.contains(ResizeEdge::TOP) && tile_idx == 0) {
                 let mut dy = delta.y;
-                if resize.data.edges.contains(ResizeEdge::TOP) {
+                if edges.contains(ResizeEdge::TOP) {
                     dy = -dy;
                 };
 
                 // FIXME: some smarter height distribution would be nice here so that vertical
                 // resizes work as expected in more cases.
 
-                let window_height = (resize.original_window_size.h + dy).round() as i32;
+                let window_height = (original_window_size.h + dy).round() as i32;
                 col.set_window_height(SizeChange::SetFixed(window_height), Some(tile_idx), false);
             }
+        }
+
+        if resized_width {
+            // The drag just changed the column's *natural* width, but the rendered
+            // widths are natural × `fit_scale` — and nothing else recomputes that
+            // factor mid-drag (the commit path deliberately skips re-fitting while a
+            // resize is ongoing, because re-fitting cancels the resize). Without
+            // this, dragging an edge outward walks the row straight off the screen.
+            // Re-fit, keeping the resize alive: the row shrinks to absorb the growth
+            // and the user's window stops widening once there's nothing left to take.
+            self.fit_columns_to_parent_keep_resize(false);
         }
 
         true
@@ -4902,6 +5139,14 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         {
             self.data[col_idx].update(&self.columns[col_idx]);
         }
+
+        // Settle the disable-carousel fit against the width the drag left behind:
+        // shrink the row if it grew past the working area, and let the other columns
+        // grow back toward their natural widths if the drag freed space. Animated —
+        // the drag is over, so a tween here reads as the row settling. No-op in every
+        // other mode. The resize is already cleared above, so there's nothing to cancel.
+        self.fit_columns_to_parent(true);
+
         self.auto_fit_or_center_view_offset();
     }
 
@@ -5044,6 +5289,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 assert_eq!(data, &data2, "column data must be up to date");
             }
 
+            self.verify_disable_carousel_fits();
+
             let col = &self.columns[self.active_column_idx];
 
             if self.view_offset_to_restore.is_some() {
@@ -5064,6 +5311,69 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 "interactive resize window must be present in the layout"
             );
         }
+    }
+
+    /// The disable-carousel contract: the row never sticks out of the working
+    /// area. There's no scrolling in this mode, so anything hanging off the edge
+    /// is simply unreachable.
+    ///
+    /// Checked against the widths the columns are *targeting* (natural × fit
+    /// factor, clamped by their windows' min/max) rather than the widths their
+    /// windows last committed: a client is free to commit a size we didn't ask
+    /// for, and that's its bug, not the layout's.
+    ///
+    /// Two things legitimately don't fit and are excluded. A fullscreen column
+    /// covers the screen by definition — it isn't sharing the row with anyone.
+    /// And a row whose windows' *minimum* widths already overflow can't be made
+    /// to fit by any factor, so it's held to that floor instead.
+    #[cfg(test)]
+    fn verify_disable_carousel_fits(&self) {
+        if !self.is_carousel || !self.options.layout.disable_carousel || self.columns.is_empty() {
+            return;
+        }
+
+        // Struts can eat the working area down to nothing. Nothing fits in zero
+        // width, so there's no meaningful invariant to hold — and the fit itself
+        // bails out on it for the same reason.
+        if self.working_area.size.w <= 0.0 {
+            return;
+        }
+
+        if self
+            .columns
+            .iter()
+            .any(|col| matches!(col.pending_sizing_mode(), SizingMode::Fullscreen))
+        {
+            return;
+        }
+
+        let gaps = self.options.layout.gaps;
+        let gaps_total = gaps * self.columns.len().saturating_sub(1) as f64;
+
+        let total: f64 = self
+            .columns
+            .iter()
+            .map(|col| col.fitted_width(col.fit_scale))
+            .sum::<f64>()
+            + gaps_total;
+
+        let min_total: f64 = self
+            .columns
+            .iter()
+            .map(|col| col.width_clamps().0)
+            .sum::<f64>()
+            + gaps_total;
+
+        let limit = f64::max(self.working_area.size.w, min_total);
+
+        // A pixel of slack: widths are rounded to physical pixels on the way to
+        // the tiles, and the fit factor is bisected, not exact.
+        assert!(
+            total <= limit + 1.0,
+            "disable-carousel row must fit the working area: row is {total}px, \
+             working area is {}px (windows' minimum widths need {min_total}px)",
+            self.working_area.size.w,
+        );
     }
 }
 
@@ -5723,12 +6033,73 @@ impl<W: LayoutElement> Column<W> {
     /// disable-carousel shrink-to-fit factor. Mirrors the width selection in
     /// [`Self::update_tile_sizes`] but without `fit_scale` or min/max clamping.
     fn natural_width(&self) -> f64 {
+        // A maximized column ignores its `ColumnWidth` and takes the parent area,
+        // so that — not the stored width — is what it wants; reporting the stored
+        // width would leave it out of the disable-carousel budget and let it
+        // overflow the row. Fullscreen is excluded: it's an overlay over the whole
+        // screen, not a participant in the row's width.
+        if matches!(self.pending_sizing_mode(), SizingMode::Maximized) {
+            return self.parent_area.size.w;
+        }
+
         let width = if self.is_full_width {
             ColumnWidth::Proportion(1.)
         } else {
             self.width
         };
         self.resolve_column_width(width)
+    }
+
+    /// The min/max width this column's windows impose, in tile space. Whatever
+    /// width the column is asked for, [`Self::update_tile_sizes`] clamps it into
+    /// this range, so it's the range a column can actually be rendered at.
+    ///
+    /// The disable-carousel fit needs it because a column cannot shrink below its
+    /// windows' minimum width: scaling it further does nothing, and the pixels it
+    /// refuses to give up have to come out of the other columns' budget instead
+    /// (see [`ScrollingSpace::compute_fit_scale`]).
+    fn width_clamps(&self) -> (f64, f64) {
+        let min_width = self
+            .tiles
+            .iter()
+            .map(|tile| NotNan::new(tile.min_size_nonfullscreen().w.max(1.)).unwrap())
+            .max()
+            .map(NotNan::into_inner)
+            .unwrap();
+
+        let max_width = self
+            .tiles
+            .iter()
+            .filter_map(|tile| {
+                let w = tile.max_size_nonfullscreen().w;
+                if w == 0. {
+                    None
+                } else {
+                    Some(NotNan::new(w).unwrap())
+                }
+            })
+            .min()
+            .map(NotNan::into_inner)
+            .unwrap_or(f64::from(i32::MAX));
+
+        (min_width, f64::max(max_width, min_width))
+    }
+
+    /// The width this column would actually be rendered at with fit factor
+    /// `scale`: its natural width scaled, then clamped by its windows' min/max —
+    /// the exact two steps [`Self::update_tile_sizes`] performs.
+    ///
+    /// Monotonically non-decreasing in `scale`, which is what lets
+    /// [`ScrollingSpace::compute_fit_scale`] solve for the factor by bisection.
+    fn fitted_width(&self, scale: f64) -> f64 {
+        self.fitted_width_for(self.natural_width(), scale)
+    }
+
+    /// [`Self::fitted_width`] for a natural width this column doesn't (yet) have.
+    /// Monotonically non-decreasing in both arguments.
+    fn fitted_width_for(&self, natural: f64, scale: f64) -> f64 {
+        let (min_width, max_width) = self.width_clamps();
+        (natural * scale).clamp(min_width, max_width)
     }
 
     /// Snapshot the column's width-defining state so it can be restored later (used by
@@ -5767,10 +6138,22 @@ impl<W: LayoutElement> Column<W> {
     fn update_tile_sizes_with_transaction(&mut self, animate: bool, transaction: Transaction) {
         let sizing_mode = self.pending_sizing_mode();
         if matches!(sizing_mode, SizingMode::Fullscreen | SizingMode::Maximized) {
+            // A maximized column takes the whole parent area — but in
+            // disable-carousel mode it still has to share the row with the other
+            // columns, so it takes its *fitted* share of that width like everyone
+            // else. Without this, a window that opens maximized (plenty of apps do)
+            // next to any other column pushes the row past the screen edge.
+            // `fit_scale` is 1.0 in every other mode, so maximize is unchanged there.
+            let mut maximized_size = self.parent_area.size;
+            maximized_size.w = self.fitted_width(self.fit_scale);
+
+            let display_mode = self.display_mode;
+            let active_tile_idx = self.active_tile_idx;
+
             for (tile_idx, tile) in self.tiles.iter_mut().enumerate() {
                 // In tabbed mode, only the visible window participates in the transaction.
-                let is_active = tile_idx == self.active_tile_idx;
-                let transaction = if self.display_mode == ColumnDisplay::Tabbed && !is_active {
+                let is_active = tile_idx == active_tile_idx;
+                let transaction = if display_mode == ColumnDisplay::Tabbed && !is_active {
                     None
                 } else {
                     Some(transaction.clone())
@@ -5779,7 +6162,7 @@ impl<W: LayoutElement> Column<W> {
                 if matches!(sizing_mode, SizingMode::Fullscreen) {
                     tile.request_fullscreen(animate, transaction);
                 } else {
-                    tile.request_maximized(self.parent_area.size, animate, transaction);
+                    tile.request_maximized(maximized_size, animate, transaction);
                 }
             }
             return;
@@ -5803,34 +6186,6 @@ impl<W: LayoutElement> Column<W> {
             .map(Tile::max_size_nonfullscreen)
             .collect();
 
-        // Compute the column width.
-        let min_width = min_size
-            .iter()
-            .map(|size| NotNan::new(size.w).unwrap())
-            .max()
-            .map(NotNan::into_inner)
-            .unwrap();
-        let max_width = max_size
-            .iter()
-            .filter_map(|size| {
-                let w = size.w;
-                if w == 0. {
-                    None
-                } else {
-                    Some(NotNan::new(w).unwrap())
-                }
-            })
-            .min()
-            .map(NotNan::into_inner)
-            .unwrap_or(f64::from(i32::MAX));
-        let max_width = f64::max(max_width, min_width);
-
-        let width = if self.is_full_width {
-            ColumnWidth::Proportion(1.)
-        } else {
-            self.width
-        };
-
         let working_size = self.working_area.size;
         let extra_size = self.extra_size();
 
@@ -5839,8 +6194,7 @@ impl<W: LayoutElement> Column<W> {
         // desired `ColumnWidth` into pixels — means the shrink flows through to
         // both the tile sizes computed below and the cached column width, while
         // `self.width` stays the natural width.
-        let width = self.resolve_column_width(width) * self.fit_scale;
-        let width = f64::max(f64::min(width, max_width), min_width);
+        let width = self.fitted_width(self.fit_scale);
         let max_tile_height = working_size.h - self.options.layout.gaps * 2. - extra_size.h;
 
         // If there are multiple windows in a column, clamp the non-auto window's height according

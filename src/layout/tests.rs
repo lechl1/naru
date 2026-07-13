@@ -4281,6 +4281,12 @@ prop_compose! {
         center_focused_column in prop::option::of(arbitrary_center_focused_column()),
         always_center_single_column in prop::option::of(any::<bool>().prop_map(Flag)),
         empty_workspace_above_first in prop::option::of(any::<bool>().prop_map(Flag)),
+        // Randomized so the ops below explore disable-carousel mode too. Its
+        // defining invariant — the row never exceeds the working area — is asserted
+        // after every op by `ScrollingSpace::verify_invariants`, which is the point:
+        // any op that changes a column's width without re-fitting the row fails here
+        // rather than in front of the user, with a window hanging off the screen.
+        disable_carousel in prop::option::of(any::<bool>().prop_map(Flag)),
     ) -> naru_config::LayoutPart {
         naru_config::LayoutPart {
             gaps,
@@ -4292,6 +4298,7 @@ prop_compose! {
             border,
             shadow,
             tab_indicator,
+            disable_carousel,
             ..Default::default()
         }
     }
