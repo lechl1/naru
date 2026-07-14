@@ -191,6 +191,12 @@ const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 // should be ~1.995 seconds.
 const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995));
 
+// How long a graceful shutdown waits for the windows it asked to close. Long
+// enough for an app to flush its state to disk, short enough that one client
+// ignoring the close request doesn't leave the user staring at a session that
+// won't end. See `State::begin_shutdown`.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 pub struct Naru {
     pub config: Rc<RefCell<Config>>,
 
@@ -207,6 +213,22 @@ pub struct Naru {
     pub scheduler: Scheduler<()>,
     pub stop_signal: LoopSignal,
     pub display_handle: DisplayHandle,
+
+    /// Whether a graceful shutdown is in progress.
+    ///
+    /// Set by `State::begin_shutdown`, which asks every window to close and then
+    /// keeps the event loop running so the clients can actually exit. The flag
+    /// makes the exit idempotent: a second quit while it's set stops the loop at
+    /// once, so a hung client can't trap the user in a session.
+    pub shutting_down: bool,
+
+    /// Whether session-restore saves are frozen.
+    ///
+    /// Set alongside `shutting_down`, right after the final snapshot is written.
+    /// The snapshot is built from the *live* layout, so once the shutdown starts
+    /// closing windows every later save would persist a progressively emptier
+    /// arrangement — and the last one would restore nothing next session.
+    pub session_frozen: bool,
 
     /// Whether naru was run with `--session`
     pub is_session_instance: bool,
@@ -2225,6 +2247,105 @@ impl State {
         self.set_xkb_config(xkb.to_xkb_config());
         self.ipc_keyboard_layouts_changed();
     }
+
+    /// Start a graceful shutdown: ask every window to close, then exit.
+    ///
+    /// The blunt alternative — stopping the event loop outright — tears the
+    /// Wayland socket down under the clients, which see a broken connection and
+    /// die where they stand: no save-on-exit, no "you have unsaved changes", no
+    /// clean flush of whatever they were writing. Instead, send each toplevel the
+    /// xdg-shell close request (the same one `Action::CloseWindow` sends, i.e.
+    /// what clicking the window's X does), keep the loop running so the clients
+    /// can act on it, and stop once the last window is gone
+    /// (`finish_shutdown_if_idle`, called from the two window-removal paths).
+    ///
+    /// `SHUTDOWN_GRACE` bounds the wait: a client that ignores the close request,
+    /// or sits on a modal "save changes?" prompt nobody is going to answer, must
+    /// not be able to hold the session open forever. When it expires we exit
+    /// anyway, and those clients die exactly as they used to.
+    ///
+    /// Calling this while a shutdown is already running exits immediately — the
+    /// user pressing quit a second time is asking to stop waiting.
+    pub fn begin_shutdown(&mut self) {
+        if self.naru.shutting_down {
+            info!("quitting immediately: shutdown already in progress");
+            self.naru.stop_signal.stop();
+            return;
+        }
+
+        // Snapshot the session *before* anything closes: the snapshot is built
+        // from the live layout, and it also reads each client's current working
+        // directory out of /proc, so it has to happen while the windows and their
+        // client processes are still there. Freezing afterwards keeps the closing
+        // windows from overwriting it with an empty arrangement.
+        self.naru.save_session_now();
+        self.naru.session_frozen = true;
+        self.naru.shutting_down = true;
+
+        // Unmapped windows have live toplevels too (a window that's still coming
+        // up, or one that unmapped itself but kept its surface around), so they
+        // get the close request as well — otherwise a client mid-map would be the
+        // one thing we still yank the socket from.
+        let toplevels: Vec<_> = self
+            .naru
+            .layout
+            .windows()
+            .map(|(_, mapped)| mapped.toplevel().clone())
+            .chain(
+                self.naru
+                    .unmapped_windows
+                    .values()
+                    .map(|unmapped| unmapped.toplevel().clone()),
+            )
+            .collect();
+
+        if toplevels.is_empty() {
+            info!("quitting: no windows to close");
+            self.naru.stop_signal.stop();
+            return;
+        }
+
+        info!(
+            "graceful shutdown: asking {} window(s) to close (up to {:?} to comply)",
+            toplevels.len(),
+            SHUTDOWN_GRACE,
+        );
+
+        for toplevel in toplevels {
+            toplevel.send_close();
+        }
+
+        let timer = Timer::from_duration(SHUTDOWN_GRACE);
+        if let Err(err) = self.naru.event_loop.insert_source(timer, |_, _, state| {
+            let left = state.naru.layout.windows().count() + state.naru.unmapped_windows.len();
+            if left > 0 {
+                warn!("graceful shutdown: {left} window(s) did not close in time; quitting anyway");
+            }
+            state.naru.stop_signal.stop();
+            TimeoutAction::Drop
+        }) {
+            // Without the deadline a client that never closes would hang the
+            // session, so failing to arm it means falling back to the old
+            // behaviour rather than risking that.
+            warn!("graceful shutdown: could not arm the grace timer ({err}); quitting now");
+            self.naru.stop_signal.stop();
+        }
+    }
+
+    /// Stop the event loop once the last window of a graceful shutdown is gone.
+    ///
+    /// Called from both window-removal paths (a destroyed toplevel and one that
+    /// unmapped itself). No-op outside a shutdown.
+    pub fn finish_shutdown_if_idle(&mut self) {
+        if !self.naru.shutting_down {
+            return;
+        }
+
+        if self.naru.layout.windows().next().is_none() && self.naru.unmapped_windows.is_empty() {
+            info!("graceful shutdown: all windows closed; quitting");
+            self.naru.stop_signal.stop();
+        }
+    }
 }
 
 impl Naru {
@@ -2238,7 +2359,15 @@ impl Naru {
     /// Cloning the loop handle is cheap (it's a refcounted handle into calloop) and
     /// sidesteps a split-borrow of `self` between `event_loop` and `session_manager`
     /// at every hook site.
+    ///
+    /// No-op once `session_frozen` is set: during a graceful shutdown the windows
+    /// are closing on purpose, and persisting that would replace the arrangement
+    /// we mean to restore with an empty one.
     pub fn session_mark_dirty(&mut self) {
+        if self.session_frozen {
+            return;
+        }
+
         let loop_handle = self.event_loop.clone();
         if let Some(sm) = self.session_manager.as_mut() {
             sm.mark_dirty(&loop_handle);
@@ -2260,7 +2389,16 @@ impl Naru {
     /// because this runs the instant the loop exits — before the process tears down and
     /// the Wayland sockets close — the client processes and their child shells are still
     /// alive, so `/proc/<pid>/cwd` is readable.
+    ///
+    /// With a graceful shutdown this runs at the *start* of the exit, while the
+    /// windows are still up — `begin_shutdown` calls it and then sets
+    /// `session_frozen`, which makes every later call (including the one in
+    /// `main`, after the loop finally stops) a no-op.
     pub fn save_session_now(&self) {
+        if self.session_frozen {
+            return;
+        }
+
         let Some(sm) = self.session_manager.as_ref() else {
             return;
         };
@@ -2607,6 +2745,8 @@ impl Naru {
             event_loop,
             scheduler,
             stop_signal,
+            shutting_down: false,
+            session_frozen: false,
             socket_name,
             display_handle,
             is_session_instance,

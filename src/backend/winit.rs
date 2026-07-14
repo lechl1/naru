@@ -132,7 +132,7 @@ impl Winit {
                 WinitEvent::Input(event) => state.process_input_event(event),
                 WinitEvent::Focus(_) => (),
                 WinitEvent::Redraw => state.naru.queue_redraw(&state.backend.winit().output),
-                WinitEvent::CloseRequested => state.naru.stop_signal.stop(),
+                WinitEvent::CloseRequested => state.begin_shutdown(),
             })
             .unwrap();
 

@@ -830,6 +830,7 @@ impl XdgShellHandler for State {
             .is_some()
         {
             // An unmapped toplevel got destroyed.
+            self.finish_shutdown_if_idle();
             return;
         }
 
@@ -868,6 +869,9 @@ impl XdgShellHandler for State {
         self.naru.layout.remove_window(&window, transaction.clone());
         // Session-restore: toplevel destroyed → window list changed.
         self.naru.session_mark_dirty();
+        // During a graceful shutdown this may have been the last window we were
+        // waiting on, in which case there's nothing left to wait for.
+        self.finish_shutdown_if_idle();
 
         let surface = surface.wl_surface();
         // This check is necessary because implicit resource destruction is done with

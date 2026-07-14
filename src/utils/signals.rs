@@ -50,7 +50,10 @@ mod platform {
                 Signals::new(&[Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP]).unwrap(),
                 |event, _, state| {
                     info!("quitting due to receiving signal {:?}", event.signal());
-                    state.naru.stop_signal.stop();
+                    // Graceful: this is the signal systemd sends when the session
+                    // ends, so a logout gives the apps the same chance to save
+                    // that closing their windows by hand would.
+                    state.begin_shutdown();
                 },
             )
             .unwrap();
