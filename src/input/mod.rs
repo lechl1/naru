@@ -447,10 +447,10 @@ impl State {
         // 4. Release Left (PgDown repeat stops)
         // But it's good enough for now.
         // FIXME: handle this properly.
-        if !pressed {
-            if let Some(token) = self.naru.bind_repeat_timer.take() {
-                self.naru.event_loop.remove(token);
-            }
+        // A new press also ends it: with fast rollover the old bind's pending repeat would
+        // otherwise fire off its own initial delay instead of restarting for the new key.
+        if let Some(token) = self.naru.bind_repeat_timer.take() {
+            self.naru.event_loop.remove(token);
         }
 
         if pressed {
@@ -622,6 +622,13 @@ impl State {
                     this.naru.screenshot_ui.set_space_down(pressed);
                 }
 
+                // In a terminal-swap window Super is the Mac Control key, which the terminal
+                // sees as Ctrl: Control+C must reach it, not trigger the Mod+C bind.
+                let mut bind_mods = *mods;
+                if this.focused_terminal().is_some() {
+                    bind_mods.logo = false;
+                }
+
                 let res = {
                     let config = this.naru.config.borrow();
                     let bindings =
@@ -635,7 +642,7 @@ impl State {
                         modified,
                         raw,
                         pressed,
-                        *mods,
+                        bind_mods,
                         &this.naru.screenshot_ui,
                         this.naru.config.borrow().input.disable_power_key_handling,
                         is_inhibiting_shortcuts,

@@ -98,7 +98,8 @@ pub struct Keyboard {
 ///
 /// While a window whose app-id matches `app-id` is focused, the modifiers sent to it are
 /// translated: Super becomes Ctrl and Ctrl becomes Ctrl+Shift (Shift is added). Compositor binds
-/// still see the real modifiers. Meant for setups where the keyboard layer sends Cmd as Ctrl and
+/// still see the real modifiers, except that Super-based binds (`Mod+...`) are not matched in
+/// these windows, so Control+key reaches the terminal. Meant for setups where the keyboard layer sends Cmd as Ctrl and
 /// the Control key as Super, so GUI apps get Cmd shortcuts while terminals keep a real Ctrl for
 /// Ctrl+C and friends. Disabled while `app-id` is unset or `off` is given.
 #[derive(knuffel::Decode, Debug, Default, Clone, PartialEq, Eq)]
