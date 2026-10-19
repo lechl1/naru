@@ -2150,6 +2150,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
         let source_was_only_tile = self.columns[source_col_idx].tiles.len() == 1;
         let source_column_removed = source_is_single_window && source_was_only_tile;
+        self.note_window_move(source_col_idx, source_tile_idx);
         let popped = if source_is_single_window {
             let mut removed = self.remove_tile_by_idx(
                 source_col_idx,
@@ -2177,9 +2178,16 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         if !source_column_removed {
             let old_source_idx = source_col_idx + 1;
             if old_source_idx < self.columns.len() {
+                self.release_host(old_source_idx, false);
+                self.columns[old_source_idx].equalize_heights();
                 self.data[old_source_idx].update(&self.columns[old_source_idx]);
             }
+        } else {
+            self.release_host(source_col_idx, true);
         }
+        // The moved window keeps its remembered width in its own new column.
+        self.set_carried_column_width(source_col_idx);
+        self.in_window_move = false;
         true
     }
 
@@ -2214,6 +2222,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
         let source_was_only_tile = self.columns[source_col_idx].tiles.len() == 1;
         let source_column_removed = source_is_single_window && source_was_only_tile;
+        self.note_window_move(source_col_idx, source_tile_idx);
         let popped = if source_is_single_window {
             let mut removed = self.remove_tile_by_idx(
                 source_col_idx,
@@ -2244,8 +2253,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Its tile stack just shrunk (or one of its tiles was removed), so refresh its cached
         // column width.
         if !source_column_removed && source_col_idx < self.columns.len() {
+            self.release_host(source_col_idx, false);
+            self.columns[source_col_idx].equalize_heights();
             self.data[source_col_idx].update(&self.columns[source_col_idx]);
+        } else {
+            self.release_host(source_col_idx, true);
         }
+        // The moved window keeps its remembered width in its own new column.
+        self.set_carried_column_width(insert_idx);
+        self.in_window_move = false;
         true
     }
 
@@ -2395,6 +2411,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         // Insert above the current tile.
         self.add_tile_to_column(col_idx, Some(source_tile_idx), new_tile, true);
+        self.columns[col_idx].equalize_heights();
         true
     }
 
@@ -2419,6 +2436,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         let popped = self.columns[col_idx].pop_window_from_tile(source_tile_idx);
         let new_tile = Tile::new(popped, view_size, scale, clock, options);
         self.add_tile_to_column(col_idx, Some(source_tile_idx + 1), new_tile, true);
+        self.columns[col_idx].equalize_heights();
         true
     }
 
@@ -2580,6 +2598,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.columns[source_col_idx].tiles[source_tile_idx].stack_len() == 1;
         let source_was_only_tile = self.columns[source_col_idx].tiles.len() == 1;
         let source_column_removed = source_is_single_window && source_was_only_tile;
+        self.note_window_move(source_col_idx, source_tile_idx);
 
         // Snapshot the source tile's pre-move geometry so the new tile can fly from
         // the source's old screen position instead of popping into existence at the
@@ -2621,7 +2640,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             raw_target_idx
         };
 
+        // The window is leaving its source column: undo any growth we gave it to host
+        // this window earlier in the sequence.
+        self.release_host(source_col_idx, source_column_removed);
+
         self.add_tile_to_column(target_col_idx, Some(target_insert_idx), tile, true);
+        // Fair share of the height for everyone in the target column, and widen the
+        // column if needed so the window keeps its width.
+        self.columns[target_col_idx].equalize_heights();
+        self.grow_host_to_carried(target_col_idx, target_insert_idx);
 
         // Slide the new tile from the source tile's old screen position to its
         // destination slot. animate_move_from(from) makes the tile render at
@@ -2641,10 +2668,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Multi-window source: the source tile's window stack lost one entry. Refresh
         // its sizing/cache so the next column_x pass sees consistent state.
         if !source_is_single_window {
-            self.columns[source_col_idx].update_tile_sizes(false);
+            self.columns[source_col_idx].equalize_heights();
             self.data[source_col_idx].update(&self.columns[source_col_idx]);
         }
 
+        self.in_window_move = false;
         true
     }
 
@@ -2675,11 +2703,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     /// Grow `col_idx` to the carried window width if it's currently narrower (never
     /// shrink), snapshotting its prior width so it can be restored when the window leaves.
     /// The carried window is the last tile in the column (it was just added there).
-    fn grow_host_to_carried(&mut self, col_idx: usize) {
+    fn grow_host_to_carried(&mut self, col_idx: usize, tile_idx: usize) {
         let Some(carried) = self.move_size.as_ref().map(|ms| ms.carried_width) else {
             return;
         };
-        let tile_idx = self.columns[col_idx].tiles.len() - 1;
         // Compare in column-width terms using the column's resolved (synchronous) width.
         // The just-added tile's `window_size()` may not reflect the new column yet, and
         // relying on it could shrink a wider column — this must only ever grow.
@@ -2712,6 +2739,19 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             self.columns[col_idx].restore_width_snapshot(&snapshot);
             self.data[col_idx].update(&self.columns[col_idx]);
             self.fit_columns_to_parent(true);
+        }
+    }
+
+    /// The carried window left `source_col_idx` during a stacking move: restore the
+    /// column if it survived (we may have grown it to host the window), otherwise
+    /// forget the snapshot since the column is gone.
+    fn release_host(&mut self, source_col_idx: usize, source_column_removed: bool) {
+        if source_column_removed {
+            if let Some(ms) = self.move_size.as_mut() {
+                ms.host_prior = None;
+            }
+        } else {
+            self.restore_host_width(source_col_idx);
         }
     }
 
@@ -2809,7 +2849,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             new_tile.animate_move_from(offset);
 
             // Preserve the moved window's size: grow the column it joined to fit it.
-            self.grow_host_to_carried(target_column_idx);
+            self.grow_host_to_carried(
+                target_column_idx,
+                self.columns[target_column_idx].tiles.len() - 1,
+            );
         } else {
             // Move out of column.
             let mut offset = Point::from((source_column.render_offset().x, 0.));
@@ -2919,7 +2962,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             new_tile.animate_move_from(offset);
 
             // Preserve the moved window's size: grow the column it joined to fit it.
-            self.grow_host_to_carried(target_column_idx);
+            self.grow_host_to_carried(
+                target_column_idx,
+                self.columns[target_column_idx].tiles.len() - 1,
+            );
         } else {
             // Move out of column.
             self.note_window_move(source_col_idx, source_tile_idx);
@@ -3764,6 +3810,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn toggle_width(&mut self, forwards: bool) {
+        // An explicit resize ends the move sequence: the width to carry is now stale.
+        self.move_size = None;
         if self.columns.is_empty() {
             return;
         }
@@ -3779,6 +3827,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn toggle_full_width(&mut self) {
+        // An explicit resize ends the move sequence: the width to carry is now stale.
+        self.move_size = None;
         if self.columns.is_empty() {
             return;
         }
@@ -4042,6 +4092,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        // An explicit resize ends the move sequence: the width to carry is now stale.
+        self.move_size = None;
         if self.columns.is_empty() {
             return;
         }
@@ -4120,6 +4172,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
+        // An explicit resize ends the move sequence: the width to carry is now stale.
+        self.move_size = None;
         if self.columns.is_empty() {
             return;
         }
@@ -4171,6 +4225,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn expand_column_to_available_width(&mut self) {
+        // An explicit resize ends the move sequence: the width to carry is now stale.
+        self.move_size = None;
         if self.columns.is_empty() {
             return;
         }
@@ -6710,6 +6766,15 @@ impl<W: LayoutElement> Column<W> {
             self.data[tile_idx].height = WindowHeight::auto_1();
         }
 
+        self.update_tile_sizes(true);
+    }
+
+    /// Gives every tile in the column an equal automatic share of the height, so a
+    /// window moved in (or one left behind) doesn't inherit stale fixed heights.
+    fn equalize_heights(&mut self) {
+        for data in &mut self.data {
+            data.height = WindowHeight::auto_1();
+        }
         self.update_tile_sizes(true);
     }
 
