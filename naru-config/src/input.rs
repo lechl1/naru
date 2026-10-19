@@ -5,7 +5,7 @@ use smithay::input::keyboard::XkbConfig;
 use smithay::reexports::input;
 
 use crate::binds::Modifiers;
-use crate::utils::{Flag, MergeWith, Percent};
+use crate::utils::{Flag, MergeWith, Percent, RegexEq};
 use crate::FloatOrInt;
 
 #[derive(Debug, Default, PartialEq)]
@@ -91,6 +91,29 @@ pub struct Keyboard {
     pub repeat_rate: u8,
     pub track_layout: TrackLayout,
     pub numlock: bool,
+    pub terminal_swap: TerminalSwap,
+}
+
+/// Mac-style modifier swap for terminal windows.
+///
+/// While a window whose app-id matches `app-id` is focused, the modifiers sent to it are
+/// translated: Super becomes Ctrl and Ctrl becomes Ctrl+Shift (Shift is added). Compositor binds
+/// still see the real modifiers. Meant for setups where the keyboard layer sends Cmd as Ctrl and
+/// the Control key as Super, so GUI apps get Cmd shortcuts while terminals keep a real Ctrl for
+/// Ctrl+C and friends. Disabled while `app-id` is unset or `off` is given.
+#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq, Eq)]
+pub struct TerminalSwap {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child, unwrap(argument, str))]
+    pub app_id: Option<RegexEq>,
+}
+
+impl TerminalSwap {
+    pub fn matches(&self, app_id: Option<&str>) -> bool {
+        !self.off
+            && matches!((&self.app_id, app_id), (Some(re), Some(id)) if re.0.is_match(id))
+    }
 }
 
 impl Default for Keyboard {
@@ -102,6 +125,7 @@ impl Default for Keyboard {
             repeat_rate: 25,
             track_layout: Default::default(),
             numlock: Default::default(),
+            terminal_swap: Default::default(),
         }
     }
 }
@@ -118,11 +142,13 @@ pub struct KeyboardPart {
     pub track_layout: Option<TrackLayout>,
     #[knuffel(child)]
     pub numlock: Option<Flag>,
+    #[knuffel(child)]
+    pub terminal_swap: Option<TerminalSwap>,
 }
 
 impl MergeWith<KeyboardPart> for Keyboard {
     fn merge_with(&mut self, part: &KeyboardPart) {
-        merge_clone!((self, part), xkb, repeat_delay, repeat_rate, track_layout);
+        merge_clone!((self, part), xkb, repeat_delay, repeat_rate, track_layout, terminal_swap);
         merge!((self, part), numlock);
     }
 }

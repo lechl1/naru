@@ -1388,6 +1388,7 @@ impl State {
 
             self.naru.keyboard_focus.clone_from(&focus);
             keyboard.set_focus(self, focus.into_surface(), SERIAL_COUNTER.next_serial());
+            self.send_terminal_modifiers();
 
             // FIXME: can be more granular.
             self.naru.queue_redraw_all();

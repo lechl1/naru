@@ -1230,6 +1230,10 @@ mod tests {
                     repeat_rate: 25,
                     track_layout: Window,
                     numlock: false,
+                    terminal_swap: TerminalSwap {
+                        off: false,
+                        app_id: None,
+                    },
                 },
                 touchpad: Touchpad {
                     off: false,

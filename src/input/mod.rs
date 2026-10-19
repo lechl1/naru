@@ -19,7 +19,10 @@ use smithay::backend::input::{
 };
 use smithay::backend::libinput::LibinputInputBackend;
 use smithay::input::dnd::DnDGrab;
-use smithay::input::keyboard::{keysyms, FilterResult, Keysym, Layout, ModifiersState};
+use smithay::input::keyboard::xkb::MOD_INVALID as XKB_MOD_INVALID;
+use smithay::input::keyboard::{
+    keysyms, FilterResult, KeyboardTarget, Keysym, Layout, ModifiersState, SerializedMods,
+};
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, Focus, GestureHoldBeginEvent,
     GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -34,6 +37,8 @@ use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Transform, SERIAL_COUNTER};
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
@@ -112,6 +117,41 @@ impl<D: SeatHandler> PointerOrTouchStartData<D> {
 }
 
 impl State {
+    /// Whether the focused toplevel matches `input.keyboard.terminal-swap`.
+    fn focused_terminal(&self) -> Option<WlSurface> {
+        let surface = self.naru.keyboard_focus.surface()?;
+        let config = self.naru.config.borrow();
+        let swap = &config.input.keyboard.terminal_swap;
+        let app_id = with_states(surface, |states| {
+            let data = states.data_map.get::<XdgToplevelSurfaceData>()?;
+            let role = data.lock().unwrap();
+            role.app_id.clone()
+        });
+        swap.matches(app_id.as_deref()).then(|| surface.clone())
+    }
+
+    /// Re-sends the modifiers to a focused terminal with Super and Ctrl swapped Mac-style.
+    ///
+    /// smithay sends the real modifiers on focus changes and modifier key events, so this runs
+    /// right after those. It is a no-op unless `terminal-swap` matches the focused window.
+    pub fn send_terminal_modifiers(&mut self) {
+        let Some(surface) = self.focused_terminal() else {
+            return;
+        };
+        let keyboard = self.naru.seat.get_keyboard().unwrap();
+        let mut mods = keyboard.modifier_state();
+        let bits = keyboard.with_xkb_state(self, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            // SAFETY: the keymap is only read for the modifier indices.
+            let keymap = unsafe { xkb.keymap() };
+            [XKB_MOD_NAME_CTRL, XKB_MOD_NAME_SHIFT, XKB_MOD_NAME_LOGO]
+                .map(|name| keymap.mod_get_index(name))
+        });
+        mods.serialized = swap_modifiers(mods.serialized, bits);
+        let seat = self.naru.seat.clone();
+        KeyboardTarget::modifiers(&surface, &seat, self, mods, SERIAL_COUNTER.next_serial());
+    }
+
     pub fn process_input_event<I: InputBackend + 'static>(&mut self, event: InputEvent<I>)
     where
         I::Device: 'static, // Needed for downcasting.
@@ -444,12 +484,11 @@ impl State {
         #[cfg(not(feature = "dbus"))]
         let _ = consumed_by_a11y;
 
-        let Some(Some(bind)) = self.naru.seat.get_keyboard().unwrap().input(
+        let keyboard = self.naru.seat.get_keyboard().unwrap();
+        let (filter_result, mods_changed) = keyboard.input_intercept(
             self,
             event.key_code(),
             event.state(),
-            serial,
-            time,
             |this, mods, keysym| {
                 let key_code = event.key_code();
                 let modified = keysym.modified_sym();
@@ -620,8 +659,19 @@ impl State {
 
                 res
             },
-        ) else {
-            return;
+        );
+
+        let bind = match filter_result {
+            FilterResult::Intercept(Some(bind)) => bind,
+            FilterResult::Intercept(None) => return,
+            FilterResult::Forward => {
+                keyboard.input_forward(self, event.key_code(), event.state(), serial, time, mods_changed);
+                if mods_changed {
+                    // smithay just sent the real modifiers; terminals get the swapped ones.
+                    self.send_terminal_modifiers();
+                }
+                return;
+            }
         };
 
         if !pressed {
@@ -4716,6 +4766,35 @@ fn find_configured_switch_action(
         .map(|switch_action| Action::Spawn(switch_action.spawn.clone()))
 }
 
+const XKB_MOD_NAME_CTRL: &str = "Control";
+const XKB_MOD_NAME_SHIFT: &str = "Shift";
+const XKB_MOD_NAME_LOGO: &str = "Mod4";
+
+/// Swaps Super and Ctrl for a terminal: Super becomes Ctrl, Ctrl becomes Ctrl+Shift.
+///
+/// `bits` holds the xkb modifier indices of Control, Shift and Super (`XKB_MOD_INVALID` if the
+/// keymap lacks one, which makes the swap a no-op). Only depressed and latched mods are touched;
+/// locked ones (Caps Lock, Num Lock) pass through.
+fn swap_modifiers(mut mods: SerializedMods, [ctrl, shift, logo]: [u32; 3]) -> SerializedMods {
+    if [ctrl, shift, logo].contains(&XKB_MOD_INVALID) {
+        return mods;
+    }
+    let (ctrl, shift, logo) = (1u32 << ctrl, 1u32 << shift, 1u32 << logo);
+    let swap = |m: u32| {
+        let mut out = m & !logo;
+        if m & logo != 0 {
+            out |= ctrl;
+        }
+        if m & ctrl != 0 {
+            out |= ctrl | shift;
+        }
+        out
+    };
+    mods.depressed = swap(mods.depressed);
+    mods.latched = swap(mods.latched);
+    mods
+}
+
 fn modifiers_from_state(mods: ModifiersState) -> Modifiers {
     let mut modifiers = Modifiers::empty();
     if mods.ctrl {
@@ -5320,6 +5399,32 @@ fn make_binds_iter<'a>(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn terminal_swap_modifiers() {
+        // Control=2, Shift=0, Mod4=6, as in a stock xkb keymap.
+        let bits = [2, 0, 6];
+        let m = |depressed| SerializedMods {
+            depressed,
+            ..Default::default()
+        };
+        let (shift, ctrl, logo) = (1, 1 << 2, 1 << 6);
+        // Super -> Ctrl.
+        assert_eq!(swap_modifiers(m(logo), bits).depressed, ctrl);
+        // Ctrl -> Ctrl+Shift.
+        assert_eq!(swap_modifiers(m(ctrl), bits).depressed, ctrl | shift);
+        // Both -> Ctrl+Shift; an existing Shift stays.
+        assert_eq!(swap_modifiers(m(logo | ctrl), bits).depressed, ctrl | shift);
+        assert_eq!(swap_modifiers(m(logo | shift), bits).depressed, ctrl | shift);
+        // Alt and locked mods pass through.
+        let alt = 1 << 3;
+        let mut with_lock = m(alt);
+        with_lock.locked = logo;
+        let out = swap_modifiers(with_lock, bits);
+        assert_eq!((out.depressed, out.locked), (alt, logo));
+        // A keymap without the modifiers is left alone.
+        assert_eq!(swap_modifiers(m(logo), [2, 0, XKB_MOD_INVALID]).depressed, logo);
+    }
     use std::cell::Cell;
 
     use super::*;
